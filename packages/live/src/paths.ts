@@ -18,12 +18,17 @@ export const NEVER_TOUCH: string[] = [
   'metrics/',
   '.gitignore',
   'compile-errors.txt',
-  'support/',
-  'thirdparty/',
+  // Hand-written support code; ghidra_version.cpp in it is written by the regen and
+  // the daemon after the sync, not by the generator.
+  'Redivivus/',
+  // Vendored code and the licensed DLLs' import-library definitions.
+  '3rdparty/libbacktrace/',
+  '3rdparty/implibs/',
   'sites2.tsv',
-  // Written by the regen and the daemon after the sync, not by the generator.
-  'ghidra_version.cpp',
 ];
+
+/** The Ghidra version file the regen and the daemon write (it is not generator output). */
+export const VERSION_FILE = 'Redivivus/ghidra_version.cpp';
 
 /**
  * Is this output-relative path off limits?

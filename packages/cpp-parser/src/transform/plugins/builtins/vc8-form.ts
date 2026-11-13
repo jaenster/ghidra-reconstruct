@@ -23,16 +23,25 @@
  *                        a call.
  *   fold(V)              each value stored to local V is written into its uses up to the
  *                        next store to V, and the store goes; `*V` of a stored `&X` is X.
- *                        V's declaration goes once nothing names V. Refused when V's
- *                        address is taken or a store in between writes a name the value
- *                        reads.
+ *                        V's declaration goes once nothing names V. A compound store
+ *                        `V op= K` right after the store is part of the value (E op K).
+ *                        A use that copies V back into the place its value came from
+ *                        (`S = X; ... X = S;`) stores nothing once folded and goes.
+ *                        Refused when V's address is taken or a store in between writes a
+ *                        name the value reads.
+ *   join(V2,V1)          a top-level initialized local V2 becomes an update of the earlier
+ *                        signed 32-bit local or parameter V1; later V2 uses read V1. A
+ *                        plain copy V2 = V1 goes. Refused unless V1's old value is dead
+ *                        on every path, including loop backedges, and V2's declaration
+ *                        dominates every use. Neither variable may escape.
  *   cache(E,N,T[,@A])    a new local `T N = E;` before the statement storing A, or the
  *                        if/while/switch testing A (default: before the first statement
  *                        that evaluates E, in the innermost block holding every E), and
  *                        every E from there to the block's end reads N; for E = `&X`, each
  *                        X reads `*N` (`X.m` reads `N->m`). With an anchor, reads before it
- *                        keep E; `cache(E,N,T,@A,k)` moves only the first k reads. Refused
- *                        when E or a name in E is stored in that range.
+ *                        keep E; `cache(E,N,T,@A,k)` moves only the first k reads. `@call`
+ *                        selects the unique call statement that reads E, for a pure &member.
+ *                        Refused when E or a name in E is stored in that range.
  *   cache(E,N)           N is an existing local stored from E: each E after that store
  *                        reads N, up to the next store to E or N.
  *   own(V,T[,N])         V's initializer is a dead copy Ghidra merged into it: V is
@@ -47,8 +56,25 @@
  *                        `return K;`.
  *   width(V,T)           local V is declared T; a cast of V to T, a cast to V's old type
  *                        stored into V, and a cast of V to T's width in a truth test go.
- *   arms(C)              the if/else whose condition prints C is written with the
- *                        condition negated and the arms swapped.
+ *   boolflag(V)          the bool local V, stored only `true`/`false` and read only as a
+ *                        condition (an if/loop/`?:` test, an operand of `!`, `&&`, `||`), is
+ *                        declared BOOL and stores 1/0: the original's flag lives in a 32-bit
+ *                        register (`MOV EBX,1` / `TEST EBX,EBX`, FINDTILE_Register 0060cfa0).
+ *                        Refused for any other store or read, or when V's address or size
+ *                        is taken.
+ *   retwiden(V)          the one- or two-byte integer local V, stored at least once from a
+ *                        call, is declared int32_t and every value stored becomes `(T)E` for
+ *                        its old type T: it holds what the narrow V held, and every read
+ *                        promotes either to the same int (HandleMouseButtonEvent 0044c5e0, a
+ *                        `MOVZX` once at the call instead of at each read). Refused when V's
+ *                        address or size is taken, it is modified in place, or it is in a
+ *                        brace-enclosed initializer.
+ *   arms(C[,wrap][,i])   the if/else whose condition prints C is written with the
+ *                        condition negated and the arms swapped; `wrap` negates a
+ *                        condition that is not a comparison or `!x` as `!(C)`, not by
+ *                        De Morgan (NPCMENU_OpenNpcShop 004b3d40, with zero(C)). Without
+ *                        i the first if/else on C, else the i-th (in preorder); refused
+ *                        when its else arm is an else-if chain.
  *
  * Control-flow forms (C is the printed condition of an `if` with no else; `[,i]` picks the
  * i-th such if, default 1):
@@ -60,6 +86,19 @@
  *                        written `if (!C) { the statements between }` before that return;
  *                        an if on C whose arm ends in `return E;` and falls through to
  *                        `return E;` loses the arm's copy.
+ *   tailguard(C[,i])     in a void function, the i-th top-level `if (!V) { BODY }`
+ *                        followed only by two calls of the same function is written
+ *                        `if (V) { calls; return; } { BODY } calls;`. V must be one
+ *                        integral local or parameter. The BODY keeps its scope;
+ *                        exits and labels inside BODY are refused.
+ *   tailcopy(C[,i])      the if on C followed by the rest T of its block, which ends in a
+ *                        return (or is the end of a void function), is written `if (!C)
+ *                        { T } { BODY } T`: the tail the arm falls into is also printed on
+ *                        the path that skips the arm. Blizzard wrote the copy; VC8
+ *                        cross-jumps the two and keeps the first, which the arm's end then
+ *                        jumps back into (Q05_Callback13_PlayerStartedGame 00595860,
+ *                        `je 005958b0`). Refused when the arm always leaves, T holds a
+ *                        label or a static declaration, or C may compare floating point.
  *   continue(C[,i])      the guard `if (C) J` that ends a loop body is written
  *                        `if (!C) continue;` followed by J's statements.
  *   select(C[,i])        the guard `if (C) return A;` followed by its block's last
@@ -68,12 +107,26 @@
  *   dup(S)               the expression statement S after an if/else (an else-if chain
  *                        with a final else) is written at the end of every arm instead;
  *                        refused when an arm can leave.
+ *   hoist(S[,i])         the plain store S that begins the arm of an if with no else is
+ *                        written just before the if (the decompiler sinks a store into the
+ *                        only branch that reads it; the source as often wrote it above
+ *                        the test, D2WINTIMER_GetElapsed 004fd8f0). Refused unless the
+ *                        extra store on the untaken path is dead and nothing moves past
+ *                        anything it depends on: S stores into a local named nowhere
+ *                        outside the arm, its value loads no memory through a pointer,
+ *                        divides by nothing and has no side effect, and C calls and
+ *                        stores nothing.
  *
  * Expression forms (E and C are printed expressions; `[,i]` picks the i-th, default: the
  * only one):
  *
  *   tarms(C[,i])         the conditional `C ? A : B` is written `!C ? B : A`.
  *   zero(E[,i])          `!E` is written `E == 0`.
+ *   bool(E[,i])          E tested for truth (as nonzero lists, or the operand of `!`, or
+ *                        compared with 0 by == or !=) is written `(bool)(E)`, the same truth.
+ *                        VC8 folds a tested bit `f >> n & 1` into `test dword ptr [f], 1<<n`;
+ *                        converted to bool it keeps the shift, `shr; test` (CLIENT_Get-
+ *                        EffectiveInventory 0046db30, GFX_LoadCompositCof 0046e740).
  *   nonzero(E[,i])       E tested for truth (an if, while or for condition, an operand of
  *                        `&&` or `||`, or the condition of `?:`) is written `E != 0`.
  *   cmp(C,F[,i])         the comparison C is spelled another way: F = mirror (`a < b` as
@@ -81,51 +134,277 @@
  *                        bound: `a < N` as `a <= N-1`, `a >= N` as `a > N-1`, and back),
  *                        mirror-lit (both, in this order).
  *   swap(E[,i])          the commutative `a op b` (+ * & | ^) is written `b op a`.
+ *   shift(E,H[,i])       the shift `E >> k` under a cast to an integer T of w bits, w + k <= 32
+ *                        (not bool), is written arithmetic (H = sar: `(T)((int)E >> k)`, the
+ *                        cast left out for a signed E) or logical (H = shr: `(T)((uint32_t)E
+ *                        >> k)`, likewise). Both shift the same 32 bits; T drops the top k
+ *                        bits where they differ. The decompiler prints a shift whose top bits
+ *                        are dead as logical whatever the original did, and the high word
+ *                        `(WORD)((DWORD)x >> 16)` is split: HIWORD in some functions (shr,
+ *                        PATH_UpdateFixedPoint 00650660), a signed half in others (sar,
+ *                        DATAARRAY_GetSlot 006bccd0). E must be a local or parameter of a
+ *                        known integer type of at most 32 bits.
  *   ifsel(V)             `V = C ? A : B;` (or the declaration of V so initialized) is
  *                        written `if (C) { V = A; } else { V = B; }`.
-
+ *   clamp(V[,i])         the i-th adjacent `V = E; if (V op L) V = L;` (also a
+ *                        declaration initialized from E) is written as one select
+ *                        `V = E !op L ? E : L;`. Without i, only one site may fit.
+ *                        V must be one nonstatic 32-bit integer local. Refused if E or L
+ *                        has effects, names V, or V's address is taken; and unless E is
+ *                        an int once promoted (an int, a narrower integer, arithmetic over
+ *                        those) and L an integer of at most 32 bits, so E stands in for V
+ *                        in the test and the select stores what V held.
+ *                        Because E is read twice, the tagger must also verify that E
+ *                        and L have stable nonvolatile reads; this AST has no global or
+ *                        member declaration facts to prove that property by itself.
+ *
  *   decl(V,W)            the declaration of V without an initializer moves to just before
  *                        the declaration of W in its block; refused when a statement it
  *                        moves past names V.
  *   split(V,T,N)         the store `V = E;` that begins a new life of V is written
- *                        `T N = E;` and that life's reads read N; refused when V is read
- *                        again after them before a new store, or inside a loop.
+ *                        `T N = E;` and that life's reads read N (E may read V: it reads
+ *                        the old value, and keeps V); refused when V is read again after
+ *                        them before a new store, or inside a loop.
+ *   tsel(C[,i])          the i-th `if (C) { V1 = A1; ... } else { V1 = B1; ... }` storing the
+ *                        same locals in both arms, followed by a call statement reading each
+ *                        Vk once as a whole argument, is written with each read `C ? Ak : Bk`;
+ *                        the if goes, and each Vk's declaration once nothing names it
+ *                        (select-argument.ts, `selectPairedArguments`, says when it holds).
+ *
+ * Call and string-instruction forms (`[,i]` picks the i-th site, default: the only one):
+ *
+ *   nestcall(V[,i])      the store `V = F(...);` (or `T V = F(...);`) whose next statement
+ *                        reads V once - as a whole call argument, or as the object of `->`
+ *                        or `.` - is written with the call in that place, the store gone (a
+ *                        declaration keeps `T V;` while V is named elsewhere). VC8 pushes
+ *                        the arguments right of a nested call before calling it, as the
+ *                        original does (Q04_ActiveFilter 00592fb0, `push 'bks '` before
+ *                        `call GetGamePointer`). Refused unless V is a local whose address
+ *                        is not taken, that is dead after that statement and whose type
+ *                        cannot convert the value (no narrower, wider or floating
+ *                        arithmetic type), and unless everything the statement may evaluate
+ *                        before the call in its new place - the other arguments of each
+ *                        call around it, the other operand of each operator, the callee -
+ *                        calls nothing, stores nothing and reads only such locals and
+ *                        constants; refused under `&&`, `||` or `?:` arms, which would make
+ *                        the call conditional, and in a loop condition.
+ *   fill(A[,i])          `memset(A[ + K], 0, N * sizeof(A[0]));` (or a byte count, A a
+ *                        local array of a scalar whose size divides it), and the pointer
+ *                        loop the string instruction decompiles to, `P = A; for (N = K; N;
+ *                        N--) { P[0] = 0; ... P[m-1] = 0; P += m; }` (or `*P = 0; P++;`),
+ *                        are written `for (int i = K; i < K + N; i++) A[i] = 0;` - VC8 never
+ *                        expands a memset beyond 32 bytes, the original's inline stores
+ *                        come from such a loop (SKILLDESC_FormatSignedValue 004e79e0,
+ *                        AUTOMAP_DrawGamePassword 00459e90). The pointer loop's P and N
+ *                        must be locals dead after it; refused when a bound leaves int.
+ *   elems(A[,i])         `memset(A[ + K], 0, N * sizeof(A[0]));` (or a byte count, A a local
+ *                        array of a scalar whose size divides it), N at most 16, is written
+ *                        as the N element stores `A[K] = 0; ... A[K+N-1] = 0;`: where the
+ *                        original stores each element, VC8 stores them so, in the order
+ *                        written, where a memset becomes its own dword runs and register
+ *                        choice (UI_ConfigHandleMouseClick 004a5e60 into
+ *                        INPUT_ConfigMouseDown 004a5f10, seven dword stores).
+ *   acc(E[,i])           the read E of a unit field, printed `X->F` (or `X->F.G`), that an
+ *                        accessor of the tables names (`accessors`: a header inline that
+ *                        returns the field, or a constant when X is null) is written as
+ *                        the call of that accessor's inline twin, `A(X)`, defined once in
+ *                        the unit ahead of the function (Vc8FormSite.prefix). The twin has
+ *                        two returns, `if (X) { return X->F; } return K;`, and VC8 keeps
+ *                        the value it returns in a register of its own where it folds a
+ *                        plain read into the instruction that uses it
+ *                        (MONSTERAI_IsValidResurrectionTarget 005eb650 `mov eax, [esi];
+ *                        cmp eax, 1`, CLIENT_StoreUnitGuidForQuestTracking 0046bc70 `or
+ *                        eax, -1; mov [g], eax`). A null test of X the read sits behind
+ *                        goes with it where the accessor's K gives the same truth: `X &&
+ *                        X->F == C` and `!X || X->F != C` for C other than K, and `X ?
+ *                        X->F : K`; `acc(E[,i],bare)` leaves the test as printed and
+ *                        writes the read alone (CLIENT_StoreUnitGuidForQuestTracking
+ *                        0046bc70 keeps `!pUnit ? -1 : A(pUnit)`). X must name a pointer
+ *                        to the accessor's struct and read nothing but names and members.
+ *   retvar(C,N[,i])      the guard `if (C) { ...; return X; }` followed by the function's
+ *                        last statement `return K;` (K a constant) is written with a result
+ *                        variable: `T N = K;` just before the if, `N = X;` ending its arm,
+ *                        and `return N;` - T the function's return type. VC8 returns the
+ *                        K it put in a register for N (WEATHER_GetCurrentLevelWeatherFlags
+ *                        00473770: `xor ecx, ecx` ... `mov eax, ecx`). Refused when the arm
+ *                        leaves other than through its last return, or N names something.
+ *   onecall(C,N[,i])     the guard `if (C) { F(..., X, ...); return; }` followed by the
+ *                        function's last statement, the same call with Y in that one
+ *                        argument, is written as one call: `T N; if (C) { N = X; } else {
+ *                        N = Y; } F(..., N, ...);`, T the parameter's type. VC8 duplicates
+ *                        the call into both arms itself and passes the zero arm's value
+ *                        from a register (SUNITNPC_CloseNpcInteraction 00579130, `xor eax,
+ *                        eax; push eax`). Refused unless every other argument loads nothing
+ *                        and X and Y call and store nothing, as their evaluation moves
+ *                        ahead of the other arguments.
+ *   roundup(V[,P])       the round-up `if (V % G) { V = G - V % G + V; }` of the unsigned
+ *                        32-bit locals V and G is written `V = D2_RoundUp(V, G);`, through an
+ *                        inline helper that changes and returns its parameter, defined once
+ *                        in the unit ahead of the function (Vc8FormSite.prefix): VC8 computes
+ *                        the rounded value in a register of its own and stores it back
+ *                        (TSGrowableArray<SGAMEDATA>::Reserve 00450e70, `mov esi, ecx` after
+ *                        the add). With P, V's declaration `T V = P + E;` (or `E + P`) becomes
+ *                        `P = P + E;` and V reads P: the sum is the parameter. Refused unless
+ *                        there is exactly one such if, P is a parameter of V's exact type that
+ *                        nothing else names, and V's declaration sits in the function's own
+ *                        block and its address is not taken.
+ *   opas(V,op,K)         two guarded reads of one local `V op K` become one
+ *                        `V op= K` before the first read. Only signed 32-bit `+ 1`
+ *                        under `V != -1`, or byte `(uint8_t)(V - 1)` under a
+ *                        nonzero guard, is admitted. `opas(V,>>,K)`: V a 32-bit
+ *                        integer local or parameter never stored, every later read
+ *                        `V >> K` with K in 1..31; `V >>= K;` goes after the last
+ *                        statement of the reads' block that names V (after updates
+ *                        already there, so tags keep their order). Shadowing, stale
+ *                        reads, crossed effects, any goto or label, reads in a loop,
+ *                        and memory that may be an addressed V refuse it.
+ *   swmerge(V[,i])       the range tests the compiler wrote around a switch on V are merged
+ *                        back into it: `if (V <= U) { if (V != K) { switch (V) { ... default:
+ *                        L } } } else { if (c1) L ... if (cn) L }`, L the default's leaving
+ *                        statement, becomes the switch alone, with K and every value above U
+ *                        that passes the guards as labels of its group of cases that only
+ *                        break (or a new such group before the default). VC8 tests the far
+ *                        values itself and subtracts the first case with `sub`
+ *                        (OBJECT_AddVisualOverlay 004bc8d0). Refused unless the guards read
+ *                        only V and constants, the values passing them are at most 64, and
+ *                        every existing label lies below U and is not K: a label the tests
+ *                        made dead would come alive.
+ *   copy(D[,i])          the copy loop `for (N = K; N; N--) { *D = *S; S++; D++; }` is
+ *                        written `memcpy(D, S, K * sizeof(*D));`, which VC8 expands to the
+ *                        original's `rep movsd`. D and S must be declared pointers to one
+ *                        type and, with N, locals dead after the loop; and the two ranges
+ *                        provably apart: one of D and S is stored, in the loop's block and
+ *                        outside any loop, the address of a local named nowhere before that
+ *                        store - a loop copying within one buffer (Fog's D2Net 0040b0c0
+ *                        smears zeros forward) is no memcpy.
+ *   dec(V,K)             before the first condition that reads `V - K`, write `V -= K;`
+ *                        and use V at every subsequent `V - K` read. V must be one
+ *                        unaliased 32-bit integer local, have at least two such reads,
+ *                        and have no other read or store after the new decrement.
+ *   range(C[,i])         the unsigned comparison C of a difference with a constant, `K < E - L`
+ *                        (`E - L > K`, `E - L >= K`, `E - L < K` and the mirrors; the difference
+ *                        unsigned by a `U` on L, E's own type or a cast to a 32-bit unsigned
+ *                        type), is written as the range test it lowers: `E < L || E > L + K`,
+ *                        or `E >= L && E <= L + K` for the inside. VC8 computes the lowered
+ *                        spelling with `sub r, L` and the range test with `add r, -L`
+ *                        (Unreferenced_004e41e0 004e41e0). E must be a 32-bit integer local or
+ *                        parameter, L at least 1 and L + K within E's type, so that [L, L + K]
+ *                        is one interval in E's signed and unsigned reading alike.
+ *   castout(E[,i])       the sum or difference E, `(T)X - Y` (or `+`) with T an integer type
+ *                        narrower than 32 bits, whose value is returned or stored into a local
+ *                        of an integer type R no wider than T, is written `(R)(X - Y)`: the
+ *                        low bits of a sum depend only on the low bits of its operands, and R
+ *                        keeps no more of them than T did. VC8 subtracts the narrowed value
+ *                        with `sub r, K` and the int with `add r, -K` (GetActNoFromLevelNumber
+ *                        006427f0). X must be an integer local or parameter, Y an integer
+ *                        literal, such a local or an enum-style constant.
+ *   signbit(C[,i])       the sign test C, `E < 0` or `E >= 0` of a 32-bit integer local or
+ *                        parameter E (or `(int)X` of one), standing tested for truth (an
+ *                        if/while/for/`?:` condition, an operand of `&&`, `||` or `!`), is
+ *                        written `X & 0x80000000` or `!(X & 0x80000000)`: the same bit 31.
+ *                        VC8 gives the signed test JL/JGE and the mask JS/JNS after the same
+ *                        `test r, r` (DRLGLOGIC_PopulateGridCoordIndices 0066c580, a flags
+ *                        word). Per function: where the original's JS/JNS reuses the flags
+ *                        of an arithmetic instruction instead, the mask costs a `test`.
+ *   switch(X[,i])        the i-th `if (X != K1) { if (X == K2 [&& R]) B2 } else B1` (or
+ *                        `if (X == K1) B1 else if (X == K2 [&& R]) B2`), K1 and K2 two
+ *                        constants, is written `switch (X) { case K2: { [if (R)] B2 }
+ *                        case K1: { B1 } }`, each body followed by `break;` unless it
+ *                        always leaves. Also `if (X != K1) { if (X != K2) J R } T` with
+ *                        J, R and the rest T of the block each always leaving: written
+ *                        `switch (X) { case K2: { R } case K1: { T } } J`. Refused when X
+ *                        calls or mutates state, or an arm holds a label or a break that
+ *                        would leave the switch. Case values are integer literals or
+ *                        uppercase enum-style names that are not local variables.
  */
 
-import { NodeKind } from '../../../ast/kinds.js';
+import { NodeKind, isExpression, isType } from '../../../ast/kinds.js';
 import type {
-  ASTNode, AssignExpr, BinaryExpr, CompoundStmt, ConditionalExpr, CStyleCastExpr, DeclStmt, Expression,
-  ExprStmt, FunctionDecl, Identifier, IfStmt, IntegerLiteralExpr, ParenExpr, ReturnStmt, Statement, TranslationUnit,
+  ASTNode, AssignExpr, BinaryExpr, CallExpr, CompoundStmt, ConditionalExpr, CStyleCastExpr, DeclStmt, Expression,
+  ExprStmt, ForStmt, FunctionDecl, Identifier, IfStmt, IntegerLiteralExpr, MemberExpr, ParenExpr, ReturnStmt, Statement, SubscriptExpr, TranslationUnit,
   TypeNode, UnaryExpr, VariableDecl,
 } from '../../../ast/nodes.js';
 import { parse } from '../../../parser/index.js';
 import { emit } from '../../../emit/index.js';
 import { cloneNode } from '../../transformer.js';
+import { buildFunctionFlow } from '../../cfg/index.js';
+import { selectPairedArguments, SelectRefused, type SelectArgumentOptions } from './select-argument.js';
+import { createExprShape } from './expr-shape.js';
+import { localTypesOf } from './compare-form.js';
+import { calleeName, scopedLookup } from './call-arg-cast.js';
 
 export type Vc8Form =
   | { op: 'seq'; targets: string[]; index?: number }
   | { op: 'fold'; name: string }
+  | { op: 'join'; into: string; from: string }
   | { op: 'cache'; expr: string; name: string; type?: string; anchor?: string; count?: number }
   | { op: 'own'; name: string; type: string; rename?: string }
   | { op: 'guards'; split: number; index: number }
   | { op: 'merge-guards'; index: number }
   | { op: 'retval'; name: string; value: string }
   | { op: 'width'; name: string; type: string }
-  | { op: 'arms'; cond: string }
+  | { op: 'boolflag'; name: string }
+  | { op: 'retwiden'; name: string }
+  | { op: 'arms'; cond: string; wrap?: boolean; index?: number }
   | { op: 'nest'; cond: string; index: number }
   | { op: 'merge-tail'; cond: string; index: number }
+  | { op: 'tailguard'; cond: string; index: number }
+  | { op: 'tailcopy'; cond: string; index: number }
   | { op: 'continue'; cond: string; index: number }
   | { op: 'dup'; stmt: string }
+  | { op: 'hoist'; stmt: string; index: number }
   | { op: 'tarms'; cond: string; index: number }
   | { op: 'zero'; expr: string; index: number }
   | { op: 'nonzero'; expr: string; index: number }
+  | { op: 'bool'; expr: string; index: number }
   | { op: 'cmp'; cond: string; how: 'mirror' | 'lit' | 'mirror-lit'; index: number }
   | { op: 'swap'; expr: string; index: number }
   | { op: 'ifsel'; name: string }
+  | { op: 'clamp'; name: string; index: number }
   | { op: 'select'; cond: string; index: number }
   | { op: 'decl'; name: string; before: string }
   | { op: 'unselect'; cond: string; index: number }
-  | { op: 'split'; name: string; type: string; rename: string };
+  | { op: 'split'; name: string; type: string; rename: string }
+  | { op: 'tsel'; cond: string; index: number }
+  | { op: 'switch'; expr: string; index: number }
+  | { op: 'nestcall'; name: string; index: number }
+  | { op: 'fill'; name: string; index: number }
+  | { op: 'elems'; name: string; index: number }
+  | { op: 'copy'; name: string; index: number }
+  | { op: 'shift'; expr: string; how: 'sar' | 'shr'; index: number }
+  | { op: 'ptrwalk'; counter: string; array: string; name: string; type: string; index: number }
+  | { op: 'rowptr'; expr: string; name: string; type: string; anchor?: string }
+  | { op: 'acc'; expr: string; index: number; bare?: boolean }
+  | { op: 'retvar'; cond: string; name: string; index: number }
+  | { op: 'onecall'; cond: string; name: string; index: number }
+  | { op: 'roundup'; name: string; param?: string }
+  | { op: 'swmerge'; name: string; index: number }
+  | { op: 'opas'; updates: Array<{ name: string; operator: '+' | '-' | '>>'; constant: string }> }
+  | { op: 'dec'; name: string; amount: number }
+  | { op: 'range'; cond: string; index: number }
+  | { op: 'castout'; expr: string; index: number }
+  | { op: 'signbit'; cond: string; index: number };
+
+/**
+ * A header inline that reads one field of a struct through a pointer, or returns a
+ * constant for a null pointer (D2Common::Units::GetGUID 00451f50): `acc` writes a read of
+ * the field as a call of its twin, `call`, whose definition is `definition`.
+ */
+export interface Vc8Accessor {
+  /** The struct the pointer points to, as types name it. */
+  struct: string;
+  /** The field read, outermost first: `['eAnimMode', 'ePlayerMode']`. */
+  path: string[];
+  /** The twin's name, as the call spells it. */
+  call: string;
+  /** The value the accessor returns for a null pointer. */
+  dflt: bigint;
+  /** The twin's definition, written once ahead of the first function that calls it. */
+  definition: string;
+}
+
+/** The tables vc8-form reads: select-argument's, and the accessors `acc` writes. */
+export type Vc8FormTables = SelectArgumentOptions & { accessors?: Vc8Accessor[] };
 
 export interface Vc8FormSite {
   form: Vc8Form;
@@ -133,24 +412,34 @@ export interface Vc8FormSite {
   tag?: string;
   applied: boolean;
   why?: string;
+  /** Definitions an applied form calls, to be written once ahead of the function (`acc`). */
+  prefix?: string[];
 }
 
 export interface Vc8FormOptions {
   forms: Array<{ form: Vc8Form; tag?: string }>;
   onSite?: (site: Vc8FormSite) => void;
+  /** The tables tsel types the values of an if/else from, and the accessors acc writes. */
+  selectTables?: Vc8FormTables;
 }
 
-const OPS = new Set(['seq', 'fold', 'cache', 'own', 'guards', 'merge-guards', 'retval', 'width', 'arms',
-  'nest', 'merge-tail', 'continue', 'dup', 'tarms', 'zero', 'nonzero', 'cmp', 'swap', 'ifsel', 'split', 'select', 'decl', 'unselect']);
+const OPS = new Set(['seq', 'fold', 'join', 'cache', 'own', 'guards', 'merge-guards', 'retval', 'width', 'boolflag', 'retwiden', 'arms',
+  'nest', 'merge-tail', 'tailguard', 'tailcopy', 'continue', 'dup', 'tarms', 'zero', 'nonzero', 'bool', 'cmp', 'swap', 'ifsel', 'clamp', 'split', 'select', 'decl', 'unselect', 'tsel', 'hoist',
+  'nestcall', 'fill', 'elems', 'copy', 'shift', 'ptrwalk', 'rowptr', 'acc', 'retvar', 'onecall', 'roundup', 'swmerge', 'switch', 'dec', 'opas', 'range', 'castout', 'signbit']);
 
-/** Split at the commas outside brackets, parentheses, angle-free. */
-function splitArgs(s: string): string[] {
+/** Split at commas outside brackets and parentheses. For cache, the third argument is a
+ * type, so commas inside its template arguments also belong to that argument. */
+function splitArgs(s: string, cacheType = false): string[] {
   const out: string[] = [];
-  let depth = 0, cur = '';
+  let depth = 0, typeAngles = 0, cur = '';
   for (const ch of s) {
     if (ch === '(' || ch === '[' || ch === '{') depth++;
     else if (ch === ')' || ch === ']' || ch === '}') depth--;
-    if (ch === ',' && depth === 0) { out.push(cur.trim()); cur = ''; continue; }
+    if (cacheType && out.length === 2 && depth === 0) {
+      if (ch === '<') typeAngles++;
+      else if (ch === '>' && typeAngles > 0) typeAngles--;
+    }
+    if (ch === ',' && depth === 0 && typeAngles === 0) { out.push(cur.trim()); cur = ''; continue; }
     cur += ch;
   }
   if (cur.trim() !== '' || out.length > 0) out.push(cur.trim());
@@ -164,7 +453,7 @@ function splitArgs(s: string): string[] {
 export function parseVc8Form(text: string): Vc8Form | undefined {
   const m = /^\s*([a-z-]+)\s*\(([\s\S]*)\)\s*$/.exec(text);
   if (!m || !OPS.has(m[1])) return undefined;
-  const args = splitArgs(m[2]);
+  const args = splitArgs(m[2], m[1] === 'cache');
   const anchor = args.length > 0 && args[args.length - 1].startsWith('@') ? args.pop()!.slice(1) : undefined;
   const int = (s: string | undefined, d: number) => (s === undefined || s === '' ? d : /^\d+$/.test(s) ? Number(s) : NaN);
   switch (m[1]) {
@@ -174,6 +463,8 @@ export function parseVc8Form(text: string): Vc8Form | undefined {
       return args.length >= 2 && (n === 0 || n >= 1) ? { op: 'seq', targets: args, ...(n ? { index: n } : {}) } : undefined;
     }
     case 'fold': return args.length === 1 && !anchor ? { op: 'fold', name: args[0] } : undefined;
+    case 'join': return args.length === 2 && !anchor && args.every(a => /^[A-Za-z_]\w*$/.test(a)) && args[0] !== args[1]
+      ? { op: 'join', into: args[0], from: args[1] } : undefined;
     case 'cache':
       if (args.length === 2 && !anchor) return { op: 'cache', expr: args[0], name: args[1] };
       if (args.length === 3) return { op: 'cache', expr: args[0], name: args[1], type: args[2], anchor };
@@ -195,16 +486,82 @@ export function parseVc8Form(text: string): Vc8Form | undefined {
     }
     case 'retval': return args.length === 2 && !anchor ? { op: 'retval', name: args[0], value: args[1] } : undefined;
     case 'width': return args.length === 2 && !anchor ? { op: 'width', name: args[0], type: args[1] } : undefined;
-    case 'arms': return args.length === 1 && !anchor ? { op: 'arms', cond: args[0] } : undefined;
-    case 'nest': case 'merge-tail': case 'continue': case 'select': {
+    case 'boolflag': case 'retwiden':
+      return args.length === 1 && !anchor && /^[A-Za-z_]\w*$/.test(args[0]) ? { op: m[1], name: args[0] } as Vc8Form : undefined;
+    case 'arms': {
+      // `arms(C)`, `arms(C,wrap)`, `arms(C,i)`, `arms(C,wrap,i)`.
+      if (anchor || args.length < 1 || args.length > 3 || args[0] === '') return undefined;
+      const rest = args.slice(1);
+      const wrap = rest[0] === 'wrap';
+      if (wrap) rest.shift();
+      if (rest.length > 1 || (rest.length === 1 && !/^[1-9]\d*$/.test(rest[0]))) return undefined;
+      return { op: 'arms', cond: args[0], ...(wrap ? { wrap: true } : {}), ...(rest.length ? { index: Number(rest[0]) } : {}) };
+    }
+    case 'ptrwalk': {
+      // `ptrwalk(i,X,N,T)`, `ptrwalk(i,X,N,T,k)`: the k-th for loop counting i.
+      const i = int(args[4], 0);
+      if (anchor || args.length < 4 || args.length > 5 || !(i >= 0) || !/^[A-Za-z_]\w*$/.test(args[0])
+        || !/^[A-Za-z_][\w:]*$/.test(args[1]) || !/^[A-Za-z_]\w*$/.test(args[2]) || args[3] === '') return undefined;
+      return { op: 'ptrwalk', counter: args[0], array: args[1], name: args[2], type: args[3], index: i };
+    }
+    case 'rowptr':
+      // `rowptr(X[I],N,T)`, `rowptr(X[I],N,T,@A)`.
+      if (args.length !== 3 || !/\]$/.test(args[0]) || !/^[A-Za-z_]\w*$/.test(args[1]) || args[2] === '') return undefined;
+      return { op: 'rowptr', expr: args[0], name: args[1], type: args[2], ...(anchor ? { anchor } : {}) };
+    case 'nestcall': case 'fill': case 'elems': case 'copy': {
+      const i = int(args[1], 0);
+      if (anchor || args.length < 1 || args.length > 2 || !(i >= 0) || !/^[A-Za-z_]\w*$/.test(args[0])) return undefined;
+      return { op: m[1], name: args[0], index: i } as Vc8Form;
+    }
+    case 'nest': case 'merge-tail': case 'tailguard': case 'tailcopy': case 'continue': case 'select': case 'tsel': {
       const i = int(args[1], 1);
       if (anchor || args.length < 1 || args.length > 2 || !(i >= 1) || args[0] === '') return undefined;
       return { op: m[1], cond: args[0], index: i } as Vc8Form;
     }
-    case 'zero': case 'nonzero': case 'swap': case 'tarms': case 'unselect': {
+    case 'retvar': case 'onecall': {
+      const i = int(args[2], 1);
+      if (anchor || args.length < 2 || args.length > 3 || !(i >= 1) || args[0] === '' || !/^[A-Za-z_]\w*$/.test(args[1])) return undefined;
+      return { op: m[1], cond: args[0], name: args[1], index: i } as Vc8Form;
+    }
+    case 'swmerge': {
+      const i = int(args[1], 1);
+      if (anchor || args.length < 1 || args.length > 2 || !(i >= 1) || !/^[A-Za-z_]\w*$/.test(args[0])) return undefined;
+      return { op: 'swmerge', name: args[0], index: i };
+    }
+    case 'roundup': {
+      const id = /^[A-Za-z_]\w*$/;
+      if (anchor || args.length < 1 || args.length > 2 || !id.test(args[0]) || (args.length === 2 && !id.test(args[1]))) return undefined;
+      return { op: 'roundup', name: args[0], ...(args.length === 2 ? { param: args[1] } : {}) };
+    }
+    case 'opas': {
+      if (anchor || args.length !== 3) return undefined;
+      const updates = [] as Array<{ name: string; operator: '+' | '-' | '>>'; constant: string }>;
+      for (let j = 0; j < args.length; j += 3) {
+        if (!/^[A-Za-z_]\w*$/.test(args[j]) || !['+', '-', '>>'].includes(args[j + 1])
+          || !/^(?:0x[0-9a-fA-F]+|[1-9]\d*)$/.test(args[j + 2])) return undefined;
+        updates.push({ name: args[j], operator: args[j + 1] as '+' | '-' | '>>', constant: args[j + 2] });
+      }
+      return { op: 'opas', updates };
+    }
+    case 'acc': {
+      // `acc(E)`, `acc(E,i)`, `acc(E,bare)`, `acc(E,i,bare)`.
+      const rest = args.slice(1);
+      const bare = rest[rest.length - 1] === 'bare';
+      if (bare) rest.pop();
+      const i = int(rest[0], 0);
+      if (anchor || args.length < 1 || rest.length > 1 || !(i >= 0) || args[0] === '') return undefined;
+      return { op: 'acc', expr: args[0], index: i, ...(bare ? { bare: true } : {}) };
+    }
+    case 'zero': case 'nonzero': case 'bool': case 'swap': case 'tarms': case 'unselect': {
       const i = int(args[1], 0);
       if (anchor || args.length < 1 || args.length > 2 || !(i >= 0) || args[0] === '') return undefined;
       return (m[1] === 'tarms' || m[1] === 'unselect' ? { op: m[1], cond: args[0], index: i } : { op: m[1], expr: args[0], index: i }) as Vc8Form;
+    }
+    case 'shift': {
+      const i = int(args[2], 0);
+      if (anchor || args.length < 2 || args.length > 3 || !(i >= 0) || args[0] === '') return undefined;
+      if (args[1] !== 'sar' && args[1] !== 'shr') return undefined;
+      return { op: 'shift', expr: args[0], how: args[1], index: i };
     }
     case 'cmp': {
       const i = int(args[2], 0);
@@ -213,9 +570,34 @@ export function parseVc8Form(text: string): Vc8Form | undefined {
       return { op: 'cmp', cond: args[0], how: args[1], index: i };
     }
     case 'dup': return args.length === 1 && !anchor && args[0] !== '' ? { op: 'dup', stmt: args[0] } : undefined;
+    case 'hoist': {
+      const i = int(args[1], 0);
+      if (anchor || args.length < 1 || args.length > 2 || !(i >= 0) || args[0] === '') return undefined;
+      return { op: 'hoist', stmt: args[0], index: i };
+    }
     case 'ifsel': return args.length === 1 && !anchor ? { op: 'ifsel', name: args[0] } : undefined;
+    case 'clamp': {
+      const i = int(args[1], 0);
+      return !anchor && args.length >= 1 && args.length <= 2 && /^[A-Za-z_$][\w$]*$/.test(args[0]) && i >= 0
+        ? { op: 'clamp', name: args[0], index: i } : undefined;
+    }
     case 'decl': return args.length === 2 && !anchor ? { op: 'decl', name: args[0], before: args[1] } : undefined;
     case 'split': return args.length === 3 && !anchor ? { op: 'split', name: args[0], type: args[1], rename: args[2] } : undefined;
+    case 'dec': {
+      if (args.length !== 2 || anchor || !/^[A-Za-z_]\w*$/.test(args[0]) || !/^[1-9]\d*$/.test(args[1])) return undefined;
+      const amount = Number(args[1]);
+      return Number.isSafeInteger(amount) && amount <= 0x7fffffff ? { op: 'dec', name: args[0], amount } : undefined;
+    }
+    case 'range': case 'castout': case 'signbit': {
+      const i = int(args[1], 0);
+      if (anchor || args.length < 1 || args.length > 2 || !(i >= 0) || args[0] === '') return undefined;
+      return m[1] === 'castout' ? { op: 'castout', expr: args[0], index: i } : { op: m[1], cond: args[0], index: i } as Vc8Form;
+    }
+    case 'switch': {
+      const i = int(args[1], 1);
+      if (anchor || args.length < 1 || args.length > 2 || !(i >= 1) || args[0] === '') return undefined;
+      return { op: 'switch', expr: args[0], index: i };
+    }
   }
   return undefined;
 }
@@ -223,7 +605,10 @@ export function parseVc8Form(text: string): Vc8Form | undefined {
 // ---------------------------------------------------------------------------------------
 // Text, parsing, walking
 
-const norm = (s: string) => s.replace(/\s+/g, '');
+// Namespace qualifiers are dropped as `dh` drops them: a tag names a site in the text
+// it was measured on, and a symbol that moves to a module namespace afterwards
+// (`sgptDataTable` -> `D2Common::ITEMS::Items::sgptDataTable`) is the same site.
+const norm = (s: string) => s.replace(/\s+/g, '').replace(/(?<![\w:])(?:::)?(?:[A-Za-z_]\w*::)+(?=[A-Za-z_~])/g, '');
 const text = (n: ASTNode) => norm(emit(n as never));
 
 function unparen(e: Expression): Expression {
@@ -336,6 +721,18 @@ function localNames(fn: FunctionDecl): Set<string> {
   }
   for (const { node } of walk(fn.body!)) if (node.kind === NodeKind.VariableDecl) out.add((node as VariableDecl).name.name);
   return out;
+}
+
+/** Every `&name` is the operand of a cast to a pointer type. */
+function addressOnlyCast(fn: FunctionDecl, name: string): boolean {
+  const parents = parentsOf(fn);
+  for (const { node } of walk(fn.body!)) {
+    if (node.kind !== NodeKind.UnaryExpr || (node as UnaryExpr).operator !== '&' || !isId(unparen((node as UnaryExpr).operand), name)) continue;
+    let p = parents.get(node);
+    while (p && p.kind === NodeKind.ParenExpr) p = parents.get(p);
+    if (!p || p.kind !== NodeKind.CStyleCastExpr || !text((p as CStyleCastExpr).type).includes('*')) return false;
+  }
+  return true;
 }
 
 function addressTaken(fn: FunctionDecl, name: string): boolean {
@@ -494,6 +891,8 @@ function doSeq(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'seq' }>): void {
   }
 }
 
+const IN_PLACE = new Set(['+=', '-=', '*=', '&=', '|=', '^=', '<<=', '>>=']);
+
 function doFold(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'fold' }>): void {
   const v = f.name;
   if (addressTaken(fn, v)) refuse(`&${v} is taken`);
@@ -508,8 +907,18 @@ function doFold(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'fold' }>): void {
       else if (d && d.name.name === v && d.initializer && d.initializer.kind !== NodeKind.InitListExpr) value = d.initializer as Expression;
       if (!value) continue;
       if (mentions(value, v)) refuse(`${v} is stored from itself`);
+      // A compound store right after it works on the value in place (`V = E; V -= K;`, as
+      // in-place-operand writes the `E - K` VC8 computes in its register): the value is
+      // `E - K`. K must not read V or call anything.
+      let absorbed = 0;
+      while (i + 1 + absorbed < b.statements.length) {
+        const c = storeOf(b.statements[i + 1 + absorbed]);
+        if (!c || !IN_PLACE.has(c.operator) || !isId(unparen(c.left), v) || mentions(c.right, v) || hasCall(c.right)) break;
+        value = { kind: NodeKind.BinaryExpr, operator: c.operator.slice(0, -1), left: value, right: c.right } as unknown as BinaryExpr;
+        absorbed++;
+      }
       // Its uses: the following statements of this block, up to the next store to v.
-      let end = i + 1;
+      let end = i + 1 + absorbed;
       while (end < b.statements.length) {
         const n = b.statements[end];
         const ns = storeOf(n);
@@ -517,7 +926,7 @@ function doFold(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'fold' }>): void {
         end++;
       }
       const reads = identifiers(value);
-      const uses = b.statements.slice(i + 1, end);
+      const uses = b.statements.slice(i + 1 + absorbed, end);
       const lastUse = uses.reduce((k, n, j) => (mentions(n, v) ? j : k), -1);
       if (lastUse < 0) refuse(`the value stored to ${v} is never read`);
       for (let j = 0; j <= lastUse; j++) {
@@ -527,7 +936,8 @@ function doFold(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'fold' }>): void {
       }
       // Nothing after the range may read this value: the range ends at a store or at the
       // block's end, and the block must not be followed by a read in an outer block.
-      if (end === b.statements.length && blockReadsAfter(fn, b, v, i)) refuse(`${v} is read after its block`);
+      if (end === b.statements.length && blockReadsAfter(fn, b, v, i, true)) refuse(`${v} is read after its block`);
+      const backCopies = copiesBack(uses.slice(0, lastUse + 1), v, value);
       for (const n of uses.slice(0, lastUse + 1)) {
         for (const { node, slot } of [...walk(n)]) {
           if (!slot) continue;
@@ -539,7 +949,8 @@ function doFold(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'fold' }>): void {
         }
         for (const { node, slot } of [...walk(n)]) if (slot && isId(node, v)) put(slot, cloneNode(value));
       }
-      b.statements.splice(i, 1);
+      removeStatements(fn, backCopies);
+      b.statements.splice(i, 1 + absorbed);
       i--;
       folded++;
     }
@@ -547,6 +958,36 @@ function doFold(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'fold' }>): void {
   if (folded === 0) refuse(`no store to ${v}`);
   // The bare declaration goes once nothing names v.
   if (!mentionsOutsideDecl(fn, v)) removeDecl(fn, v);
+}
+
+/**
+ * The statements among `uses` that store V back into the place its value `value` was read
+ * from, `X = V;` for a value X: once V is written into them they read `X = X;`, a store of
+ * nothing. Only where X is an lvalue with no call and no store of its own in it, so the
+ * statement has no effect to keep; and only a statement in a block, which can go.
+ */
+function copiesBack(uses: Statement[], v: string, value: Expression): Set<ASTNode> {
+  const out = new Set<ASTNode>();
+  const x = unparen(value);
+  if (hasCall(x) || storedNames(x).size > 0) return out;
+  if (x.kind !== NodeKind.Identifier && x.kind !== NodeKind.MemberExpr && x.kind !== NodeKind.SubscriptExpr) return out;
+  const xt = text(x);
+  for (const n of uses) {
+    for (const { node, slot } of walk(n)) {
+      if (node.kind !== NodeKind.ExprStmt || (slot && !Array.isArray(slot.parent))) continue;
+      const s = storeOf(node as Statement);
+      if (s && s.operator === '=' && isId(unparen(s.right), v) && text(unparen(s.left)) === xt) out.add(node);
+    }
+  }
+  return out;
+}
+
+/** Take each of `gone` out of the block that holds it. */
+function removeStatements(fn: FunctionDecl, gone: Set<ASTNode>): void {
+  if (gone.size === 0) return;
+  for (const b of blocks(fn)) {
+    for (let k = b.statements.length - 1; k >= 0; k--) if (gone.has(b.statements[k])) b.statements.splice(k, 1);
+  }
 }
 
 function parentsOf(fn: FunctionDecl): Map<ASTNode, ASTNode> {
@@ -569,6 +1010,38 @@ function parentsOf(fn: FunctionDecl): Map<ASTNode, ASTNode> {
   return m;
 }
 
+const LIFE_JUMPS = new Set<string>([NodeKind.GotoStmt, NodeKind.LabelStmt, NodeKind.BreakStmt, NodeKind.ContinueStmt, NodeKind.CaseStmt, NodeKind.DefaultStmt]);
+
+/**
+ * What a statement does to v first on its way through: `store` when every path through it
+ * stores v before reading it, `read` when a path may read it first (or the statement jumps,
+ * so its paths are not followed), `none` when some path leaves it without naming v.
+ */
+function readFirst(s: Statement, v: string): 'read' | 'store' | 'none' {
+  for (const { node } of walk(s)) if (LIFE_JUMPS.has(node.kind)) return 'read';
+  const st = storeOf(s);
+  if (st && st.operator === '=' && isId(unparen(st.left), v)) return mentions(st.right, v) ? 'read' : 'store';
+  const d = declOf(s);
+  if (d && d.name.name === v) return d.initializer && mentions(d.initializer, v) ? 'read' : 'store';
+  if (s.kind === NodeKind.CompoundStmt) {
+    for (const x of (s as CompoundStmt).statements) {
+      const r = readFirst(x, v);
+      if (r !== 'none') return r;
+    }
+    return 'none';
+  }
+  if (s.kind === NodeKind.IfStmt) {
+    const i = s as IfStmt;
+    if (i.init || mentions(i.condition, v)) return 'read';
+    const a = readFirst(i.thenBranch, v);
+    const b = i.elseBranch ? readFirst(i.elseBranch, v) : 'none';
+    if (a === 'read' || b === 'read') return 'read';
+    // One arm stores and the other does not: the other's path goes on to what follows.
+    return a === 'store' && b === 'store' ? 'store' : 'none';
+  }
+  return mentions(s, v) ? 'read' : 'none';
+}
+
 /**
  * Whether a statement after block b (in an enclosing block) names v. With `from`, the index
  * in b of the store whose value ends with b, a loop around b counts only where the next
@@ -576,7 +1049,7 @@ function parentsOf(fn: FunctionDecl): Map<ASTNode, ASTNode> {
  * before the path to the store (in b, those before `from`); without it, any mention in the
  * loop counts.
  */
-function blockReadsAfter(fn: FunctionDecl, b: CompoundStmt, v: string, from?: number): boolean {
+function blockReadsAfter(fn: FunctionDecl, b: CompoundStmt, v: string, from?: number, storeEnds = false): boolean {
   const parents = parentsOf(fn);
   let cur: ASTNode = b;
   // The statements before the path, from b outwards to the innermost loop.
@@ -587,7 +1060,22 @@ function blockReadsAfter(fn: FunctionDecl, b: CompoundStmt, v: string, from?: nu
     if (p.kind === NodeKind.CompoundStmt) {
       const st = (p as CompoundStmt).statements;
       const k = st.indexOf(cur as Statement);
-      if (st.slice(k + 1).some(s => mentions(s, v))) return true;
+      // A jump between this block and a store may skip the store: after one, any mention
+      // reads, as before.
+      let jumped = !storeEnds;
+      for (const s of st.slice(k + 1)) {
+        if (!mentions(s, v)) {
+          if (!jumped) for (const { node } of walk(s)) if (LIFE_JUMPS.has(node.kind)) { jumped = true; break; }
+          continue;
+        }
+        if (jumped) return true;
+        const r = readFirst(s, v);
+        if (r === 'read') return true;
+        // Stored on every path before any read: the value of this life ends here, here
+        // and in every enclosing block and loop.
+        if (r === 'store') return false;
+        for (const { node } of walk(s)) if (LIFE_JUMPS.has(node.kind)) { jumped = true; break; }
+      }
       before.push(...st.slice(0, k));
     }
     if (p.kind === NodeKind.WhileStmt || p.kind === NodeKind.ForStmt || p.kind === NodeKind.DoWhileStmt) {
@@ -619,6 +1107,103 @@ function removeDecl(fn: FunctionDecl, v: string): void {
   }
 }
 
+/** Join one measured value lifetime back into the signed word that produced it. */
+function doJoin(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'join' }>): void {
+  const body = fn.body as CompoundStmt;
+  const target = body.statements
+    .map((stmt, index) => ({ stmt, index, decl: declOf(stmt) }))
+    .filter(x => x.decl?.name.name === f.into);
+  if (target.length !== 1) refuse(`${f.into} needs one top-level declaration`);
+  const { stmt, index, decl } = target[0];
+  const init = decl!.initializer as Expression | null;
+  if (!init || init.kind === NodeKind.InitListExpr || !mentions(init, f.from) || mentions(init, f.into))
+    refuse(`${f.into} needs an initializer reading ${f.from}`);
+  if (decl!.specifiers.length > 0) refuse(`${f.into} has declaration specifiers`);
+
+  // The five measured sites use int and int32_t. A same-width unsigned value is
+  // not equivalent in C++ comparisons, shifts, overloads, or conversions.
+  const signedWord = new Set(['int', 'int32_t', 'BOOL']);
+  const intoType = text(decl!.type);
+  const parameters = fn.parameters.filter(p => p.name?.name === f.from);
+  const prior = body.statements.slice(0, index)
+    .map(s => declOf(s)).filter(d => d?.name.name === f.from);
+  const allDecls = [...walk(body)].filter(x => x.node.kind === NodeKind.VariableDecl)
+    .map(x => (x.node as VariableDecl).name.name);
+  if (allDecls.filter(n => n === f.into).length !== 1 ||
+      allDecls.filter(n => n === f.from).length !== (parameters.length ? 0 : 1) ||
+      parameters.length + prior.length !== 1) refuse('joined names must have unique, visible bindings');
+  if (prior.length && prior[0]!.specifiers.length > 0) refuse(`${f.from} has declaration specifiers`);
+  for (const { node } of walk(body)) {
+    if (node.kind !== NodeKind.LabelStmt && node.kind !== NodeKind.GotoStmt) continue;
+    const label = (node as unknown as { label: Identifier }).label.name;
+    if (label === f.into || label === f.from) refuse('a joined name is also a label');
+  }
+  // A struct tag or typedef may share V2's spelling without naming its value.
+  // The suffix rewrite is intentionally refused rather than touching a type name.
+  for (const { node } of walk(body)) {
+    if (isType(node.kind) && mentions(node, f.into)) refuse(`${f.into} also names a type`);
+  }
+  // A reference can alias a local without a written `&V1`; updating V1 would
+  // then change a later read through that reference. Keep this first form narrow.
+  for (const { node } of walk(body)) {
+    if (node.kind === NodeKind.LambdaExpr) refuse('join does not model lambda captures');
+    if (node.kind === NodeKind.CallExpr && mentions(node, f.from))
+      refuse(`${f.from} may escape through a call`);
+    if (node.kind !== NodeKind.VariableDecl) continue;
+    for (const { node: t } of walk((node as VariableDecl).type)) {
+      if (t.kind === NodeKind.ReferenceType || t.kind === NodeKind.RValueReferenceType)
+        refuse('join does not model local reference aliases');
+    }
+  }
+  const fromType = parameters.length ? text(parameters[0].type) : text(prior[0]!.type);
+  if (!signedWord.has(intoType) || !signedWord.has(fromType)) refuse('joined values must both be signed 32-bit integers');
+  if (body.statements.slice(0, index).some(s => mentions(s, f.into))) refuse(`${f.into} is named before its declaration`);
+  if (body.statements.slice(index + 1).some(s => mentions(s, f.from))) refuse(`${f.from} is named after the join`);
+  if (storedNames(init).has(f.from)) refuse(`${f.from} is written by the initializer`);
+
+  const flow = buildFunctionFlow(body.statements, localNames(fn));
+  if (flow.isEscaped(f.from) || flow.isEscaped(f.into) || addressTaken(fn, f.from) || addressTaken(fn, f.into))
+    refuse('a joined value escapes');
+  const site = flow.nodeOf(stmt);
+  if (site === undefined) refuse('join statement has no CFG node');
+
+  // Follow every path leaving the declaration. A return to it is a loop whose
+  // next evaluation reads the now-updated V1, even when V1 is textually above it.
+  const seenAfter = new Set<number>();
+  const after = [...flow.cfg.nodes[site].succ];
+  while (after.length) {
+    const n = after.pop()!;
+    if (n === site) refuse('a backedge crosses the join');
+    if (seenAfter.has(n)) continue;
+    seenAfter.add(n);
+    if (flow.reads(n).has(f.from) || flow.writes(n).has(f.from)) refuse(`${f.from} remains live after the join`);
+    after.push(...flow.cfg.nodes[n].succ);
+  }
+
+  // Removing the site must make every other V2 read/write unreachable from
+  // every entry. This also rejects a branch store that does not dominate a use.
+  const seenBefore = new Set<number>();
+  const without = [flow.cfg.entry, ...flow.cfg.extraEntries];
+  while (without.length) {
+    const n = without.pop()!;
+    if (n === site || seenBefore.has(n)) continue;
+    seenBefore.add(n);
+    if (flow.reads(n).has(f.into) || flow.writes(n).has(f.into)) refuse(`${f.into} can be used without the join`);
+    without.push(...flow.cfg.nodes[n].succ);
+  }
+
+  for (const s of body.statements.slice(index + 1)) {
+    for (const { node } of walk(s)) if (isId(node, f.into)) node.name = f.from;
+  }
+  if (isId(unparen(init), f.from)) body.statements.splice(index, 1);
+  else {
+    const replacement = parse(`void __vc8f() { ${f.from} = 0; }`).declarations[0] as FunctionDecl;
+    const assignment = replacement.body!.statements[0] as ExprStmt;
+    (assignment.expression as AssignExpr).right = init;
+    body.statements[index] = { ...assignment, leadingTrivia: stmt.leadingTrivia, trailingTrivia: stmt.trailingTrivia };
+  }
+}
+
 /** The statement an anchor names: the one storing (or declaring) it, or the if/while/switch on it. */
 function anchors(s: Statement, a: string): boolean {
   if (targetOf(s) === a) return true;
@@ -631,7 +1216,7 @@ function doCache(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'cache' }>): void {
   const byAddress = f.type !== undefined && norm(f.expr).startsWith('&');
   const want = byAddress ? norm(f.expr).slice(1) : norm(f.expr);
   const locals = localNames(fn);
-  const isE = (n: ASTNode) => (n as Expression).kind !== undefined && text(n) === want;
+  const isE = (n: ASTNode) => isExpression(n.kind) && text(n as Expression) === want;
   const stores = (n: ASTNode) => {
     for (const { node } of walk(n)) {
       if (node.kind !== NodeKind.AssignExpr) continue;
@@ -662,7 +1247,24 @@ function doCache(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'cache' }>): void {
     let block: CompoundStmt | undefined, at = -1;
     if (f.anchor) {
       const a = norm(f.anchor);
-      for (const b of blocks(fn)) { const k = b.statements.findIndex(s => anchors(s, a)); if (k >= 0) { block = b; at = k; break; } }
+      if (a === 'call') {
+        if (!byAddress || !/^[A-Za-z_]\w*(?:(?:->|\.)[A-Za-z_]\w*)+$/.test(want)) {
+          refuse('@call needs the pure address of a member');
+        }
+        const hits: Array<{ b: CompoundStmt; k: number }> = [];
+        for (const b of blocks(fn)) for (let k = 0; k < b.statements.length; k++) {
+          const s = b.statements[k];
+          if (s.kind === NodeKind.ExprStmt && unparen((s as ExprStmt).expression).kind === NodeKind.CallExpr &&
+              [...walk(s)].some(({ node }) => isE(node))) hits.push({ b, k });
+        }
+        if (hits.length !== 1) refuse(`@call needs one call reading ${f.expr}, found ${hits.length}`);
+        block = hits[0]!.b; at = hits[0]!.k;
+      } else {
+        for (const b of blocks(fn)) {
+          const k = b.statements.findIndex(s => anchors(s, a));
+          if (k >= 0) { block = b; at = k; break; }
+        }
+      }
       if (!block) refuse(`no statement stores or tests ${f.anchor}`);
     } else {
       // The innermost block whose statements hold every E.
@@ -854,6 +1456,130 @@ const WIDTH: Record<string, number> = {
   int: 4, 'unsignedint': 4, unsigned: 4, uint: 4, int32_t: 4, uint32_t: 4, DWORD: 4, BOOL: 4, long: 4, 'unsignedlong': 4, ulong: 4, size_t: 4, undefined4: 4,
 };
 
+/** A value range; `u` marks an expression of a 32-bit unsigned type, whose arithmetic wraps. */
+interface Range { lo: bigint; hi: bigint; u?: boolean }
+
+const I32: Range = { lo: -0x80000000n, hi: 0x7fffffffn };
+const U32: Range = { lo: 0n, hi: 0xffffffffn, u: true };
+const RANGE: Record<string, Range> = {
+  bool: { lo: 0n, hi: 1n },
+  char: { lo: -0x80n, hi: 0x7fn }, 'signedchar': { lo: -0x80n, hi: 0x7fn }, int8_t: { lo: -0x80n, hi: 0x7fn },
+  'unsignedchar': { lo: 0n, hi: 0xffn }, uint8_t: { lo: 0n, hi: 0xffn }, BYTE: { lo: 0n, hi: 0xffn }, byte: { lo: 0n, hi: 0xffn },
+  undefined1: { lo: 0n, hi: 0xffn }, uchar: { lo: 0n, hi: 0xffn }, UCHAR: { lo: 0n, hi: 0xffn },
+  short: { lo: -0x8000n, hi: 0x7fffn }, 'shortint': { lo: -0x8000n, hi: 0x7fffn }, 'signedshort': { lo: -0x8000n, hi: 0x7fffn },
+  int16_t: { lo: -0x8000n, hi: 0x7fffn }, SHORT: { lo: -0x8000n, hi: 0x7fffn },
+  'unsignedshort': { lo: 0n, hi: 0xffffn }, 'unsignedshortint': { lo: 0n, hi: 0xffffn }, uint16_t: { lo: 0n, hi: 0xffffn },
+  WORD: { lo: 0n, hi: 0xffffn }, ushort: { lo: 0n, hi: 0xffffn }, undefined2: { lo: 0n, hi: 0xffffn }, wchar_t: { lo: 0n, hi: 0xffffn },
+  USHORT: { lo: 0n, hi: 0xffffn },
+  int: I32, 'signedint': I32, signed: I32, int32_t: I32, long: I32, 'longint': I32, BOOL: I32, INT: I32, LONG: I32,
+  'unsignedint': U32, unsigned: U32, uint: U32, uint32_t: U32, DWORD: U32, 'unsignedlong': U32, 'unsignedlongint': U32,
+  ulong: U32, ULONG: U32, UINT: U32, size_t: U32, undefined4: U32,
+};
+
+/**
+ * The range and width of an integer type spelled t, through the typedef table. A spelling
+ * that is no integer type is taken as an enum when `enumLike`: GCC gives an enum without
+ * negative members `unsigned int`, one with them `int`, so only 0..INT_MAX is certain.
+ */
+function intType(t: string, enumLike: boolean): { r: Range; w: number; signUnknown?: boolean } | undefined {
+  let b = norm(t).replace(/^const(?=\w)/, '');
+  for (let k = 0; k < 8 && !RANGE[b]; k++) {
+    const next = selectTables?.typedefTargets?.[b];
+    if (!next) break;
+    b = norm(next).replace(/^const(?=\w)/, '');
+  }
+  const r = RANGE[b];
+  if (r) return { r, w: b === 'bool' ? 1 : WIDTH[b] ?? (r.hi > 0xffffn || r.lo < -0x8000n ? 4 : r.hi > 0xffn || r.lo < -0x80n ? 2 : 1) };
+  if (!enumLike || /[*&\[]/.test(b)) return undefined;
+  return { r: { lo: 0n, hi: 0x7fffffffn }, w: 4, signUnknown: true };
+}
+
+const within = (a: Range, b: Range) => a.lo >= b.lo && a.hi <= b.hi;
+const bitsOf = (v: bigint) => { let n = 0; while (v > 0n) { v >>= 1n; n++; } return n; };
+
+/** The values e can take, as far as its literals, casts and declared types tell; undefined when unknown. */
+function rangeOf(e: Expression, shapeOf: ((x: Expression) => { base: string; stars: number } | null) | undefined): Range | undefined {
+  e = unparen(e);
+  switch (e.kind) {
+    case NodeKind.IntegerLiteral: {
+      const l = e as IntegerLiteralExpr;
+      return { lo: l.value, hi: l.value, u: /u/i.test(l.suffix) || l.value > 0x7fffffffn };
+    }
+    case NodeKind.CharLiteral: { const v = BigInt((e as unknown as { value: number }).value); return { lo: v, hi: v }; }
+    case NodeKind.BoolLiteral: { const v = (e as unknown as { value: boolean }).value ? 1n : 0n; return { lo: v, hi: v }; }
+    case NodeKind.CStyleCastExpr: {
+      const c = e as CStyleCastExpr;
+      const t = intType(text(c.type), false);
+      if (!t) return undefined;
+      if (text(c.type) === 'bool') return { lo: 0n, hi: 1n };
+      const inner = rangeOf(c.expression, shapeOf);
+      return inner && within(inner, t.r) ? { ...inner, u: t.r.u } : t.r;
+    }
+    case NodeKind.ConditionalExpr: {
+      const c = e as ConditionalExpr;
+      const a = rangeOf(c.thenExpr, shapeOf), b = rangeOf(c.elseExpr, shapeOf);
+      return a && b ? { lo: a.lo < b.lo ? a.lo : b.lo, hi: a.hi > b.hi ? a.hi : b.hi, u: a.u || b.u } : undefined;
+    }
+    case NodeKind.UnaryExpr: {
+      const u = e as UnaryExpr;
+      if (u.operator === '!') return { lo: 0n, hi: 1n };
+      if (u.operator === '-') {
+        const a = rangeOf(u.operand, shapeOf);
+        if (!a || a.u) return undefined;
+        const r = { lo: -a.hi, hi: -a.lo };
+        return within(r, I32) ? r : undefined;
+      }
+      break;
+    }
+    case NodeKind.BinaryExpr: {
+      const x = e as BinaryExpr;
+      if (['==', '!=', '<', '<=', '>', '>=', '&&', '||'].includes(x.operator)) return { lo: 0n, hi: 1n };
+      const a = rangeOf(x.left, shapeOf), b = rangeOf(x.right, shapeOf);
+      const u = !!(a?.u || b?.u);
+      const fit = (r: Range): Range | undefined => (u ? (r.lo >= 0n && r.hi <= 0xffffffffn ? { ...r, u } : undefined) : within(r, I32) ? r : undefined);
+      if (x.operator === '&') {
+        // Masking by a non-negative value bounds the result by it, whatever the other side.
+        const ks = [a, b].filter((r): r is Range => !!r && r.lo >= 0n);
+        if (ks.length) return { lo: 0n, hi: ks.reduce((m, r) => (r.hi < m ? r.hi : m), ks[0].hi), u };
+        return undefined;
+      }
+      if (!a || !b) return undefined;
+      switch (x.operator) {
+        case '+': return fit({ lo: a.lo + b.lo, hi: a.hi + b.hi });
+        case '-': return fit({ lo: a.lo - b.hi, hi: a.hi - b.lo });
+        case '*': {
+          const p = [a.lo * b.lo, a.lo * b.hi, a.hi * b.lo, a.hi * b.hi];
+          return fit({ lo: p.reduce((m, v) => (v < m ? v : m)), hi: p.reduce((m, v) => (v > m ? v : m)) });
+        }
+        case '|': case '^':
+          return a.lo >= 0n && b.lo >= 0n ? { lo: 0n, hi: (1n << BigInt(bitsOf(a.hi > b.hi ? a.hi : b.hi))) - 1n, u } : undefined;
+        case '%':
+          if (b.lo !== b.hi || b.lo <= 0n) return undefined;
+          return a.lo >= 0n ? { lo: 0n, hi: b.lo - 1n, u } : u ? undefined : { lo: 1n - b.lo, hi: b.lo - 1n };
+        case '>>':
+          if (b.lo !== b.hi || b.lo < 0n || b.lo > 31n || a.lo < 0n) return undefined;
+          return { lo: a.lo >> b.lo, hi: a.hi >> b.lo, u };
+        case '/':
+          if (b.lo !== b.hi || b.lo <= 0n || a.lo < 0n) return undefined;
+          return { lo: a.lo / b.lo, hi: a.hi / b.lo, u };
+      }
+      return undefined;
+    }
+  }
+  const s = shapeOf?.(e);
+  if (!s || s.stars !== 0) return undefined;
+  return intType(s.base, false)?.r;
+}
+
+/**
+ * width(V,T): V is declared T. Value-preserving, or refused: every value stored into V
+ * must lie in both its old type and T, so V holds the same number either way; or every
+ * read of V must keep no more of it than the narrower of the two types holds (a cast to a
+ * type that wide, a mask, a parameter or return of that width): both keep the stored
+ * value's low bytes, so such a read sees the same value. A read of all of a wider V, after
+ * a store the old type truncated, is refused (OBJECT_DispatchShrineServerActivate 004bd5c0
+ * widens a char code read as `(uint32_t)V`).
+ */
 function doWidth(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'width' }>): void {
   let d: VariableDecl | undefined;
   for (const b of blocks(fn)) { for (const s of b.statements) { const x = declOf(s); if (x?.name.name === f.name) d = x; } }
@@ -861,13 +1587,22 @@ function doWidth(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'width' }>): void {
   const old = text(d!.type), T = norm(f.type);
   if (old === T) refuse(`${f.name} is ${f.type} already`);
   const w = WIDTH[T];
-  d!.type = parseType(f.type);
+  const oldT = intType(old, true), newT = intType(T, true);
+  if (!oldT || !newT) refuse(`${!oldT ? old : T} is no integer type`);
+  // Through its address V is bytes; between two types of one width those bytes are the
+  // same, as long as each `&V` is cast to the pointer it is used as, so the pointer's type
+  // never follows V's (SUNITNPC_ApplyScrollSkill 00576e40 stores `*(uint8_t*)(char*)&eUnitType`).
+  if (addressTaken(fn, f.name) && (oldT!.w !== newT!.w || !addressOnlyCast(fn, f.name))) refuse(`&${f.name} is taken`);
   const truth = new Set<ASTNode>();
   for (const { node } of walk(fn.body!)) {
-    if (node.kind === NodeKind.IfStmt || node.kind === NodeKind.WhileStmt) truth.add(unparen((node as IfStmt).condition));
+    if (node.kind === NodeKind.IfStmt || node.kind === NodeKind.WhileStmt || node.kind === NodeKind.DoWhileStmt) truth.add(unparen((node as IfStmt).condition));
+    if (node.kind === NodeKind.ForStmt && (node as unknown as { condition: Expression | null }).condition) truth.add(unparen((node as unknown as { condition: Expression }).condition));
+    if (node.kind === NodeKind.ConditionalExpr) truth.add(unparen((node as ConditionalExpr).condition));
     if (node.kind === NodeKind.UnaryExpr && (node as UnaryExpr).operator === '!') truth.add(unparen((node as UnaryExpr).operand));
     if (node.kind === NodeKind.BinaryExpr && ['&&', '||'].includes((node as BinaryExpr).operator)) { truth.add(unparen((node as BinaryExpr).left)); truth.add(unparen((node as BinaryExpr).right)); }
   }
+  checkWidthPreserved(fn, f.name, d!, oldT!, newT!, old, T, truth);
+  d!.type = parseType(f.type);
   for (const { node, slot } of [...walk(fn.body!)]) {
     if (!slot) continue;
     if (node.kind === NodeKind.CStyleCastExpr) {
@@ -881,20 +1616,298 @@ function doWidth(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'width' }>): void {
   }
 }
 
+type IntInfo = { r: Range; w: number; signUnknown?: boolean };
+
+function checkWidthPreserved(fn: FunctionDecl, v: string, d: VariableDecl, oldT: IntInfo, newT: IntInfo,
+  old: string, T: string, truth: Set<ASTNode>): void {
+  const parents = parentsOf(fn);
+  const tables = selectTables;
+  const shapeOf = tables ? createExprShape(localTypesOf(fn), {
+    globalTypes: tables.globalTypes ?? {}, enclosingVarTypes: tables.enclosingVarTypes ?? {},
+    structFields: tables.structFields ?? {}, fieldTypes: tables.fieldTypes ?? {},
+    returnTypes: tables.functionReturnTypes ?? {}, resolve: (n: string) => tables.typedefTargets?.[n],
+  }) : (x: Expression) => {
+    const id = unparen(x);
+    if (!isId(id)) return null;
+    for (const { node } of walk(fn.body!)) if (node.kind === NodeKind.VariableDecl && (node as VariableDecl).name.name === id.name) return { base: text((node as VariableDecl).type), stars: 0 };
+    for (const p of fn.parameters) if ((p as unknown as { name?: Identifier | null }).name?.name === id.name) return { base: text(p.type), stars: 0 };
+    return null;
+  };
+  const both: Range = { lo: oldT.r.lo > newT.r.lo ? oldT.r.lo : newT.r.lo, hi: oldT.r.hi < newT.r.hi ? oldT.r.hi : newT.r.hi };
+
+  // The stores, each with the value it stores once the form has dropped a cast to the old type.
+  const stored: Array<{ what: string; value?: Expression }> = [];
+  if (d.initializer && d.initializer.kind !== NodeKind.InitListExpr) stored.push({ what: `${v} = ${emit(d.initializer as never)}`, value: d.initializer as Expression });
+  const storeNodes = new Set<ASTNode>([d.name]);
+  // `&V` reads no value: doWidth lets it through only where the bytes stay the same.
+  for (const { node } of walk(fn.body!)) {
+    if (node.kind === NodeKind.UnaryExpr && (node as UnaryExpr).operator === '&' && isId(unparen((node as UnaryExpr).operand), v)) storeNodes.add(unparen((node as UnaryExpr).operand));
+  }
+  for (const { node } of walk(fn.body!)) {
+    if (node.kind === NodeKind.AssignExpr && isId(unparen((node as AssignExpr).left), v)) {
+      const a = node as AssignExpr;
+      storeNodes.add(unparen(a.left));
+      let r = unparen(a.right);
+      if (r.kind === NodeKind.CStyleCastExpr && text((r as CStyleCastExpr).type) === old) r = (r as CStyleCastExpr).expression;
+      stored.push(a.operator === '=' ? { what: emit(a as never), value: r } : { what: emit(a as never) });
+    }
+    if ((node.kind === NodeKind.PostfixExpr || (node.kind === NodeKind.UnaryExpr && ['++', '--'].includes((node as UnaryExpr).operator)))
+      && isId(unparen((node as UnaryExpr).operand), v)) {
+      storeNodes.add(unparen((node as UnaryExpr).operand));
+      stored.push({ what: emit(node as never) });
+    }
+  }
+  const outOfRange = stored.filter(s => {
+    if (!s.value) return true;
+    const r = rangeOf(s.value, shapeOf);
+    return !r || !within(r, both);
+  });
+
+  if (outOfRange.length === 0) {
+    // Every value is the same number in either type. A read still means the same only
+    // where its operation does not depend on the signedness of a 32-bit V.
+    const sign32 = (t: IntInfo) => (t.signUnknown ? 'unknown' : t.w === 4 ? (t.r.u ? 'u' : 's') : 's');
+    if (sign32(oldT) === sign32(newT) && sign32(oldT) !== 'unknown') return;
+    for (const { node } of walk(fn.body!)) {
+      if (!isId(node, v) || storeNodes.has(node)) continue;
+      const why = signSensitiveRead(node, parents, truth, shapeOf);
+      if (why) refuse(`${v} changes signedness (${old} -> ${T}) and ${why}`);
+    }
+    return;
+  }
+
+  // The second way: no read keeps more of V than both types hold. V = E then keeps E's low
+  // bytes in either type (the old one truncates at the store, a wider T at the read), so a
+  // read of no more than those low bytes sees the same value: MISSILE_SetPathFromTotalFrames
+  // (004cccc0) stores the frame count into an int and passes it as a uint8_t, where the
+  // tagless source truncates at the store; the original keeps the whole count in EBX.
+  const keep = Math.min(oldT.w, newT.w);
+  const why = (s: string) => `${outOfRange[0].what} can exceed ${both.lo === oldT.r.lo && both.hi === oldT.r.hi ? old : T} and ${s}`;
+  // A bool keeps no low bytes: it stores E as E != 0. The two then agree only on whether V
+  // is zero, so every read must be a truth test and every store a plain one (`b = 0x100`
+  // reads 1 as `(uint8_t)b` in a bool and 0 in an int).
+  if (norm(old) === 'bool' || T === 'bool') {
+    for (const s of stored) if (!s.value) refuse(why(`${s.what} works on the value a bool normalises`));
+    // Zero in one is zero in the other only for an integer of at most 32 bits or a pointer
+    // (a float 0.5 is true as a bool and 0 as an int; a 64-bit 1<<32 is true and 0).
+    for (const s of outOfRange) {
+      const sh = shapeOf(s.value!);
+      if (!sh || (sh.stars === 0 && (intType(sh.base, false)?.w ?? 8) > 4)) refuse(why(`${s.what} may be no 32-bit integer or pointer`));
+    }
+    for (const { node } of walk(fn.body!)) {
+      if (!isId(node, v) || storeNodes.has(node)) continue;
+      let cur: ASTNode = node;
+      for (let p = parents.get(cur); p && p.kind === NodeKind.ParenExpr; p = parents.get(cur)) cur = p;
+      if (!truth.has(unparen(cur as Expression)) && !truth.has(cur)) refuse(why(`${emit((parents.get(cur) ?? cur) as never)} reads more than whether it is zero`));
+    }
+    return;
+  }
+  // A compound store keeps the low bytes only where it works on them alone.
+  for (const { node } of walk(fn.body!)) {
+    if (node.kind === NodeKind.AssignExpr && isId(unparen((node as AssignExpr).left), v)
+      && !['=', '+=', '-=', '*=', '&=', '|=', '^=', '<<='].includes((node as AssignExpr).operator)) {
+      refuse(why(`${emit(node as never)} reads more than the low bytes`));
+    }
+  }
+  for (const { node } of walk(fn.body!)) {
+    if (!isId(node, v) || storeNodes.has(node)) continue;
+    const kept = readWidth(fn, node, parents, oldT.w === newT.w ? both : undefined);
+    if (kept === undefined || kept > keep) refuse(why(`the read in ${emit((parents.get(node) ?? node) as never)} keeps ${kept === undefined ? 'all of it' : `${kept * 8} bits`}`));
+  }
+}
+
+/** How many bytes of V a read keeps: a cast to an integer type, a mask, a parameter or the return of that width. */
+function readWidth(fn: FunctionDecl, id: ASTNode, parents: Map<ASTNode, ASTNode>, both?: Range): number | undefined {
+  let cur: ASTNode = id;
+  let p = parents.get(cur);
+  while (p && p.kind === NodeKind.ParenExpr) { cur = p; p = parents.get(cur); }
+  if (!p) return undefined;
+  // Between two types of one width, equality with a constant both hold tells the same
+  // values apart (INPUT_ConfigMouseButtonHandler switches a short on 1 and 2 as a WORD).
+  const constIn = (e: Expression) => { const r = both && rangeOf(e, undefined); return !!r && r.lo === r.hi && within(r, both!); };
+  if (p.kind === NodeKind.BinaryExpr && ['==', '!='].includes((p as BinaryExpr).operator)) {
+    const x = p as BinaryExpr;
+    return constIn(x.left === cur ? x.right : x.left) ? 1 : undefined;
+  }
+  if (p.kind === NodeKind.SwitchStmt && (p as unknown as { condition: ASTNode }).condition === cur) {
+    const labels: Expression[] = [];
+    for (const { node } of walk((p as unknown as { body: ASTNode }).body)) {
+      if (node.kind === NodeKind.SwitchStmt) return undefined;
+      if (node.kind === NodeKind.CaseStmt) labels.push((node as unknown as { value: Expression }).value);
+    }
+    return labels.every(constIn) ? 1 : undefined;
+  }
+  const narrow = (t: string) => (norm(t) === 'bool' ? undefined : intType(t, false)?.w);
+  if (p.kind === NodeKind.CStyleCastExpr) return narrow(text((p as CStyleCastExpr).type));
+  if (p.kind === NodeKind.BinaryExpr && (p as BinaryExpr).operator === '&') {
+    const x = p as BinaryExpr;
+    const k = unparen(x.left === cur ? x.right : x.left);
+    if (k.kind !== NodeKind.IntegerLiteral) return undefined;
+    const bits = bitsOf((k as IntegerLiteralExpr).value);
+    return bits <= 8 ? 1 : bits <= 16 ? 2 : 4;
+  }
+  if (p.kind === NodeKind.CallExpr && (p as unknown as { arguments: ASTNode[] }).arguments.includes(cur)) {
+    const call = p as unknown as { callee: Expression; arguments: ASTNode[] };
+    const name = calleeName(call.callee);
+    const params = name && selectTables?.functionParamTypes
+      ? scopedLookup(selectTables.functionParamTypes, name, selectTables.enclosingSegments ?? []) : undefined;
+    const t = params?.[call.arguments.indexOf(cur)];
+    return t ? narrow(t) : undefined;
+  }
+  if (p.kind === NodeKind.ReturnStmt) return narrow(text(fn.returnType));
+  return undefined;
+}
+
+/**
+ * Why a read of V, an in-range value, means something else once V's 32-bit signedness
+ * changes; undefined when it does not. + - * & | ^ << ~ wrap the same in either; a
+ * comparison, / % >> or an index do not, unless the value is still V itself and the other
+ * operand a non-negative value.
+ */
+function signSensitiveRead(id: ASTNode, parents: Map<ASTNode, ASTNode>, truth: Set<ASTNode>,
+  shapeOf: (x: Expression) => { base: string; stars: number } | null): string | undefined {
+  let cur: ASTNode = id;
+  let mixed = false;
+  const nonneg = (e: Expression) => { const r = rangeOf(e, shapeOf); return !!r && r.lo >= 0n && r.hi <= 0x7fffffffn; };
+  for (;;) {
+    if (truth.has(cur)) return undefined;
+    const p = parents.get(cur);
+    if (!p) return undefined;
+    switch (p.kind) {
+      case NodeKind.ParenExpr: cur = p; continue;
+      case NodeKind.CStyleCastExpr: return undefined;
+      case NodeKind.UnaryExpr:
+        if (['-', '~'].includes((p as UnaryExpr).operator)) { mixed = true; cur = p; continue; }
+        if ((p as UnaryExpr).operator === '!') return undefined;
+        return `${emit(p as never)} reads it`;
+      case NodeKind.BinaryExpr: {
+        const x = p as BinaryExpr;
+        const other = x.left === cur ? x.right : x.left;
+        if (['+', '-', '*', '&', '|', '^'].includes(x.operator) || (x.operator === '<<' && x.left === cur)) { mixed = true; cur = p; continue; }
+        if (['==', '!=', '<', '<=', '>', '>=', '/', '%', '>>'].includes(x.operator)) {
+          if (!mixed && nonneg(other) && (!['/', '%', '>>'].includes(x.operator) || x.left === cur)) {
+            if (['/', '%', '>>'].includes(x.operator)) { cur = p; continue; }
+            return undefined;
+          }
+          return `${emit(p as never)} depends on it`;
+        }
+        if (['&&', '||'].includes(x.operator)) return undefined;
+        return `${emit(p as never)} reads it`;
+      }
+      case NodeKind.SubscriptExpr: return mixed ? `the index ${emit(p as never)} depends on it` : undefined;
+      default: return undefined;
+    }
+  }
+}
+
+/** The one declaration of local V in fn's body, refusing a parameter-free miss, a second one or a static. */
+function soleDecl(fn: FunctionDecl, name: string): VariableDecl {
+  let d: VariableDecl | undefined;
+  let n = 0;
+  for (const { node } of walk(fn.body!)) if (node.kind === NodeKind.VariableDecl && (node as VariableDecl).name.name === name) { d = node as VariableDecl; n++; }
+  if (!d) refuse(`no declaration of ${name}`);
+  if (n > 1) refuse(`${name} is declared ${n} times`);
+  if (d!.specifiers.length > 0) refuse(`${name} is ${d!.specifiers.join(' ')}`);
+  if (d!.initializer && d!.initializer.kind === NodeKind.InitListExpr) refuse(`${name} has a brace initializer`);
+  return d!;
+}
+
+/** Each mention of V that is not its declaration's name, with the node that holds it (parentheses skipped). */
+function mentionSites(fn: FunctionDecl, name: string): Array<{ id: Identifier; holder: ASTNode | undefined; child: ASTNode }> {
+  const parents = parentsOf(fn);
+  const out: Array<{ id: Identifier; holder: ASTNode | undefined; child: ASTNode }> = [];
+  for (const { node } of walk(fn.body!)) {
+    if (!isId(node, name)) continue;
+    let child: ASTNode = node;
+    let p = parents.get(child);
+    if (p && p.kind === NodeKind.VariableDecl && (p as VariableDecl).name === node) continue;
+    while (p && p.kind === NodeKind.ParenExpr) { child = p; p = parents.get(p); }
+    out.push({ id: node as Identifier, holder: p, child });
+  }
+  return out;
+}
+
+/** Refuses when V's address or size is taken, it is modified in place, or it sits in a brace initializer. */
+function refusePinned(fn: FunctionDecl, name: string): void {
+  for (const { node } of walk(fn.body!)) {
+    if (node.kind === NodeKind.SizeofExpr && [...walk(node)].some(x => isId(x.node, name))) refuse(`the size of ${name} is taken`);
+    if (node.kind === NodeKind.InitListExpr && [...walk(node)].some(x => isId(x.node, name))) refuse(`${name} is in a brace initializer`);
+    if ((node.kind === NodeKind.UnaryExpr || node.kind === NodeKind.PostfixExpr) && ['&', '++', '--'].includes((node as UnaryExpr).operator)
+      && isId(unparen((node as UnaryExpr).operand), name)) refuse(`${name} is ${(node as UnaryExpr).operator === '&' ? 'addressed' : 'stepped'}`);
+    if (node.kind === NodeKind.AssignExpr && (node as AssignExpr).operator !== '=' && isId(unparen((node as AssignExpr).left), name)) refuse(`${name} is compound-assigned`);
+  }
+}
+
+function doBoolflag(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'boolflag' }>): void {
+  const d = soleDecl(fn, f.name);
+  if (text(d.type) !== 'bool') refuse(`${f.name} is not a bool`);
+  refusePinned(fn, f.name);
+  const literals: ASTNode[] = [];
+  const literal = (e: Expression) => {
+    const u = unparen(e);
+    if (u.kind !== NodeKind.BoolLiteral) refuse(`${f.name} is stored ${text(e)}`);
+    literals.push(u);
+  };
+  if (d.initializer) literal(d.initializer as Expression);
+  let reads = 0;
+  for (const m of mentionSites(fn, f.name)) {
+    const p = m.holder as (ASTNode & { condition?: ASTNode; operator?: string; left?: ASTNode; right?: Expression }) | undefined;
+    if (p && p.kind === NodeKind.AssignExpr && p.left === m.child) { literal(p.right!); continue; }
+    reads++;
+    const ok = !!p && (
+      ([NodeKind.IfStmt, NodeKind.WhileStmt, NodeKind.DoWhileStmt, NodeKind.ForStmt, NodeKind.ConditionalExpr] as string[]).includes(p.kind) && p.condition === m.child
+      || p.kind === NodeKind.UnaryExpr && p.operator === '!'
+      || p.kind === NodeKind.BinaryExpr && (p.operator === '&&' || p.operator === '||'));
+    if (!ok) refuse(`${f.name} is read as a value`);
+  }
+  if (reads === 0) refuse(`${f.name} is never read`);
+  d.type = parseType('BOOL');
+  for (const l of literals) {
+    const b = l as unknown as Record<string, unknown>;
+    const v = b.value ? 1n : 0n;
+    delete b.value;
+    Object.assign(b, { kind: NodeKind.IntegerLiteral, value: v, raw: v.toString(), base: 10, suffix: '' });
+  }
+}
+
+function doRetwiden(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'retwiden' }>): void {
+  const d = soleDecl(fn, f.name);
+  const old = text(d.type);
+  const w = WIDTH[old];
+  if (w !== 1 && w !== 2 || old === 'bool') refuse(`${f.name} is ${old}, not a one- or two-byte integer`);
+  refusePinned(fn, f.name);
+  const stores: Array<{ get: () => Expression; set: (e: Expression) => void }> = [];
+  if (d.initializer) stores.push({ get: () => d.initializer as Expression, set: e => { d.initializer = e; } });
+  for (const m of mentionSites(fn, f.name)) {
+    const a = m.holder as AssignExpr | undefined;
+    if (a && a.kind === NodeKind.AssignExpr && a.left === m.child) stores.push({ get: () => a.right, set: e => { a.right = e; } });
+  }
+  if (!stores.some(s => unparen(s.get()).kind === NodeKind.CallExpr)) refuse(`${f.name} is stored from no call`);
+  const T = d.type;
+  for (const s of stores) {
+    const e = unparen(s.get());
+    if (e.kind === NodeKind.CStyleCastExpr && text((e as CStyleCastExpr).type) === old) continue;
+    s.set({ kind: NodeKind.CStyleCastExpr, type: cloneNode(T), expression: { kind: NodeKind.ParenExpr, expression: s.get() } } as unknown as Expression);
+  }
+  d.type = parseType('int32_t');
+}
+
 function doArms(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'arms' }>): void {
   const want = norm(f.cond);
+  let seen = 0;
   for (const { node } of walk(fn.body!)) {
     if (node.kind !== NodeKind.IfStmt) continue;
     const s = node as IfStmt;
     if (!s.elseBranch || text(s.condition) !== want) continue;
+    if (f.index && ++seen !== f.index) continue;
     if (s.elseBranch.kind === NodeKind.IfStmt) refuse('the else arm is an else-if chain');
     const t = s.thenBranch;
-    s.condition = negate(s.condition);
+    s.condition = f.wrap ? negateWrap(s.condition) : negate(s.condition);
     s.thenBranch = s.elseBranch;
     s.elseBranch = t;
     return;
   }
-  refuse(`no if/else on ${f.cond}`);
+  refuse(f.index ? `no if/else #${f.index} on ${f.cond}` : `no if/else on ${f.cond}`);
 }
 
 // ---------------------------------------------------------------------------------------
@@ -928,12 +1941,32 @@ function leaves(s: Statement): boolean {
   return false;
 }
 
-/** Labels, case labels and declarations at the top of a statement list cannot move into a new scope. */
+/** The direct child nodes of n. */
+function childrenOf(n: ASTNode): ASTNode[] {
+  const out: ASTNode[] = [];
+  for (const key of Object.keys(n)) {
+    if (key === 'location' || key === 'leadingTrivia' || key === 'trailingTrivia') continue;
+    const v = (n as unknown as Record<string, unknown>)[key];
+    if (Array.isArray(v)) { for (const x of v) if (x && typeof x === 'object' && typeof (x as ASTNode).kind === 'string') out.push(x as ASTNode); }
+    else if (v && typeof v === 'object' && typeof (v as ASTNode).kind === 'string') out.push(v as ASTNode);
+  }
+  return out;
+}
+
+/**
+ * Labels and declarations at the top of a statement list cannot move into a new scope. The
+ * case and default labels of a switch that moves whole move with it (OBJOP_A5Q5_
+ * WorldstonePortalActivate 0058d400 ends in one); a goto label still refuses.
+ */
 function movable(st: Statement[], declsOk: boolean): string | undefined {
+  const labelIn = (n: ASTNode, inSwitch: boolean): boolean => {
+    if (n.kind === NodeKind.LabelStmt) return true;
+    if (!inSwitch && (n.kind === NodeKind.CaseStmt || n.kind === NodeKind.DefaultStmt)) return true;
+    const inner = inSwitch || n.kind === NodeKind.SwitchStmt;
+    return childrenOf(n).some(c => labelIn(c, inner));
+  };
   for (const s of st) {
-    for (const { node } of walk(s)) {
-      if (node.kind === NodeKind.LabelStmt || node.kind === NodeKind.CaseStmt || node.kind === NodeKind.DefaultStmt) return 'a label would move';
-    }
+    if (labelIn(s, false)) return 'a label would move';
     if (!declsOk && s.kind === NodeKind.DeclStmt) return 'a declaration would change scope';
   }
   return undefined;
@@ -1000,6 +2033,66 @@ function doMergeTail(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'merge-tail' }>
   (s.thenBranch as CompoundStmt).statements = arm;
   s.elseBranch = { kind: NodeKind.CompoundStmt, statements: between } as unknown as CompoundStmt;
   b.statements.splice(k + 1, between.length);
+}
+
+/** Put a shared, two-call void tail on the path that skips one invitation-style arm. */
+function doTailguard(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'tailguard' }>): void {
+  if (text(fn.returnType) !== 'void') refuse('the function does not return void');
+  const { b, k, s } = nthIf(fn, f.cond, f.index);
+  if (b !== fn.body) refuse('the if is not at function scope');
+  if (s.isConstexpr) refuse('the if is constexpr');
+  const condition = unparen(s.condition);
+  if (condition.kind !== NodeKind.UnaryExpr || (condition as UnaryExpr).operator !== '!') refuse('the condition is not a negated flag');
+  const flag = unparen((condition as UnaryExpr).operand);
+  if (flag.kind !== NodeKind.Identifier) refuse('the flag is not an identifier');
+  const flagName = (flag as Identifier).name;
+  const localDecls = [...walk(fn.body!)].filter(({ node }) => node.kind === NodeKind.VariableDecl && (node as VariableDecl).name.name === flagName)
+    .map(({ node }) => node as VariableDecl);
+  const prefixDecls = b.statements.slice(0, k).map(declOf).filter((d): d is VariableDecl => d?.name.name === flagName);
+  const parameterDecls = fn.parameters.filter(p => isId(p.name, flagName));
+  if (localDecls.length + parameterDecls.length !== 1) refuse('the flag has no unique binding');
+  const binding = parameterDecls[0] ?? (prefixDecls.length === 1 && prefixDecls[0] === localDecls[0] ? prefixDecls[0] : undefined);
+  if (!binding || WIDTH[text(binding.type)] === undefined) refuse('the flag is not a visible integral local or parameter');
+  if (s.thenBranch.kind !== NodeKind.CompoundStmt) refuse('the arm has no block scope');
+  const arm = s.thenBranch as CompoundStmt;
+  if (arm.statements.length === 0) refuse('the arm is empty');
+  if ([...walk(arm)].some(({ node }) => [NodeKind.ReturnStmt, NodeKind.BreakStmt, NodeKind.ContinueStmt,
+    NodeKind.GotoStmt, NodeKind.LabelStmt, NodeKind.CaseStmt, NodeKind.DefaultStmt].includes(node.kind)))
+    refuse('the arm has an exit or label');
+  const tail = b.statements.slice(k + 1);
+  if (tail.length !== 2 || tail.some(x => x.kind !== NodeKind.ExprStmt || unparen((x as ExprStmt).expression).kind !== NodeKind.CallExpr))
+    refuse('the function does not end in exactly two calls');
+  const calls = tail.map(x => unparen((x as ExprStmt).expression) as unknown as { callee: Expression });
+  if (text(calls[0].callee) !== text(calls[1].callee)) refuse('the tail calls differ');
+  const ret = parse('void __vc8f() { return; }').declarations[0] as FunctionDecl;
+  const guard = { ...s, condition: cloneNode(flag),
+    thenBranch: { kind: NodeKind.CompoundStmt,
+      statements: [cloneNode(tail[0]), cloneNode(tail[1]), ret.body!.statements[0]],
+    } as CompoundStmt } as IfStmt;
+  b.statements.splice(k, 1, guard, arm);
+}
+
+/** Print the tail an if's arm falls into also on the path that skips the arm. */
+function doTailcopy(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'tailcopy' }>): void {
+  const { b, k, s } = nthIf(fn, f.cond, f.index);
+  if (s.isConstexpr) refuse('the if is constexpr');
+  if (leaves(s.thenBranch)) refuse('the arm always leaves');
+  const tail = b.statements.slice(k + 1);
+  if (tail.length === 0) refuse('nothing follows the if');
+  const last = tail[tail.length - 1];
+  const voidEnd = b === fn.body && text(fn.returnType) === 'void';
+  if (last.kind !== NodeKind.ReturnStmt && !voidEnd) refuse('the block does not end in a return');
+  const why = movable(tail, true);
+  if (why) refuse(why);
+  if ([...tail].some(t => [...walk(t)].some(({ node }) => node.kind === NodeKind.VariableDecl
+    && (node as VariableDecl).specifiers.some(x => x === 'static' || x === 'extern')))) refuse('the tail declares a static');
+  const c = unparen(s.condition);
+  const cmp = c.kind === NodeKind.BinaryExpr && FLIP[(c as BinaryExpr).operator];
+  if (cmp && (maybeFloat((c as BinaryExpr).left, fn) || maybeFloat((c as BinaryExpr).right, fn))) refuse('the compare may be floating point');
+  const copy = tail.map(t => cloneNode(t) as Statement);
+  if (last.kind !== NodeKind.ReturnStmt) copy.push({ kind: NodeKind.ReturnStmt } as unknown as Statement);
+  const guard = { ...s, condition: negateWrap(s.condition), thenBranch: { kind: NodeKind.CompoundStmt, statements: copy } as unknown as CompoundStmt } as IfStmt;
+  b.statements.splice(k, 1, guard, asBlock(s.thenBranch));
 }
 
 function doContinue(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'continue' }>): void {
@@ -1101,6 +2194,89 @@ function doDup(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'dup' }>): void {
   b.statements.splice(k, 1);
 }
 
+/**
+ * True when evaluating e earlier, and whether or not a test that stores nothing holds,
+ * gives the same value and cannot fault: locals, parameters, globals, literals, casts,
+ * arithmetic without division, and the address of an lvalue whose address loads nothing
+ * (`&p->m.n`, not `&p->m->n` or `&a[i]`).
+ */
+function loadsNothing(e: Expression): boolean {
+  e = unparen(e);
+  switch (e.kind) {
+    case NodeKind.Identifier: case NodeKind.QualifiedId:
+    case NodeKind.IntegerLiteral: case NodeKind.FloatingLiteral: case NodeKind.CharLiteral:
+    case NodeKind.StringLiteral: case NodeKind.BoolLiteral: case NodeKind.NullptrLiteral:
+      return true;
+    case NodeKind.CStyleCastExpr: case NodeKind.StaticCastExpr: case NodeKind.ReinterpretCastExpr: case NodeKind.ConstCastExpr:
+      return loadsNothing((e as CStyleCastExpr).expression);
+    case NodeKind.BinaryExpr: {
+      const b = e as BinaryExpr;
+      if (['/', '%'].includes(b.operator)) return false;
+      return loadsNothing(b.left) && loadsNothing(b.right);
+    }
+    case NodeKind.UnaryExpr: {
+      const u = e as UnaryExpr;
+      if (u.operator === '&') return addressLoadsNothing(u.operand);
+      return ['-', '+', '~', '!'].includes(u.operator) && loadsNothing(u.operand);
+    }
+  }
+  return false;
+}
+
+function addressLoadsNothing(lv: Expression): boolean {
+  lv = unparen(lv);
+  if (lv.kind === NodeKind.Identifier || lv.kind === NodeKind.QualifiedId) return true;
+  if (lv.kind === NodeKind.MemberExpr) {
+    const m = lv as unknown as { object: Expression; isArrow: boolean };
+    return m.isArrow ? loadsNothing(m.object) : addressLoadsNothing(m.object);
+  }
+  return false;
+}
+
+function doHoist(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'hoist' }>): void {
+  const w = norm(f.stmt).replace(/;$/, '');
+  const hits: Array<{ b: CompoundStmt; k: number }> = [];
+  for (const b of blocks(fn)) b.statements.forEach((s, k) => {
+    if (s.kind !== NodeKind.IfStmt) return;
+    const arm = stmtsOf((s as IfStmt).thenBranch);
+    if (arm.length > 0 && arm[0].kind === NodeKind.ExprStmt && text((arm[0] as ExprStmt).expression) === w) hits.push({ b, k });
+  });
+  const hit = f.index === 0 ? (hits.length === 1 ? hits[0] : refuse(`${hits.length} ifs begin with ${f.stmt}`)) : (hits[f.index - 1] ?? refuse(`no if #${f.index} begins with ${f.stmt}`));
+  const ifs = hit.b.statements[hit.k] as IfStmt;
+  if (ifs.init) refuse('an if with an init statement');
+  if (ifs.elseBranch) refuse('the if has an else');
+  if (ifs.thenBranch.kind !== NodeKind.CompoundStmt) refuse('the arm is not a block');
+  const arm = (ifs.thenBranch as CompoundStmt).statements;
+  if (arm.length < 2) refuse('the store is the whole arm');
+  const st = storeOf(arm[0]);
+  if (!st || st.operator !== '=') refuse(`${f.stmt} is not a plain store`);
+  const root = storeRoot(st!.left, localNames(fn));
+  if (root === '*') refuse(`${f.stmt} stores through memory`);
+  // The left side's own address must load nothing either: `x.a[i]` indexes by a value.
+  if (!addressLoadsNothing(st!.left)) refuse(`the place ${f.stmt} stores to is computed`);
+  if (!loadsNothing(st!.right)) refuse(`the value of ${f.stmt} loads memory or can fault`);
+  if (hasCall(ifs.condition) || storedNames(ifs.condition).size > 0) refuse('the condition calls or stores');
+  // Dead on the untaken path: the local is named only inside the arm, where the store
+  // comes first, and in its declaration.
+  const inArm = new Set<ASTNode>();
+  for (const { node } of walk(ifs.thenBranch)) inArm.add(node);
+  const declNames = new Set<ASTNode>();
+  for (const { node } of walk(fn.body!)) {
+    if (node.kind !== NodeKind.VariableDecl) continue;
+    const d = node as VariableDecl;
+    if (d.name.name === root && d.initializer) refuse(`${root} is declared with a value`);
+    declNames.add(d.name);
+  }
+  for (const p of fn.parameters) {
+    const n = (p as unknown as { name?: Identifier | null }).name;
+    if (n && isId(n, root)) refuse(`${root} is a parameter`);
+  }
+  for (const { node } of walk(fn.body!)) {
+    if (isId(node, root) && !inArm.has(node) && !declNames.has(node)) refuse(`${root} is named outside the arm`);
+  }
+  hit.b.statements.splice(hit.k, 0, arm.shift()!);
+}
+
 /** The nodes of a kind whose text is `want`, in preorder; the i-th (1-based), or the only one for i = 0. */
 function pick<T extends ASTNode>(fn: FunctionDecl, want: string, index: number, ok: (n: ASTNode) => n is T, key: (n: T) => ASTNode = n => n): T {
   const w = norm(want);
@@ -1141,6 +2317,38 @@ function doNonzero(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'nonzero' }>): vo
   const e = unparen((hit.parent as Record<string, unknown>)[hit.key as string] as Expression);
   if (e.kind === NodeKind.BinaryExpr && MIRROR[(e as BinaryExpr).operator] !== undefined) refuse(`${f.expr} is a comparison already`);
   put(hit, { kind: NodeKind.BinaryExpr, operator: '!=', left: { kind: NodeKind.ParenExpr, expression: e }, right: intLit(0n, 10) } as unknown as BinaryExpr);
+}
+
+/** Every place an expression printed `w` stands tested for truth only, in preorder. */
+function truthSlots(fn: FunctionDecl, w: string): Slot[] {
+  const slots: Slot[] = [];
+  for (const { node } of walk(fn.body!)) {
+    const o = node as unknown as Record<string, unknown>;
+    const at = (field: string) => { const e = o[field] as Expression | null; if (e && text(unparen(e)) === w) slots.push({ parent: o, key: field }); };
+    if (node.kind === NodeKind.IfStmt || node.kind === NodeKind.WhileStmt || node.kind === NodeKind.DoWhileStmt || node.kind === NodeKind.ForStmt || node.kind === NodeKind.ConditionalExpr) at('condition');
+    if (node.kind === NodeKind.BinaryExpr && ['&&', '||'].includes((node as BinaryExpr).operator)) { at('left'); at('right'); }
+    if (node.kind === NodeKind.UnaryExpr && (node as UnaryExpr).operator === '!') at('operand');
+    if (node.kind === NodeKind.BinaryExpr && ['==', '!='].includes((node as BinaryExpr).operator)) {
+      const b = node as BinaryExpr;
+      const zero = (e: Expression) => { const l = litValue(e); return !!l && l.v === 0n; };
+      if (zero(b.right)) at('left');
+      else if (zero(b.left)) at('right');
+    }
+  }
+  return slots;
+}
+
+function doBool(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'bool' }>): void {
+  const slots = truthSlots(fn, norm(f.expr));
+  const hit = f.index === 0
+    ? (slots.length === 1 ? slots[0] : refuse(`${slots.length} truth tests of ${f.expr}`))
+    : (slots[f.index - 1] ?? refuse(`no truth test #${f.index} of ${f.expr}`));
+  const holder = hit.parent as Record<string, unknown>;
+  const e = unparen(holder[hit.key as string] as Expression);
+  if (maybeFloat(e, fn)) refuse(`${f.expr} may be floating point`);
+  const cast = parseExpr('(bool)(__vc8e)') as CStyleCastExpr;
+  (cast.expression as ParenExpr).expression = e;
+  put(hit, cast);
 }
 
 function intLit(v: bigint, base: 10 | 16): Expression {
@@ -1254,6 +2462,133 @@ function doIfsel(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'ifsel' }>): void {
   } else b.statements.splice(k, 1, sel);
 }
 
+/**
+ * Whether e has type int once promoted: an int, a narrower integer, a literal within int, or
+ * arithmetic over those. A 32-bit unsigned, a 64-bit, a floating, an enum or an undeclared
+ * operand is not known to be one and answers false.
+ */
+function promotesToInt(e: Expression, shapeOf: (x: Expression) => { base: string; stars: number } | null): boolean {
+  const narrowInt = (t: string) => { const i = intType(t, false); return !!i && !i.r.u && i.w <= 4; };
+  e = unparen(e);
+  switch (e.kind) {
+    case NodeKind.IntegerLiteral: {
+      const l = e as IntegerLiteralExpr;
+      return !/[ui]|ll/i.test(l.suffix) && l.value <= 0x7fffffffn;
+    }
+    case NodeKind.CharLiteral: case NodeKind.BoolLiteral: return true;
+    case NodeKind.CStyleCastExpr: return narrowInt(text((e as CStyleCastExpr).type));
+    case NodeKind.UnaryExpr: {
+      const u = e as UnaryExpr;
+      if (u.operator === '!') return true;
+      return ['-', '+', '~'].includes(u.operator) && promotesToInt(u.operand, shapeOf);
+    }
+    case NodeKind.BinaryExpr: {
+      const x = e as BinaryExpr;
+      if (['==', '!=', '<', '<=', '>', '>=', '&&', '||'].includes(x.operator)) return true;
+      if (x.operator === '<<' || x.operator === '>>') return promotesToInt(x.left, shapeOf) && promotesToInt(x.right, shapeOf);
+      return ['+', '-', '*', '/', '%', '&', '|', '^'].includes(x.operator) && promotesToInt(x.left, shapeOf) && promotesToInt(x.right, shapeOf);
+    }
+    case NodeKind.ConditionalExpr: {
+      const c = e as ConditionalExpr;
+      return promotesToInt(c.thenExpr, shapeOf) && promotesToInt(c.elseExpr, shapeOf);
+    }
+  }
+  const s = shapeOf(e);
+  return !!s && s.stars === 0 && narrowInt(s.base);
+}
+
+/** Whether e is of an integer type of at most 32 bits, either sign. */
+function integral32(e: Expression, shapeOf: (x: Expression) => { base: string; stars: number } | null): boolean {
+  if (promotesToInt(e, shapeOf)) return true;
+  const u = unparen(e);
+  if (u.kind === NodeKind.IntegerLiteral) return !/i|ll/i.test((u as IntegerLiteralExpr).suffix) && (u as IntegerLiteralExpr).value <= 0xffffffffn;
+  const s = u.kind === NodeKind.CStyleCastExpr ? { base: text((u as CStyleCastExpr).type), stars: 0 } : shapeOf(u);
+  return !!s && s.stars === 0 && (intType(s.base, false)?.w ?? 8) <= 4;
+}
+
+/** Re-form a proven, effect-free clamp as the source select VC8 compiled. */
+function doClamp(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'clamp' }>): void {
+  const declarations = [...walk(fn.body!)].filter(x => x.node.kind === NodeKind.VariableDecl && (x.node as VariableDecl).name.name === f.name)
+    .map(x => x.node as VariableDecl);
+  if (declarations.length !== 1 || fn.parameters.some(p => (p as unknown as { name?: Identifier }).name?.name === f.name))
+    refuse(`${f.name} is not one unshadowed local`);
+  const declared = declarations[0];
+  if (declared.specifiers.includes('static') || !new Set(['int', 'int32_t', 'signedint', 'long', 'signedlong', 'LONG']).has(text(declared.type)))
+    refuse(`${f.name} is not a nonstatic signed 32-bit integer`);
+  if (addressTaken(fn, f.name)) refuse(`&${f.name} is taken`);
+  const reverse: Record<string, string> = { '<': '>', '<=': '>=', '>': '<', '>=': '<=' };
+  const opposite: Record<string, string> = { '<': '>=', '<=': '>', '>': '<=', '>=': '<' };
+  const hits: Array<{ b: CompoundStmt; k: number; value: Expression; bound: Expression; op: string; decl?: VariableDecl; store?: AssignExpr }> = [];
+  for (const b of blocks(fn)) {
+    for (let k = 0; k + 1 < b.statements.length; k++) {
+      const first = b.statements[k];
+      const store = storeOf(first);
+      const decl = declOf(first);
+      let value: Expression | undefined;
+      if (store?.operator === '=' && isId(unparen(store.left), f.name)) value = store.right;
+      else if (decl?.name.name === f.name && decl.initializer && decl.initializer.kind !== NodeKind.InitListExpr && !decl.directInit) value = decl.initializer as Expression;
+      if (!value) continue;
+      const next = b.statements[k + 1];
+      if (next.kind !== NodeKind.IfStmt) continue;
+      const guard = next as IfStmt;
+      if (guard.init || guard.elseBranch || guard.isConstexpr) continue;
+      const condition = unparen(guard.condition);
+      if (condition.kind !== NodeKind.BinaryExpr) continue;
+      const compare = condition as BinaryExpr;
+      let op = compare.operator as string;
+      let bound: Expression;
+      if (isId(unparen(compare.left), f.name) && opposite[op]) bound = compare.right;
+      else if (isId(unparen(compare.right), f.name) && reverse[op]) {
+        bound = compare.left;
+        op = reverse[op];
+      } else continue;
+      const branch = guard.thenBranch.kind === NodeKind.CompoundStmt
+        ? ((guard.thenBranch as CompoundStmt).statements.length === 1 ? (guard.thenBranch as CompoundStmt).statements[0] : undefined)
+        : guard.thenBranch;
+      const clampStore = branch && storeOf(branch);
+      if (!clampStore || clampStore.operator !== '=' || !isId(unparen(clampStore.left), f.name) || text(clampStore.right) !== text(bound)) continue;
+      hits.push({ b, k, value, bound, op, decl: decl?.name.name === f.name ? decl : undefined, store });
+    }
+  }
+  if (hits.length === 0) refuse(`no adjacent clamp of ${f.name}`);
+  if (f.index === 0 && hits.length !== 1) refuse(`${hits.length} clamps of ${f.name}`);
+  if (f.index > hits.length) refuse(`no clamp #${f.index} of ${f.name}`);
+  const { b, k, value, bound, op, decl, store } = hits[(f.index || 1) - 1];
+  if (effects(value) || effects(bound)) refuse('clamp expression or bound has effects');
+  if (mentions(value, f.name) || mentions(bound, f.name)) refuse(`${f.name} occurs in the clamp expression or bound`);
+  const readNames = new Set([...identifiers(value), ...identifiers(bound)]);
+  for (const { node } of walk(fn.body!)) {
+    if (node.kind !== NodeKind.VariableDecl) continue;
+    const v = node as VariableDecl;
+    if (readNames.has(v.name.name) && text(v.type).includes('volatile')) refuse(`${v.name.name} is volatile`);
+  }
+  for (const p of fn.parameters) {
+    const v = p as unknown as { name?: Identifier; type?: TypeNode };
+    if (v.name && v.type && readNames.has(v.name.name) && text(v.type).includes('volatile')) refuse(`${v.name.name} is volatile`);
+  }
+  // E takes V's place in the test and E or L is stored, so both must convert as V and L did:
+  // E is an int once promoted (an unsigned E would flip the test's signedness, a 64-bit one
+  // be compared before truncation), and L an integer of at most 32 bits (a floating L would
+  // round E in the select's common type).
+  const tables = selectTables;
+  const shapeOf = createExprShape(localTypesOf(fn), {
+    globalTypes: tables?.globalTypes ?? {}, enclosingVarTypes: tables?.enclosingVarTypes ?? {},
+    structFields: tables?.structFields ?? {}, fieldTypes: tables?.fieldTypes ?? {},
+    returnTypes: tables?.functionReturnTypes ?? {}, resolve: (n: string) => tables?.typedefTargets?.[n],
+  });
+  if (!promotesToInt(value, shapeOf)) refuse(`${text(value)} is not known to be an int`);
+  if (!integral32(bound, shapeOf)) refuse(`${text(bound)} is not known to be a 32-bit integer`);
+  const select = {
+    kind: NodeKind.ConditionalExpr,
+    condition: { kind: NodeKind.BinaryExpr, operator: opposite[op], left: cloneNode(value), right: cloneNode(bound) },
+    thenExpr: cloneNode(value), elseExpr: cloneNode(bound),
+  } as unknown as ConditionalExpr;
+  if (decl) decl.initializer = select;
+  else if (store) store.right = select;
+  else refuse('no clamp destination');
+  b.statements.splice(k + 1, 1);
+}
+
 function doSplit(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'split' }>): void {
   if (localNames(fn).has(f.rename)) refuse(`${f.rename} exists`);
   if (addressTaken(fn, f.name)) refuse(`&${f.name} is taken`);
@@ -1263,7 +2598,9 @@ function doSplit(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'split' }>): void {
   for (const b of blocks(fn)) {
     for (let k = 0; k < b.statements.length; k++) {
       const st = storeOf(b.statements[k]);
-      if (!st || st.operator !== '=' || !isId(unparen(st.left), f.name) || mentions(st.right, f.name)) continue;
+      // A store that reads V's old value (`V = V * k`) begins a new life too: the new
+      // variable's initializer reads V, which still holds that value there.
+      if (!st || st.operator !== '=' || !isId(unparen(st.left), f.name)) continue;
       // Its life: up to the next plain store to V that does not read V, in this block.
       let end = k + 1;
       for (; end < b.statements.length; end++) {
@@ -1294,29 +2631,1743 @@ function doSplit(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'split' }>): void {
   for (const s of b.statements.slice(k + 1, end)) for (const { node } of walk(s)) if (isId(node, f.name)) (node as Identifier).name = f.rename;
 }
 
+let selectTables: Vc8FormTables | undefined;
+
+function doTsel(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'tsel' }>): void {
+  try {
+    selectPairedArguments(fn, f.cond, f.index, selectTables);
+  } catch (e) {
+    if (e instanceof SelectRefused) refuse(e.message);
+    throw e;
+  }
+}
+
+// ---------------------------------------------------------------------------------------
+// Call and string-instruction forms
+
+/** The declared type of a local or parameter, as printed, or undefined. */
+function declaredType(fn: FunctionDecl, v: string): string | undefined {
+  for (const p of fn.parameters) {
+    const n = (p as unknown as { name?: Identifier | null; type: TypeNode }).name;
+    if (n && isId(n, v)) return norm(emit((p as unknown as { type: TypeNode }).type as never));
+  }
+  for (const { node } of walk(fn.body!)) {
+    if (node.kind === NodeKind.VariableDecl && (node as VariableDecl).name.name === v) return norm(emit((node as VariableDecl).type as never));
+  }
+  return undefined;
+}
+
+/** Arithmetic types a stored value can be narrowed, widened or rounded by. */
+const CONVERTS = new Set(['char', 'signedchar', 'unsignedchar', 'int8_t', 'uint8_t', 'BYTE', 'CHAR', 'UCHAR', 'byte', 'bool',
+  'short', 'shortint', 'unsignedshort', 'unsignedshortint', 'int16_t', 'uint16_t', 'ushort', 'WORD', 'WCHAR', 'wchar_t', 'SHORT', 'USHORT',
+  'float', 'double', 'longdouble', 'FLOAT', 'longlong', 'unsignedlonglong', '__int64', 'unsigned__int64', 'int64_t', 'uint64_t',
+  'LONGLONG', 'ULONGLONG', 'QWORD', 'DWORD64']);
+/**
+ * A type whose store keeps a call's value as is: a pointer, a 32-bit integer, an enum, a
+ * class. An arithmetic type of another width or a floating one may convert the value on the
+ * store where the argument would take it unconverted; an implicit conversion into anything
+ * else needs the call to return that very type.
+ */
+const keepsValue = (t: string | undefined) => !!t && !/[\[\]()]/.test(t) && (t.endsWith('*') || !CONVERTS.has(t.replace(/^const/, '')));
+
+/**
+ * An expression that, evaluated earlier or later around a call, has the same value: it calls
+ * nothing, stores nothing and reads only constants and locals whose address is not taken
+ * (the call cannot write those), with no division that could fault.
+ */
+function callProof(fn: FunctionDecl, e: Expression, locals: Set<string>): boolean {
+  e = unparen(e);
+  switch (e.kind) {
+    case NodeKind.IntegerLiteral: case NodeKind.FloatingLiteral: case NodeKind.CharLiteral:
+    case NodeKind.StringLiteral: case NodeKind.BoolLiteral: case NodeKind.NullptrLiteral:
+      return true;
+    case NodeKind.SizeofExpr: return true;
+    case NodeKind.Identifier: return locals.has((e as Identifier).name) && !addressTaken(fn, (e as Identifier).name);
+    case NodeKind.CStyleCastExpr: case NodeKind.StaticCastExpr: case NodeKind.ReinterpretCastExpr: case NodeKind.ConstCastExpr:
+      return callProof(fn, (e as CStyleCastExpr).expression, locals);
+    case NodeKind.BinaryExpr: {
+      const b = e as BinaryExpr;
+      return !['/', '%'].includes(b.operator) && callProof(fn, b.left, locals) && callProof(fn, b.right, locals);
+    }
+    case NodeKind.UnaryExpr: {
+      const u = e as UnaryExpr;
+      // The address of a local loads nothing; it is no read of the local either.
+      if (u.operator === '&') { const o = unparen(u.operand); return isId(o) && locals.has(o.name); }
+      return ['-', '+', '~', '!'].includes(u.operator) && callProof(fn, u.operand, locals);
+    }
+  }
+  return false;
+}
+
+/** A callee that names a function: evaluating it reads nothing a call could change. */
+const namedCallee = (e: Expression) => { e = unparen(e); return e.kind === NodeKind.Identifier || e.kind === NodeKind.QualifiedId; };
+
+/**
+ * What a loop does to v first, where readFirst would call any mention a read: a for or
+ * while loop whose head does not name v and whose body stores it first may run no time
+ * (`none`); a do-while body runs once (its own answer).
+ */
+function loopFirst(s: Statement, v: string): 'read' | 'store' | 'none' | undefined {
+  const l = s as unknown as { init?: Statement | null; condition?: Expression | null; increment?: Expression | null; body: Statement };
+  for (const { node } of walk(s)) if (LIFE_JUMPS.has(node.kind) && node.kind !== NodeKind.BreakStmt && node.kind !== NodeKind.ContinueStmt) return undefined;
+  if (s.kind === NodeKind.DoWhileStmt) return readFirst(l.body, v);
+  if (s.kind !== NodeKind.ForStmt && s.kind !== NodeKind.WhileStmt) return undefined;
+  if ((l.init && mentions(l.init, v)) || (l.condition && mentions(l.condition, v)) || (l.increment && mentions(l.increment, v))) return undefined;
+  return readFirst(l.body, v) === 'store' ? 'none' : undefined;
+}
+
+/** Whether V is dead after statement k+1 of b: its next mention stores it first, or there is none and nothing after b reads it. */
+function deadAfter(fn: FunctionDecl, b: CompoundStmt, k: number, last: number, v: string): boolean {
+  for (const s of b.statements.slice(last + 1)) {
+    if (!mentions(s, v)) {
+      for (const { node } of walk(s)) if (LIFE_JUMPS.has(node.kind)) return false;
+      continue;
+    }
+    const r = loopFirst(s, v) ?? readFirst(s, v);
+    if (r !== 'none') return r === 'store';
+    // Stored on some paths only: what follows may still read the old value.
+  }
+  return !blockReadsAfter(fn, b, v, k, true);
+}
+
+function doNestcall(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'nestcall' }>): void {
+  const v = f.name;
+  const hits: Array<{ b: CompoundStmt; k: number; value: Expression; decl?: VariableDecl }> = [];
+  for (const b of blocks(fn)) b.statements.forEach((s, k) => {
+    const st = storeOf(s), d = declOf(s);
+    if (st && st.operator === '=' && isId(unparen(st.left), v) && unparen(st.right).kind === NodeKind.CallExpr) hits.push({ b, k, value: st.right });
+    else if (d && d.name.name === v && d.initializer && d.initializer.kind !== NodeKind.InitListExpr && unparen(d.initializer as Expression).kind === NodeKind.CallExpr) hits.push({ b, k, value: d.initializer as Expression, decl: d });
+  });
+  const hit = f.index === 0 ? (hits.length === 1 ? hits[0] : refuse(`${hits.length} calls stored to ${v}`)) : (hits[f.index - 1] ?? refuse(`no call #${f.index} stored to ${v}`));
+  const { b, k } = hit;
+  if (addressTaken(fn, v)) refuse(`&${v} is taken`);
+  if (!keepsValue(declaredType(fn, v))) refuse(`${v}'s type may convert the stored value`);
+  if (mentions(hit.value, v)) refuse(`${v} is stored from itself`);
+  const next = b.statements[k + 1] ?? refuse('nothing follows the store');
+  // The expression the call moves into: the statement's own, never a loop's.
+  let root: Expression | undefined;
+  if (next.kind === NodeKind.ExprStmt) root = (next as ExprStmt).expression;
+  else if (next.kind === NodeKind.ReturnStmt) root = (next as ReturnStmt).value ?? undefined;
+  else if (next.kind === NodeKind.DeclStmt) { const d = declOf(next); root = d && d.initializer && d.initializer.kind !== NodeKind.InitListExpr ? d.initializer as Expression : undefined; }
+  else if (next.kind === NodeKind.IfStmt && !(next as IfStmt).init) {
+    root = (next as IfStmt).condition;
+    for (const br of [(next as IfStmt).thenBranch, (next as IfStmt).elseBranch]) if (br && mentions(br, v)) refuse(`${v} is read in an arm`);
+  } else if (next.kind === NodeKind.SwitchStmt) {
+    root = (next as unknown as { condition: Expression }).condition;
+    if (mentions((next as unknown as { body: Statement }).body, v)) refuse(`${v} is read in the switch`);
+  }
+  if (!root) refuse('the next statement is no expression, return, declaration, if or switch');
+  const uses = [...walk(root!)].filter(x => isId(x.node, v) && x.slot);
+  if (uses.length !== 1) refuse(`${v} is read ${uses.length} times by the next statement`);
+  if (storedNames(next).has(v)) refuse(`the next statement stores ${v}`);
+  // Up from the use: parentheses and casts, then a call's argument or a member's object.
+  const parents = new Map<ASTNode, ASTNode>();
+  for (const { node, slot } of walk(root!)) {
+    if (!slot) continue;
+    if (!Array.isArray(slot.parent)) parents.set(node, slot.parent as unknown as ASTNode);
+    else for (const { node: owner } of walk(root!)) {
+      const o = owner as unknown as Record<string, unknown>;
+      if (Object.values(o).includes(slot.parent)) { parents.set(node, owner); break; }
+    }
+  }
+  const locals = localNames(fn);
+  const CASTS = new Set<string>([NodeKind.ParenExpr, NodeKind.CStyleCastExpr, NodeKind.StaticCastExpr, NodeKind.ReinterpretCastExpr, NodeKind.ConstCastExpr]);
+  let c: ASTNode = uses[0].node;
+  while (parents.has(c) && CASTS.has(parents.get(c)!.kind)) c = parents.get(c)!;
+  const first = parents.get(c);
+  const place = !!first && ((first.kind === NodeKind.CallExpr && (first as CallExpr).arguments.includes(c as Expression))
+    || (first.kind === NodeKind.MemberExpr && (first as unknown as { object: ASTNode }).object === c));
+  if (!place) refuse(`${v} is not a whole argument or the object of a member`);
+  // Everything that may be evaluated before the call in its new place must not care.
+  const proof = (e: Expression | null | undefined) => !e || callProof(fn, e, locals);
+  for (let p = parents.get(c); p; c = p, p = parents.get(p)) {
+    switch (p.kind) {
+      case NodeKind.ParenExpr: case NodeKind.CStyleCastExpr: case NodeKind.StaticCastExpr:
+      case NodeKind.ReinterpretCastExpr: case NodeKind.ConstCastExpr: case NodeKind.MemberExpr:
+        break;
+      case NodeKind.UnaryExpr:
+        if (['++', '--'].includes((p as UnaryExpr).operator)) refuse('the call would be stored to');
+        break;
+      case NodeKind.PostfixExpr: refuse('the call would be stored to'); break;
+      case NodeKind.SubscriptExpr: {
+        const s = p as unknown as { array: Expression; index: Expression };
+        if (s.index === c && !proof(s.array)) refuse('the subscripted value calls, stores or reads memory');
+        break;
+      }
+      case NodeKind.CallExpr: {
+        const call = p as CallExpr;
+        if (call.callee === c) break;
+        if (!namedCallee(call.callee) && !proof(call.callee)) refuse('the callee is computed');
+        for (const a of call.arguments) if (a !== c && !proof(a)) refuse(`the argument ${text(a)} calls, stores or reads memory`);
+        break;
+      }
+      case NodeKind.BinaryExpr: {
+        const e = p as BinaryExpr;
+        if (e.operator === '&&' || e.operator === '||') { if (e.right === c) refuse(`the call would be conditional on ${e.operator}`); break; }
+        if (!proof(e.left === c ? e.right : e.left)) refuse(`the other operand of ${e.operator} calls, stores or reads memory`);
+        break;
+      }
+      case NodeKind.AssignExpr: {
+        // The right side is evaluated before the left (C++17): only a use on the left moves.
+        const a = p as AssignExpr;
+        if (a.left === c && !proof(a.right)) refuse('the stored value calls, stores or reads memory');
+        break;
+      }
+      case NodeKind.ConditionalExpr:
+        if ((p as ConditionalExpr).condition !== c) refuse('the call would be conditional on ?:');
+        break;
+      case NodeKind.CommaExpr: {
+        const xs = (p as unknown as { expressions: Expression[] }).expressions;
+        for (const x of xs.slice(0, xs.indexOf(c as Expression))) if (!proof(x)) refuse('a comma operand before it calls, stores or reads memory');
+        break;
+      }
+      default: refuse(`the call cannot go under ${p.kind}`);
+    }
+  }
+  if (!deadAfter(fn, b, k, k + 1, v)) refuse(`${v} is read after the next statement`);
+  put(uses[0].slot!, cloneNode(hit.value));
+  if (hit.decl && mentionsOutsideDecl(fn, v)) hit.decl.initializer = null;
+  else b.statements.splice(k, 1);
+  if (!mentionsOutsideDecl(fn, v)) removeDecl(fn, v);
+}
+
+const ELEMENT_SIZE: Record<string, number> = {
+  uint8_t: 1, int8_t: 1, char: 1, signedchar: 1, unsignedchar: 1, BYTE: 1, CHAR: 1, byte: 1, bool: 1,
+  uint16_t: 2, int16_t: 2, wchar_t: 2, WORD: 2, WCHAR: 2, short: 2, shortint: 2, unsignedshort: 2, unsignedshortint: 2, ushort: 2,
+  uint32_t: 4, int32_t: 4, int: 4, unsignedint: 4, DWORD: 4, BOOL: 4, long: 4, longint: 4, unsignedlong: 4, unsignedlongint: 4, UINT: 4,
+};
+
+/** An integer literal's value, or undefined. */
+function intValue(e: Expression | null | undefined): bigint | undefined {
+  if (!e) return undefined;
+  const l = litValue(unparen(e));
+  return l?.v;
+}
+
+/** `N = K` (or `int N = K`) for a for-loop's init: [N, K]. */
+function countInit(s: Statement | null): [string, bigint] | undefined {
+  if (!s) return undefined;
+  const st = storeOf(s);
+  if (st && st.operator === '=' && isId(unparen(st.left))) { const k = intValue(st.right); return k === undefined ? undefined : [(unparen(st.left) as Identifier).name, k]; }
+  return undefined;
+}
+
+/** `for (N = K; N; N--)` (or `N != 0`, `--N`, `N -= 1`): [N, K]. */
+function countdown(s: Statement): [string, bigint] | undefined {
+  if (s.kind !== NodeKind.ForStmt) return undefined;
+  const f = s as ForStmt;
+  const init = countInit(f.init);
+  if (!init || init[1] <= 0n) return undefined;
+  const [n] = init;
+  const c = f.condition && unparen(f.condition);
+  const tests = !!c && (isId(c, n) || (c.kind === NodeKind.BinaryExpr && (c as BinaryExpr).operator === '!=' && isId(unparen((c as BinaryExpr).left), n) && intValue((c as BinaryExpr).right) === 0n));
+  if (!tests || !f.increment || !steps(f.increment, n, '-')) return undefined;
+  return init;
+}
+
+/** `X++`, `++X`, `X += 1` (or with '-'), for an identifier X. */
+function steps(e: Expression, x: string, dir: '+' | '-'): boolean {
+  e = unparen(e);
+  if ((e.kind === NodeKind.PostfixExpr || e.kind === NodeKind.UnaryExpr) && (e as UnaryExpr).operator === dir + dir) return isId(unparen((e as UnaryExpr).operand), x);
+  if (e.kind === NodeKind.AssignExpr && (e as AssignExpr).operator === dir + '=') return isId(unparen((e as AssignExpr).left), x) && intValue((e as AssignExpr).right) === 1n;
+  return false;
+}
+
+/** `X += m` for an identifier X: m, or undefined. */
+function stepBy(s: Statement, x: string): bigint | undefined {
+  const st = storeOf(s);
+  if (!st || st.operator !== '+=' || !isId(unparen(st.left), x)) return undefined;
+  return intValue(st.right);
+}
+
+/** A literal zero: `0`, `0x0`, or the character `'\\0'` / `L'\\0'`. */
+const isZero = (e: Expression) => { const u = unparen(e); return intValue(u) === 0n || (u.kind === NodeKind.CharLiteral && (u as unknown as { value: number }).value === 0); };
+
+function fillLoop(name: string, from: bigint, to: bigint): Statement {
+  if (to > 0x7fffffffn || from < 0n) refuse('a bound leaves int');
+  const hex = (v: bigint) => (v > 9n ? '0x' + v.toString(16) : v.toString());
+  const fn = parse(`void __vc8f() { for (int i = ${hex(from)}; i < ${hex(to)}; i++) ${name}[i] = 0; }`).declarations[0] as FunctionDecl;
+  return fn.body!.statements[0];
+}
+
+interface FillSite { b: CompoundStmt; k: number; count: number; loop: Statement; dead: string[]; keepDecl?: VariableDecl; range?: [bigint, bigint] }
+
+function fillSites(fn: FunctionDecl, a: string): FillSite[] {
+  const out: FillSite[] = [];
+  for (const b of blocks(fn)) b.statements.forEach((s, k) => {
+    // memset(A[ + K], 0, N * sizeof(A[0])) or a byte count.
+    if (s.kind === NodeKind.ExprStmt && unparen((s as ExprStmt).expression).kind === NodeKind.CallExpr) {
+      const call = unparen((s as ExprStmt).expression) as CallExpr;
+      if (text(call.callee) !== 'memset' || call.arguments.length !== 3 || !isZero(call.arguments[1])) return;
+      let dst = unparen(call.arguments[0]), off = 0n;
+      if (dst.kind === NodeKind.BinaryExpr && (dst as BinaryExpr).operator === '+') {
+        const o = intValue((dst as BinaryExpr).right);
+        if (o === undefined) return;
+        off = o; dst = unparen((dst as BinaryExpr).left);
+      }
+      if (!isId(dst, a)) return;
+      const size = unparen(call.arguments[2]);
+      let n: bigint | undefined;
+      if (size.kind === NodeKind.BinaryExpr && (size as BinaryExpr).operator === '*') {
+        const r = unparen((size as BinaryExpr).right);
+        // `sizeof(a[0])` may parse as the type `a[0]`: either prints the same.
+        if (r.kind === NodeKind.SizeofExpr && norm(emit((r as unknown as { operand: ASTNode }).operand as never)) === `${a}[0]`) n = intValue((size as BinaryExpr).left);
+      } else {
+        const bytes = intValue(size);
+        const t = declaredType(fn, a);
+        const m = t && /^(.*)\[[^\]]*\]$/.exec(t);
+        const el = m ? ELEMENT_SIZE[m[1].replace(/^const/, '')] : undefined;
+        if (bytes !== undefined && el && bytes % BigInt(el) === 0n) n = bytes / BigInt(el);
+      }
+      if (n === undefined || n <= 0n) return;
+      out.push({ b, k, count: 1, loop: fillLoop(a, off, off + n), dead: [], range: [off, off + n] });
+      return;
+    }
+    // P = A; for (N = K; N; N--) { P[0] = 0; ... P += m; }
+    const loop = b.statements[k + 1];
+    const cd = loop && countdown(loop);
+    if (!cd) return;
+    const st = storeOf(s), d = declOf(s);
+    let p: string | undefined, from: Expression | undefined;
+    if (st && st.operator === '=' && isId(unparen(st.left))) { p = (unparen(st.left) as Identifier).name; from = st.right; }
+    else if (d && d.initializer && d.initializer.kind !== NodeKind.InitListExpr) { p = d.name.name; from = d.initializer as Expression; }
+    // `P = A` with no cast: P points at A's elements.
+    if (!p || !from || !isId(from, a) || p === a || p === cd[0] || cd[0] === a) return;
+    const body = stmtsOf((loop as ForStmt).body);
+    let m: bigint | undefined;
+    if (body.length === 2 && storeOf(body[0]) && body[1].kind === NodeKind.ExprStmt && steps((body[1] as ExprStmt).expression, p, '+')) {
+      const z = storeOf(body[0])!;
+      const l = unparen(z.left);
+      if (z.operator === '=' && l.kind === NodeKind.UnaryExpr && (l as UnaryExpr).operator === '*' && isId(unparen((l as UnaryExpr).operand), p) && isZero(z.right)) m = 1n;
+    } else if (body.length >= 3) {
+      const by = stepBy(body[body.length - 1], p);
+      const ok = body.slice(0, -1).every((x, j) => {
+        const z = storeOf(x);
+        if (!z || z.operator !== '=' || !isZero(z.right)) return false;
+        const l = unparen(z.left) as unknown as { kind: string; array: Expression; index: Expression };
+        return l.kind === NodeKind.SubscriptExpr && isId(unparen(l.array), p) && intValue(l.index) === BigInt(j);
+      });
+      if (ok && by === BigInt(body.length - 1)) m = by;
+    }
+    if (!m) return;
+    out.push({ b, k, count: 2, loop: fillLoop(a, 0n, cd[1] * m), dead: [p, cd[0]], keepDecl: d });
+  });
+  return out;
+}
+
+function doFill(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'fill' }>): void {
+  const sites = fillSites(fn, f.name);
+  const hit = f.index === 0 ? (sites.length === 1 ? sites[0] : refuse(`${sites.length} fills of ${f.name}`)) : (sites[f.index - 1] ?? refuse(`no fill #${f.index} of ${f.name}`));
+  for (const v of hit.dead) {
+    if (!localNames(fn).has(v) || addressTaken(fn, v)) refuse(`${v} is no local, or its address is taken`);
+    if (!deadAfter(fn, hit.b, hit.k, hit.k + hit.count - 1, v)) refuse(`${v} is read after the loop`);
+  }
+  const repl: Statement[] = [hit.loop];
+  if (hit.keepDecl) {
+    // The pointer's declaration stays while the pointer is named elsewhere.
+    const d = cloneNode(hit.b.statements[hit.k]) as DeclStmt;
+    (d.declarations[0] as VariableDecl).initializer = null;
+    repl.unshift(d);
+  }
+  hit.b.statements.splice(hit.k, hit.count, ...repl);
+  // The pointer and the counter go once nothing names them.
+  for (const v of hit.dead) if (!mentionsOutsideDecl(fn, v)) removeDecl(fn, v);
+}
+
+function doElems(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'elems' }>): void {
+  const sites = fillSites(fn, f.name).filter(x => x.range);
+  const hit = f.index === 0 ? (sites.length === 1 ? sites[0] : refuse(`${sites.length} memsets of ${f.name}`)) : (sites[f.index - 1] ?? refuse(`no memset #${f.index} of ${f.name}`));
+  const [from, to] = hit.range!;
+  if (to - from > 16n) refuse(`${to - from} elements, more than 16`);
+  if (to > 0x7fffffffn || from < 0n) refuse('an index leaves int');
+  const hex = (v: bigint) => (v > 9n ? '0x' + v.toString(16) : v.toString());
+  const body: string[] = [];
+  for (let i = from; i < to; i++) body.push(`${f.name}[${hex(i)}] = 0;`);
+  const stores = (parse(`void __vc8f() { ${body.join(' ')} }`).declarations[0] as FunctionDecl).body!.statements;
+  hit.b.statements.splice(hit.k, 1, ...stores);
+}
+
+/** The pointee of a pointer type as printed, or undefined. */
+const pointee = (t: string | undefined) => (t && t.endsWith('*') ? t.slice(0, -1).replace(/^const/, '') : undefined);
+
+/**
+ * Whether pointer `p` provably points into a local no other pointer can reach at statement
+ * `at` of b: its last store before `at` in b, outside any loop, is the address of (or the
+ * array) L, a local of the body named nowhere before that store.
+ */
+function freshLocal(fn: FunctionDecl, b: CompoundStmt, at: number, p: string): boolean {
+  let k = at - 1;
+  for (; k >= 0; k--) if (mentions(b.statements[k], p)) break;
+  if (k < 0) return false;
+  const st = storeOf(b.statements[k]), d = declOf(b.statements[k]);
+  let value: Expression | undefined;
+  if (st && st.operator === '=' && isId(unparen(st.left), p)) value = st.right;
+  else if (d && d.name.name === p && d.initializer && d.initializer.kind !== NodeKind.InitListExpr) value = d.initializer as Expression;
+  if (!value) return false;
+  let e = unparen(value);
+  while (e.kind === NodeKind.CStyleCastExpr || e.kind === NodeKind.ReinterpretCastExpr || e.kind === NodeKind.StaticCastExpr) e = unparen((e as CStyleCastExpr).expression);
+  if (e.kind === NodeKind.UnaryExpr && (e as UnaryExpr).operator === '&') e = unparen((e as UnaryExpr).operand);
+  if (!isId(e)) return false;
+  const l = e.name;
+  // A local of the body (not a parameter, not static), declared before.
+  let local: VariableDecl | undefined;
+  for (const { node } of walk(fn.body!)) if (node.kind === NodeKind.VariableDecl && (node as VariableDecl).name.name === l) local = node as VariableDecl;
+  if (!local || local.specifiers.some(s => s === 'static' || s === 'extern')) return false;
+  // Named nowhere before the store, in preorder, and the store is in no loop.
+  const store = b.statements[k];
+  for (const { node } of walk(fn.body!)) {
+    if (node === store) break;
+    if (isId(node, l) && node !== local.name) return false;
+  }
+  const parents = parentsOf(fn);
+  for (let n: ASTNode | undefined = store; n; n = parents.get(n)) {
+    if (n.kind === NodeKind.WhileStmt || n.kind === NodeKind.ForStmt || n.kind === NodeKind.DoWhileStmt) return false;
+  }
+  // Nor between the store and the loop.
+  return !b.statements.slice(k + 1, at).some(s => mentions(s, l));
+}
+
+function doCopy(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'copy' }>): void {
+  const dst = f.name;
+  const sites: Array<{ b: CompoundStmt; k: number; src: string; n: string; count: bigint }> = [];
+  for (const b of blocks(fn)) b.statements.forEach((s, k) => {
+    const cd = countdown(s);
+    if (!cd) return;
+    const body = stmtsOf((s as ForStmt).body);
+    if (body.length !== 3) return;
+    const z = storeOf(body[0]);
+    if (!z || z.operator !== '=') return;
+    const l = unparen(z.left), r = unparen(z.right);
+    if (l.kind !== NodeKind.UnaryExpr || (l as UnaryExpr).operator !== '*' || !isId(unparen((l as UnaryExpr).operand), dst)) return;
+    if (r.kind !== NodeKind.UnaryExpr || (r as UnaryExpr).operator !== '*' || !isId(unparen((r as UnaryExpr).operand))) return;
+    const src = (unparen((r as UnaryExpr).operand) as Identifier).name;
+    if (new Set([dst, src, cd[0]]).size !== 3) return;
+    const inc = body.slice(1).map(x => (x.kind === NodeKind.ExprStmt ? (x as ExprStmt).expression : undefined));
+    const ok = inc.every(e => e && (steps(e, dst, '+') || steps(e, src, '+'))) && inc.some(e => steps(e!, dst, '+')) && inc.some(e => steps(e!, src, '+'));
+    if (ok) sites.push({ b, k, src, n: cd[0], count: cd[1] });
+  });
+  const hit = f.index === 0 ? (sites.length === 1 ? sites[0] : refuse(`${sites.length} copy loops into ${dst}`)) : (sites[f.index - 1] ?? refuse(`no copy loop #${f.index} into ${dst}`));
+  const td = pointee(declaredType(fn, dst)), ts = pointee(declaredType(fn, hit.src));
+  if (!td || td !== ts) refuse(`${dst} and ${hit.src} are not declared pointers to one type`);
+  for (const v of [dst, hit.src, hit.n]) {
+    if (!localNames(fn).has(v) || addressTaken(fn, v)) refuse(`${v} is no local, or its address is taken`);
+    if (!deadAfter(fn, hit.b, hit.k, hit.k, v)) refuse(`${v} is read after the loop`);
+  }
+  if (!freshLocal(fn, hit.b, hit.k, dst) && !freshLocal(fn, hit.b, hit.k, hit.src)) refuse('the two ranges are not provably apart');
+  const k = hit.count > 9n ? '0x' + hit.count.toString(16) : hit.count.toString();
+  const call = (parse(`void __vc8f() { memcpy(${dst}, ${hit.src}, ${k} * sizeof(*${dst})); }`).declarations[0] as FunctionDecl).body!.statements[0];
+  hit.b.statements.splice(hit.k, 1, call);
+}
+
+/** The integer types a shift operand may have here, by printed spelling: width and signedness. */
+const SHIFT_INTS: Record<string, { bits: number; signed: boolean }> = {
+  'int': { bits: 32, signed: true }, 'int32_t': { bits: 32, signed: true }, 'long': { bits: 32, signed: true },
+  'INT': { bits: 32, signed: true }, 'LONG': { bits: 32, signed: true }, 'BOOL': { bits: 32, signed: true },
+  'unsignedint': { bits: 32, signed: false }, 'uint32_t': { bits: 32, signed: false }, 'uint': { bits: 32, signed: false },
+  'DWORD': { bits: 32, signed: false }, 'UINT': { bits: 32, signed: false }, 'ULONG': { bits: 32, signed: false },
+  'unsignedlong': { bits: 32, signed: false }, 'size_t': { bits: 32, signed: false },
+  'short': { bits: 16, signed: true }, 'shortint': { bits: 16, signed: true }, 'int16_t': { bits: 16, signed: true }, 'SHORT': { bits: 16, signed: true },
+  'uint16_t': { bits: 16, signed: false }, 'WORD': { bits: 16, signed: false }, 'ushort': { bits: 16, signed: false },
+  'unsignedshort': { bits: 16, signed: false }, 'USHORT': { bits: 16, signed: false }, 'wchar_t': { bits: 16, signed: false },
+  'char': { bits: 8, signed: true }, 'signedchar': { bits: 8, signed: true }, 'int8_t': { bits: 8, signed: true }, 'CHAR': { bits: 8, signed: true },
+  'uint8_t': { bits: 8, signed: false }, 'BYTE': { bits: 8, signed: false }, 'byte': { bits: 8, signed: false },
+  'unsignedchar': { bits: 8, signed: false }, 'UCHAR': { bits: 8, signed: false },
+};
+
+/** The unsigned 32-bit spellings a logical shift's operand cast may have. */
+const SHIFT_U32 = new Set(['uint32_t', 'uint', 'unsignedint', 'DWORD', 'UINT', 'ULONG', 'unsignedlong']);
+const SHIFT_S32 = new Set(['int', 'int32_t', 'INT', 'LONG', 'long']);
+
+function doShift(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'shift' }>): void {
+  const w = norm(f.expr);
+  // E's declared type: a parameter or a local of the function.
+  let et: { bits: number; signed: boolean } | undefined;
+  let decls = 0;
+  for (const { node } of walk(fn)) {
+    if (node.kind !== NodeKind.VariableDecl && node.kind !== NodeKind.ParameterDecl) continue;
+    const d = node as unknown as { name?: Identifier | null; type: TypeNode };
+    if (!d.name || d.name.name !== w) continue;
+    decls++;
+    et = SHIFT_INTS[text(d.type)];
+  }
+  if (decls !== 1) refuse(`${f.expr} is not one local or parameter`);
+  if (!et) refuse(`${f.expr} has no known integer type of at most 32 bits`);
+  const sites: Array<{ shift: BinaryExpr; operand: Expression; cast?: CStyleCastExpr }> = [];
+  for (const { node } of walk(fn.body!)) {
+    if (node.kind !== NodeKind.CStyleCastExpr) continue;
+    const c = node as CStyleCastExpr;
+    const t = SHIFT_INTS[text(c.type)];
+    if (!t || t.bits >= 32) continue;
+    const sh = unparen(c.expression as Expression);
+    if (sh.kind !== NodeKind.BinaryExpr || (sh as BinaryExpr).operator !== '>>') continue;
+    const k = litValue((sh as BinaryExpr).right as Expression);
+    if (!k || k.v < 1n || BigInt(t.bits) + k.v > 32n) continue;
+    let operand = unparen((sh as BinaryExpr).left as Expression);
+    let inner: CStyleCastExpr | undefined;
+    if (operand.kind === NodeKind.CStyleCastExpr) {
+      const ct = text((operand as CStyleCastExpr).type);
+      if (!SHIFT_U32.has(ct) && !SHIFT_S32.has(ct)) continue;
+      inner = operand as CStyleCastExpr;
+      operand = unparen(inner.expression as Expression);
+    }
+    if (text(operand) !== w) continue;
+    sites.push({ shift: sh as BinaryExpr, operand, cast: inner });
+  }
+  const hit = f.index === 0
+    ? (sites.length === 1 ? sites[0] : refuse(`${sites.length} narrowed shifts of ${f.expr}`))
+    : (sites[f.index - 1] ?? refuse(`no narrowed shift #${f.index} of ${f.expr}`));
+  // The shift as written now, and the one asked for.
+  const nowSigned = hit.cast ? SHIFT_S32.has(text(hit.cast.type)) : et.signed;
+  const wantSigned = f.how === 'sar';
+  if (nowSigned === wantSigned) refuse(`the shift of ${f.expr} is already ${f.how}`);
+  const left = et.signed === wantSigned
+    ? hit.operand
+    : parseExpr(`(${wantSigned ? 'int' : 'uint32_t'})__vc8e`);
+  if (left !== hit.operand) ((left as CStyleCastExpr).expression as unknown) = hit.operand;
+  (hit.shift as unknown as Record<string, unknown>).left = left;
+}
+
+/** A global the generator declares as an array (its address cannot change), by its last name part. */
+function globalArray(name: string): boolean {
+  const t = selectTables?.globalTypes?.[name.replace(/^.*::/, '')] ?? selectTables?.globalTypes?.[name];
+  return !!t && /\[/.test(t);
+}
+
+/**
+ * X names storage whose address stays put while the code runs: a local array, a local or
+ * parameter pointer that nothing in `within` reassigns and whose address is not taken, or a
+ * global the generator declares as an array.
+ */
+function fixedBase(fn: FunctionDecl, x: Expression, within: ASTNode[]): boolean {
+  x = unparen(x);
+  if (x.kind !== NodeKind.Identifier && x.kind !== NodeKind.QualifiedId) return false;
+  const name = emit(x as never).replace(/\s+/g, '');
+  if (!localNames(fn).has(name)) return globalArray(name);
+  if (addressTaken(fn, name)) return false;
+  for (const w of within) for (const { node } of walk(w)) {
+    if (node.kind === NodeKind.AssignExpr && isId(unparen((node as AssignExpr).left), name)) return false;
+    if ((node.kind === NodeKind.PostfixExpr || (node.kind === NodeKind.UnaryExpr && ['++', '--'].includes((node as UnaryExpr).operator)))
+      && isId(unparen((node as UnaryExpr).operand), name)) return false;
+  }
+  return true;
+}
+
+/** `&*N` is N and `(N)` is N: what a pointer local reads back as after a rewrite through it. */
+function tidyThrough(fn: FunctionDecl, n: string): void {
+  for (const { node, slot } of [...walk(fn.body!)]) {
+    if (!slot || node.kind !== NodeKind.UnaryExpr || (node as UnaryExpr).operator !== '&') continue;
+    const o = unparen((node as UnaryExpr).operand);
+    if (o.kind === NodeKind.UnaryExpr && (o as UnaryExpr).operator === '*' && isId(unparen((o as UnaryExpr).operand), n)) put(slot, { kind: NodeKind.Identifier, name: n } as Identifier);
+  }
+  for (const { node, slot } of [...walk(fn.body!)]) {
+    if (slot && node.kind === NodeKind.ParenExpr && isId(unparen(node as Expression), n)) put(slot, { kind: NodeKind.Identifier, name: n } as Identifier);
+  }
+}
+
+/** Every X[i] under the nodes reads through n: `*n`, `X[i].m` as `n->m`. Returns how many. */
+function readThrough(roots: ASTNode[], isSub: (x: ASTNode) => boolean, n: string): number {
+  let k = 0;
+  for (const w of roots) for (const { node, slot } of [...walk(w)]) {
+    if (!slot || !isSub(node)) continue;
+    const owner = !Array.isArray(slot.parent) ? (slot.parent as unknown as ASTNode) : undefined;
+    const id = { kind: NodeKind.Identifier, name: n } as Identifier;
+    if (owner && owner.kind === NodeKind.MemberExpr && slot.key === 'object' && !(owner as unknown as { isArrow: boolean }).isArrow) {
+      (owner as unknown as { object: Expression }).object = id;
+      (owner as unknown as { isArrow: boolean }).isArrow = true;
+    } else put(slot, { kind: NodeKind.UnaryExpr, operator: '*', operand: id } as unknown as UnaryExpr);
+    k++;
+  }
+  return k;
+}
+
+/**
+ * ptrwalk(i,X,N,T[,k]): the for loop counting i up by one from A, whose body or condition
+ * reads X[i], walks a pointer instead: `T *N = &X[A];` before the loop, every X[i] in the
+ * condition and body reads through N (`*N`, `N->m`, `&X[i]` is N), and N steps with i
+ * (`i++, N++`). N equals &X[i] wherever the loop evaluates either: only the increment
+ * changes i, and X's storage stays put (fixedBase). The counter stays, so whatever else
+ * reads i reads the same values.
+ */
+function doPtrwalk(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'ptrwalk' }>): void {
+  const { counter: i, name: n } = f;
+  if (localNames(fn).has(n) || mentions(fn.body!, n)) refuse(`${n} exists`);
+  const isX = (e: Expression) => text(e) === norm(f.array);
+  const isSub = (x: ASTNode) => x.kind === NodeKind.SubscriptExpr && isX(unparen((x as SubscriptExpr).array)) && isId(unparen((x as SubscriptExpr).index), i);
+  const sites: Array<{ b: CompoundStmt; k: number; loop: ForStmt; start: Expression }> = [];
+  for (const b of blocks(fn)) b.statements.forEach((s, k) => {
+    if (s.kind !== NodeKind.ForStmt) return;
+    const loop = s as ForStmt;
+    let start: Expression | undefined;
+    if (loop.init) {
+      const st = storeOf(loop.init);
+      if (st && st.operator === '=' && isId(unparen(st.left), i)) start = st.right;
+      const d = declOf(loop.init);
+      if (d && d.name.name === i && d.initializer) start = d.initializer as Expression;
+    }
+    if (!start || !loop.increment || !steps(loop.increment, i, '+')) return;
+    const reads = [...walk(loop.body)].some(x => isSub(x.node)) || (!!loop.condition && [...walk(loop.condition)].some(x => isSub(x.node)));
+    if (reads) sites.push({ b, k, loop, start });
+  });
+  const hit = f.index === 0 ? (sites.length === 1 ? sites[0] : refuse(`${sites.length} loops count ${i} over ${f.array}`))
+    : (sites[f.index - 1] ?? refuse(`no loop #${f.index} counts ${i} over ${f.array}`));
+  const { loop, start } = hit;
+  const inside: ASTNode[] = [loop.body, ...(loop.condition ? [loop.condition] : [])];
+  for (const w of inside) if (storedNames(w).has(i)) refuse(`${i} is stored in the loop`);
+  if (addressTaken(fn, i)) refuse(`${i}'s address is taken`);
+  const xNode = [...walk(loop)].find(x => isSub(x.node))!.node as SubscriptExpr;
+  if (!fixedBase(fn, xNode.array, [loop])) refuse(`${f.array} is not storage that stays put`);
+  // The start is evaluated once more, before the loop: a constant, or a name the init does not store.
+  const s0 = unparen(start);
+  if (!(s0.kind === NodeKind.IntegerLiteral || (isId(s0) && s0.name !== i))) refuse('the start is not a constant or a name');
+  if (readThrough(inside, isSub, n) === 0) refuse(`no ${f.array}[${i}] in the loop`);
+  tidyThrough(fn, n);
+  const decl = (parse(`void __vc8f() { ${f.type}* ${n} = &${emit(xNode.array as never)}[${emit(start as never)}]; }`).declarations[0] as FunctionDecl).body!.statements[0];
+  loop.increment = parseExpr(`${emit(loop.increment as never)}, ${n}++`);
+  hit.b.statements.splice(hit.k, 0, decl);
+}
+
+/**
+ * rowptr(X[I],N,T[,@A]): the row X[I] is read through a pointer local, `T *N = &X[I];`, as
+ * `cache(&X[I],N,T*)` writes it: `X[I].m` reads `N->m`, `X[I]` reads `*N`. A table Ghidra
+ * typed flat, read as `X[I + k]`, reads `N[k]`: the same element, `X[I + k]` is `(&X[I])[k]`.
+ * X must stay put (fixedBase); cache refuses when X or a name in I is stored before the
+ * last read it moves.
+ */
+function doRowptr(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'rowptr' }>): void {
+  const row = parseExpr(f.expr);
+  if (row.kind !== NodeKind.SubscriptExpr) refuse(`${f.expr} is no subscript`);
+  const xText = text((row as SubscriptExpr).array), iText = text((row as SubscriptExpr).index);
+  // The row's base as the body prints it (the tag's text may carry qualifiers the body drops).
+  const base = [...walk(fn.body!)].find(x => x.node.kind === NodeKind.SubscriptExpr && text((x.node as SubscriptExpr).array) === xText);
+  if (!base || !fixedBase(fn, (base.node as SubscriptExpr).array, [fn.body!])) refuse(`${f.expr} is not in storage that stays put`);
+  for (const { node, slot } of [...walk(fn.body!)]) {
+    if (!slot || node.kind !== NodeKind.SubscriptExpr) continue;
+    const sub = node as SubscriptExpr;
+    if (text(sub.array) !== xText) continue;
+    const ix = unparen(sub.index);
+    if (ix.kind !== NodeKind.BinaryExpr || (ix as BinaryExpr).operator !== '+') continue;
+    const l = (ix as BinaryExpr).left, r = (ix as BinaryExpr).right;
+    const pick = text(l) === iText && intValue(r) !== undefined ? [l, r] : text(r) === iText && intValue(l) !== undefined ? [r, l] : undefined;
+    if (!pick) continue;
+    const addr = { kind: NodeKind.UnaryExpr, operator: '&', operand: { kind: NodeKind.SubscriptExpr, array: sub.array, index: pick[0] } };
+    put(slot, { kind: NodeKind.SubscriptExpr, array: { kind: NodeKind.ParenExpr, expression: addr }, index: pick[1] } as unknown as SubscriptExpr);
+  }
+  doCache(fn, { op: 'cache', expr: `&${f.expr}`, name: f.name, type: `${f.type}*`, ...(f.anchor ? { anchor: f.anchor } : {}) });
+  tidyThrough(fn, f.name);
+}
+
+// ---------------------------------------------------------------------------------------
+// acc: a unit field read through its accessor's inline twin
+
+/** The definitions the form being applied calls (acc), reported with the site. */
+let prefixUsed: Set<string> = new Set();
+
+/** `X->a.b`: the pointer X and the field path, when e is such a read. */
+function fieldRead(e: Expression): { base: Expression; path: string[] } | undefined {
+  const path: string[] = [];
+  let cur = unparen(e);
+  while (cur.kind === NodeKind.MemberExpr) {
+    const m = cur as unknown as { object: Expression; member: ASTNode; isArrow: boolean };
+    if (!isId(m.member)) return undefined;
+    path.unshift(m.member.name);
+    if (m.isArrow) return { base: m.object, path };
+    cur = unparen(m.object);
+  }
+  return undefined;
+}
+
+/** A pointer expression that reads only names and members: evaluated once or twice, the same. */
+function plainPointer(e: Expression): boolean {
+  const x = unparen(e);
+  if (isId(x)) return true;
+  if (x.kind === NodeKind.MemberExpr) return plainPointer((x as unknown as { object: Expression }).object);
+  return false;
+}
+
+/** The integer a constant expression stands for: a literal, its negation, an enumerator, a cast of one. */
+function constValue(e: Expression): bigint | undefined {
+  const x = unparen(e);
+  if (x.kind === NodeKind.IntegerLiteral) return (x as IntegerLiteralExpr).value as bigint;
+  if (x.kind === NodeKind.UnaryExpr && (x as UnaryExpr).operator === '-') {
+    const v = constValue((x as UnaryExpr).operand);
+    return v === undefined ? undefined : -v;
+  }
+  if (x.kind === NodeKind.CStyleCastExpr) return constValue((x as CStyleCastExpr).expression);
+  if (isId(x)) {
+    const v = selectTables?.enumValues?.[x.name];
+    return v === undefined ? undefined : BigInt(v);
+  }
+  if (x.kind === NodeKind.QualifiedId) {
+    const leaf = emit(x as never).split('::').pop()!.trim();
+    const v = selectTables?.enumValues?.[leaf];
+    return v === undefined ? undefined : BigInt(v);
+  }
+  return undefined;
+}
+
+/** 'set' when c is true exactly when p is not null, 'null' when exactly when it is. */
+function nullTest(c: Expression, p: string): 'set' | 'null' | undefined {
+  const x = unparen(c);
+  if (text(x) === p) return 'set';
+  if (x.kind === NodeKind.UnaryExpr && (x as UnaryExpr).operator === '!' && text(unparen((x as UnaryExpr).operand)) === p) return 'null';
+  if (x.kind === NodeKind.BinaryExpr && ['==', '!='].includes((x as BinaryExpr).operator)) {
+    const b = x as BinaryExpr;
+    const [v, k] = text(unparen(b.left)) === p ? [b.left, b.right] : text(unparen(b.right)) === p ? [b.right, b.left] : [];
+    if (!v || !k) return undefined;
+    const kk = unparen(k);
+    const zero = constValue(kk) === 0n || (isId(kk) && ['nullptr', 'NULL'].includes(kk.name)) || kk.kind === NodeKind.NullptrLiteral;
+    if (!zero) return undefined;
+    return b.operator === '!=' ? 'set' : 'null';
+  }
+  return undefined;
+}
+
+/** Put n where child sits in parent. */
+function replaceChild(parent: ASTNode, child: ASTNode, n: ASTNode): void {
+  const o = parent as unknown as Record<string, unknown>;
+  for (const k of Object.keys(o)) {
+    const v = o[k];
+    if (v === child) { o[k] = n; return; }
+    if (Array.isArray(v)) { const i = v.indexOf(child); if (i >= 0) { v[i] = n; return; } }
+  }
+  refuse('internal: site not found under its parent');
+}
+
+function doAcc(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'acc' }>): void {
+  const table = (selectTables as Vc8FormTables | undefined)?.accessors;
+  if (!table?.length) refuse('no accessor table');
+  const site = pick(fn, f.expr, f.index, (n): n is Expression => n.kind === NodeKind.MemberExpr && !!fieldRead(n as Expression));
+  const read = fieldRead(site)!;
+  const acc = table!.find(a => a.path.join('.') === read.path.join('.')) ?? refuse(`no accessor reads ${read.path.join('.')}`);
+  if (!plainPointer(read.base)) refuse(`${emit(read.base as never)} is not a plain pointer`);
+  const tables = selectTables;
+  const shapeOf = createExprShape(localTypesOf(fn), {
+    globalTypes: tables?.globalTypes ?? {}, enclosingVarTypes: tables?.enclosingVarTypes ?? {},
+    structFields: tables?.structFields ?? {}, fieldTypes: tables?.fieldTypes ?? {},
+    returnTypes: tables?.functionReturnTypes ?? {}, resolve: (n: string) => tables?.typedefTargets?.[n],
+  });
+  const shape = shapeOf(read.base);
+  const base = shape?.base.replace(/^(?:struct\s+)?(?:::)?/, '').split('::').pop();
+  if (!shape || shape.stars !== 1 || base !== acc.struct) refuse(`${emit(read.base as never)} is not a ${acc.struct} *`);
+  const p = text(read.base);
+  const call = { kind: NodeKind.CallExpr, callee: { kind: NodeKind.Identifier, name: acc.call }, arguments: [cloneNode(read.base)] } as unknown as Expression;
+
+  const parents = parentsOf(fn);
+  const up = (n: ASTNode): ASTNode => { let c = n; while (parents.get(c)?.kind === NodeKind.ParenExpr) c = parents.get(c)!; return c; };
+  const at = up(site);
+  const parent = parents.get(at);
+  // `X ? X->F : K` and `!X ? K : X->F`: the accessor itself.
+  if (parent?.kind === NodeKind.ConditionalExpr && !f.bare) {
+    const c = parent as ConditionalExpr;
+    const t = nullTest(c.condition, p);
+    const other = t === 'set' && unparen(c.thenExpr) === unparen(at as Expression) ? c.elseExpr
+      : t === 'null' && unparen(c.elseExpr) === unparen(at as Expression) ? c.thenExpr : undefined;
+    if (other && constValue(other) === acc.dflt) {
+      const top = up(parent);
+      replaceChild(parents.get(top)!, top, call);
+      prefixUsed.add(acc.definition);
+      return;
+    }
+  }
+  // `X && X->F == C` and `!X || X->F != C`: the null test goes where K gives its truth.
+  if (parent?.kind === NodeKind.BinaryExpr && ['==', '!='].includes((parent as BinaryExpr).operator) && !f.bare) {
+    const cmp = parent as BinaryExpr;
+    const k = constValue(unparen(cmp.left) === unparen(at as Expression) ? cmp.right : cmp.left);
+    const cmpAt = up(cmp);
+    const q = parents.get(cmpAt);
+    if (k !== undefined && k !== acc.dflt && q?.kind === NodeKind.BinaryExpr && (q as BinaryExpr).right === cmpAt) {
+      const and = q as BinaryExpr;
+      const want = and.operator === '&&' && cmp.operator === '==' ? 'set' : and.operator === '||' && cmp.operator === '!=' ? 'null' : undefined;
+      if (want) {
+        const l = unparen(and.left);
+        if (nullTest(l, p) === want) {
+          replaceChild(cmp, at, call);
+          const top = up(and);
+          replaceChild(parents.get(top)!, top, cmpAt);
+          prefixUsed.add(acc.definition);
+          return;
+        }
+        if (l.kind === NodeKind.BinaryExpr && (l as BinaryExpr).operator === and.operator && nullTest((l as BinaryExpr).right, p) === want) {
+          replaceChild(cmp, at, call);
+          and.left = (l as BinaryExpr).left;
+          prefixUsed.add(acc.definition);
+          return;
+        }
+      }
+    }
+  }
+  replaceChild(parent ?? refuse('the read has no parent'), at, call);
+  prefixUsed.add(acc.definition);
+}
+
+// ---------------------------------------------------------------------------------------
+// retvar, onecall: a value VC8 held in a register, written as a variable of its own
+
+/** Statements parsed from text, in a function of their own. */
+function parseStmts(t: string): Statement[] {
+  const fn = parse(`void __vc8f() { ${t} }`).declarations[0] as FunctionDecl;
+  return fn.body!.statements;
+}
+
+/** Whether a statement can leave by a return or a goto (a loop's break stays inside). */
+function returnsInside(s: Statement): boolean {
+  for (const { node } of walk(s)) if (node.kind === NodeKind.ReturnStmt || node.kind === NodeKind.GotoStmt) return true;
+  return false;
+}
+
+function freshName(fn: FunctionDecl, n: string): void {
+  if (localNames(fn).has(n) || mentions(fn.body!, n)) refuse(`${n} names something already`);
+}
+
+function doRetvar(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'retvar' }>): void {
+  const { b, k, s } = nthIf(fn, f.cond, f.index);
+  if (b !== fn.body) refuse('the if is not in the function\'s own block');
+  const arm = stmtsOf(s.thenBranch);
+  const last = arm[arm.length - 1] as ReturnStmt | undefined;
+  if (!last || last.kind !== NodeKind.ReturnStmt || !last.value) refuse('the arm does not end in a return of a value');
+  if (arm.slice(0, -1).some(returnsInside)) refuse('the arm leaves elsewhere too');
+  const tail = b.statements[k + 1] as ReturnStmt | undefined;
+  if (k + 2 !== b.statements.length || !tail || tail.kind !== NodeKind.ReturnStmt || !tail.value) refuse('the if is not followed by the function\'s last return');
+  if (constValue(tail.value!) === undefined || !loadsNothing(tail.value!)) refuse(`${emit(tail.value as never)} is not a constant`);
+  const type = emit(fn.returnType as never).trim();
+  if (type === 'void') refuse('the function returns nothing');
+  freshName(fn, f.name);
+  const [decl] = parseStmts(`${type} ${f.name} = ${emit(tail.value as never)};`);
+  const [store, ret] = parseStmts(`${f.name} = __vc8value; return ${f.name};`);
+  ((store as ExprStmt).expression as AssignExpr).right = last.value!;
+  arm[arm.length - 1] = store;
+  s.thenBranch = asBlock(s.thenBranch);
+  (s.thenBranch as CompoundStmt).statements = arm;
+  b.statements.splice(k + 1, 1, ret);
+  b.statements.splice(k, 0, decl);
+}
+
+/** The call an expression statement makes. */
+function callOf(st: Statement | undefined): CallExpr | undefined {
+  if (!st || st.kind !== NodeKind.ExprStmt) return undefined;
+  const e = unparen((st as ExprStmt).expression);
+  return e.kind === NodeKind.CallExpr ? e as CallExpr : undefined;
+}
+
+function doOnecall(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'onecall' }>): void {
+  const { b, k, s } = nthIf(fn, f.cond, f.index);
+  if (b !== fn.body) refuse('the if is not in the function\'s own block');
+  const arm = stmtsOf(s.thenBranch);
+  const first = callOf(arm[0]);
+  if (arm.length !== 2 || !first || arm[1].kind !== NodeKind.ReturnStmt || (arm[1] as ReturnStmt).value) refuse('the arm is not a call and `return;`');
+  const rest = b.statements.slice(k + 1);
+  const second = callOf(rest[0]);
+  if (!second || rest.length > 2 || (rest.length === 2 && (rest[1].kind !== NodeKind.ReturnStmt || (rest[1] as ReturnStmt).value))) {
+    refuse('the if is not followed by the function\'s last call');
+  }
+  if (text(first.callee) !== text(second!.callee) || first.arguments.length !== second!.arguments.length) refuse('the two calls differ in callee or arity');
+  const differ = first.arguments.map((a, j) => (text(a) === text(second!.arguments[j]) ? -1 : j)).filter(j => j >= 0);
+  if (differ.length !== 1) refuse(`the calls differ in ${differ.length} arguments`);
+  const j = differ[0];
+  for (const [x, a] of first.arguments.entries()) if (x !== j && !loadsNothing(a)) refuse(`${emit(a as never)} loads or calls`);
+  for (const v of [first.arguments[j], second!.arguments[j]]) {
+    if (hasCall(v) || storedNames(v).size > 0) refuse(`${emit(v as never)} calls or stores`);
+  }
+  const name = calleeName(first.callee);
+  const params = name && selectTables?.functionParamTypes
+    ? scopedLookup(selectTables.functionParamTypes, name, selectTables.enclosingSegments ?? []) : undefined;
+  const type = params?.[j];
+  if (!type) refuse(`no parameter type for argument ${j + 1} of ${name ?? emit(first.callee as never)}`);
+  freshName(fn, f.name);
+  const [decl, sel] = parseStmts(`${type} ${f.name}; if (__vc8c) { ${f.name} = __vc8a; } else { ${f.name} = __vc8b; }`);
+  const ifs = sel as IfStmt;
+  ifs.condition = s.condition;
+  (((ifs.thenBranch as CompoundStmt).statements[0] as ExprStmt).expression as AssignExpr).right = first.arguments[j];
+  (((ifs.elseBranch as CompoundStmt).statements[0] as ExprStmt).expression as AssignExpr).right = second!.arguments[j];
+  second!.arguments[j] = { kind: NodeKind.Identifier, name: f.name } as unknown as Expression;
+  b.statements.splice(k, 1, decl, ifs);
+}
+
+// ---------------------------------------------------------------------------------------
+// roundup: the rounding to a granularity through an inline helper of its own
+
+export const ROUND_UP_HELPER = 'D2_RoundUp';
+export const ROUND_UP_DEFINITION = [
+  `// ${ROUND_UP_HELPER}, rounding up to a granularity, as its callers inlined it: the parameter changed and returned.`,
+  `static inline uint32_t ${ROUND_UP_HELPER}(uint32_t n, uint32_t g) {`,
+  '    if (n % g) {',
+  '        n = g - n % g + n;',
+  '    }',
+  '    return n;',
+  '}',
+].join('\n');
+
+const isU32 = (t: string | undefined): boolean => {
+  if (!t) return false;
+  const r = intType(t, false);
+  return !!r && r.w === 4 && r.r.lo === 0n && r.r.hi === 0xffffffffn;
+};
+
+function doRoundup(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'roundup' }>): void {
+  const v = f.name;
+  const sites: Array<{ b: CompoundStmt; k: number; g: string }> = [];
+  for (const b of blocks(fn)) {
+    for (let k = 0; k < b.statements.length; k++) {
+      const s = b.statements[k];
+      if (s.kind !== NodeKind.IfStmt) continue;
+      const x = s as IfStmt;
+      if (x.elseBranch || x.init) continue;
+      const c = unparen(x.condition);
+      if (c.kind !== NodeKind.BinaryExpr || (c as BinaryExpr).operator !== '%') continue;
+      const l = unparen((c as BinaryExpr).left), r = unparen((c as BinaryExpr).right);
+      if (!isId(l, v) || !isId(r)) continue;
+      const arm = stmtsOf(x.thenBranch);
+      const st = arm.length === 1 ? storeOf(arm[0]) : undefined;
+      if (!st || st.operator !== '=' || !isId(unparen(st.left), v)) continue;
+      if (text(st.right) !== norm(`${r.name} - ${v} % ${r.name} + ${v}`)) continue;
+      sites.push({ b, k, g: r.name });
+    }
+  }
+  if (sites.length !== 1) refuse(`${sites.length} round-up sites on ${v}`);
+  const { b, k, g } = sites[0];
+  if (!isU32(declaredType(fn, v))) refuse(`${v} is not an unsigned 32-bit local`);
+  if (!isU32(declaredType(fn, g))) refuse(`${g} is not an unsigned 32-bit local`);
+
+  if (f.param) {
+    const p = f.param;
+    const param = fn.parameters.find(x => (x as unknown as { name?: Identifier | null }).name?.name === p) as unknown as { type: TypeNode } | undefined;
+    if (!param) refuse(`${p} is not a parameter`);
+    const vd = soleDecl(fn, v);
+    if (text(param!.type) !== text(vd.type)) refuse(`${p} is ${emit(param!.type as never)}, ${v} is ${emit(vd.type as never)}`);
+    const at = fn.body!.statements.findIndex(s => declOf(s) === vd);
+    if (at < 0) refuse(`${v} is not declared in the function's own block`);
+    const init = vd.initializer ? unparen(vd.initializer as Expression) : undefined;
+    if (!init || init.kind !== NodeKind.BinaryExpr || (init as BinaryExpr).operator !== '+') refuse(`${v} is not declared as a sum`);
+    const sum = init as BinaryExpr;
+    const other = isId(unparen(sum.left), p) ? sum.right : isId(unparen(sum.right), p) ? sum.left : refuse(`${v}'s sum does not add ${p}`);
+    if (mentions(other, p) || mentions(other, v)) refuse(`${v}'s sum reads ${p} or ${v} twice`);
+    let named = 0;
+    for (const { node } of walk(fn.body!)) if (isId(node, p)) named++;
+    if (named !== 1) refuse(`${p} is named ${named} times in the body`);
+    if (addressTaken(fn, v)) refuse(`${v}'s address is taken`);
+    const [store] = parseStmts(`${p} = __vc8sum;`);
+    ((store as ExprStmt).expression as AssignExpr).right = sum;
+    fn.body!.statements[at] = store;
+    for (const { node } of walk(fn.body!)) if (isId(node, v)) (node as Identifier).name = p;
+  }
+
+  const target = f.param ?? v;
+  const [call] = parseStmts(`${target} = ${ROUND_UP_HELPER}(${target}, ${g});`);
+  b.statements[k] = call;
+  prefixUsed.add(ROUND_UP_DEFINITION);
+}
+
+// ---------------------------------------------------------------------------------------
+// swmerge: the range tests around a switch, merged back into it
+
+const M32 = (1n << 32n) - 1n;
+
+function doSwmerge(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'swmerge' }>): void {
+  const v = f.name;
+  const range = intType(declaredType(fn, v) ?? '', false);
+  if (!range) refuse(`${v} has no integer type`);
+  const unsigned32 = range!.w === 4 && range!.r.lo === 0n && range!.r.hi === M32;
+  if (!unsigned32 && (range!.r.lo < -0x80000000n || range!.r.hi > 0x7fffffffn)) refuse(`${v} does not compare as int`);
+  // A constant as V compares it: the usual conversions to unsigned for an unsigned 32-bit V.
+  const conv = (c: bigint | undefined): bigint | undefined => {
+    if (c === undefined) return undefined;
+    if (unsigned32) return c & M32;
+    return c >= -0x80000000n && c <= 0x7fffffffn ? c : undefined;
+  };
+  const isV = (e: Expression) => isId(unparen(e), v);
+  /** One comparison `V op K` (either order) as op and K, with the order normalised to V first. */
+  const cmp = (e: Expression): { op: string; k: bigint } | undefined => {
+    const x = unparen(e);
+    if (x.kind !== NodeKind.BinaryExpr) return undefined;
+    const b = x as BinaryExpr;
+    const flip: Record<string, string> = { '<': '>', '<=': '>=', '>': '<', '>=': '<=', '==': '==', '!=': '!=' };
+    if (!(b.operator in flip)) return undefined;
+    if (isV(b.left)) { const k = conv(constValue(b.right)); return k === undefined ? undefined : { op: b.operator, k }; }
+    if (isV(b.right)) { const k = conv(constValue(b.left)); return k === undefined ? undefined : { op: flip[b.operator], k }; }
+    return undefined;
+  };
+  const test = (op: string, x: bigint, k: bigint): boolean =>
+    op === '<' ? x < k : op === '<=' ? x <= k : op === '>' ? x > k : op === '>=' ? x >= k : op === '==' ? x === k : x !== k;
+  const consts: bigint[] = [];
+  /** The truth of a guard for V = x; undefined for anything but V against constants. */
+  const evalAt = (e: Expression, x: bigint): boolean | undefined => {
+    const u = unparen(e);
+    if (u.kind === NodeKind.UnaryExpr && (u as UnaryExpr).operator === '!') {
+      const r = evalAt((u as UnaryExpr).operand, x);
+      return r === undefined ? undefined : !r;
+    }
+    if (u.kind === NodeKind.BinaryExpr && ['&&', '||'].includes((u as BinaryExpr).operator)) {
+      const l = evalAt((u as BinaryExpr).left, x), r = evalAt((u as BinaryExpr).right, x);
+      if (l === undefined || r === undefined) return undefined;
+      return (u as BinaryExpr).operator === '&&' ? l && r : l || r;
+    }
+    const c = cmp(u);
+    return c ? test(c.op, x, c.k) : undefined;
+  };
+  const collect = (e: Expression): void => {
+    const u = unparen(e);
+    if (u.kind === NodeKind.UnaryExpr) { collect((u as UnaryExpr).operand); return; }
+    if (u.kind === NodeKind.BinaryExpr && ['&&', '||'].includes((u as BinaryExpr).operator)) { collect((u as BinaryExpr).left); collect((u as BinaryExpr).right); return; }
+    const c = cmp(u);
+    if (c) consts.push(c.k);
+  };
+
+  // The i-th `if (V <= U)` (or `V < U + 1`) with an else.
+  let seen = 0;
+  let site: { b: CompoundStmt; k: number; s: IfStmt; upper: bigint } | undefined;
+  for (const b of blocks(fn)) {
+    for (let k = 0; k < b.statements.length && !site; k++) {
+      const s = b.statements[k];
+      if (s.kind !== NodeKind.IfStmt || !(s as IfStmt).elseBranch || (s as IfStmt).init) continue;
+      const c = cmp((s as IfStmt).condition);
+      if (!c || (c.op !== '<=' && c.op !== '<')) continue;
+      if (++seen === f.index) site = { b, k, s: s as IfStmt, upper: c.op === '<=' ? c.k : c.k - 1n };
+    }
+  }
+  if (!site) refuse(`no if #${f.index} bounding ${v} from above with an else`);
+  const { b, k, s, upper } = site!;
+  const inner = stmtsOf(s.thenBranch);
+  if (inner.length !== 1 || inner[0].kind !== NodeKind.IfStmt || (inner[0] as IfStmt).elseBranch) refuse('the bounded arm is not one if without an else');
+  const ne = cmp((inner[0] as IfStmt).condition);
+  if (!ne || ne.op !== '!=' || ne.k > upper) refuse(`the bounded arm does not test ${v} != K`);
+  const sw = stmtsOf((inner[0] as IfStmt).thenBranch);
+  if (sw.length !== 1 || sw[0].kind !== NodeKind.SwitchStmt || !isV((sw[0] as unknown as { condition: Expression }).condition)) refuse(`the test does not hold one switch on ${v}`);
+  const swS = sw[0] as unknown as { body: Statement; init?: Statement };
+  if (swS.init || swS.body.kind !== NodeKind.CompoundStmt) refuse('the switch has an init or no block');
+  const list = (swS.body as CompoundStmt).statements;
+  const labels: bigint[] = [];
+  let dflt: Statement | undefined;
+  for (const st of list) {
+    if (st.kind === NodeKind.CaseStmt) {
+      const val = conv(constValue((st as unknown as { value: Expression }).value));
+      if (val === undefined) refuse('a case label is no constant');
+      labels.push(val!);
+    } else if (st.kind === NodeKind.DefaultStmt) dflt = st;
+  }
+  const leave = dflt ? (dflt as unknown as { statement: Statement }).statement : undefined;
+  if (!leave || leave.kind !== NodeKind.ReturnStmt || ((leave as ReturnStmt).value && !loadsNothing((leave as ReturnStmt).value!))) refuse('the default is not a plain return');
+  for (const l of labels) if (l > upper || l === ne.k) refuse(`label ${l} lies outside what the tests let through`);
+
+  // The guards of the far side, each `if (c) L`.
+  const guards = stmtsOf(s.elseBranch!);
+  for (const g of guards) {
+    if (g.kind !== NodeKind.IfStmt || (g as IfStmt).elseBranch || (g as IfStmt).init) refuse('the far arm holds more than guards');
+    const arm = stmtsOf((g as IfStmt).thenBranch);
+    if (arm.length !== 1 || text(arm[0]) !== text(leave!)) refuse('a guard leaves other than the default');
+    collect((g as IfStmt).condition);
+  }
+  const hi = unsigned32 ? M32 : range!.r.hi;
+  const passes = (x: bigint): boolean => {
+    for (const g of guards) {
+      const t = evalAt((g as IfStmt).condition, x);
+      if (t === undefined) refuse(`a guard reads more than ${v} and constants`);
+      if (t) return false;
+    }
+    return true;
+  };
+  const pts = new Set<bigint>([upper + 1n, hi]);
+  for (const c of consts) for (const d of [c - 1n, c, c + 1n]) if (d > upper && d <= hi) pts.add(d);
+  const sorted = [...pts].filter(x => x > upper && x <= hi).sort((a, c) => (a < c ? -1 : a > c ? 1 : 0));
+  const far: bigint[] = [];
+  for (let j = 0; j < sorted.length; j++) {
+    if (passes(sorted[j])) far.push(sorted[j]);
+    const next = sorted[j + 1];
+    if (next !== undefined && next - sorted[j] > 1n && passes(sorted[j] + 1n)) {
+      if (next - sorted[j] - 1n > 64n) refuse('the guards let a range through too wide to list');
+      for (let x = sorted[j] + 1n; x < next; x++) far.push(x);
+    }
+    if (far.length > 64) refuse('the guards let more than 64 values through');
+  }
+  const added = [ne.k, ...far];
+
+  // Into the first group of cases that only breaks, else a new group before the default.
+  const lit = (x: bigint): Expression => parseExpr(`0x${x.toString(16)}`);
+  const caseOf = (x: bigint, last: boolean): Statement => {
+    const [st] = parseStmts(`switch (__vc8s) { case 0x${x.toString(16)}: ${last ? 'break;' : ';'} }`);
+    const c = ((st as unknown as { body: CompoundStmt }).body.statements[0]) as unknown as { value: Expression; statement: Statement };
+    c.value = lit(x);
+    if (!last) c.statement = { kind: NodeKind.NullStmt } as unknown as Statement;
+    return c as unknown as Statement;
+  };
+  let at = -1, from = -1;
+  for (let j = 0; j < list.length && at < 0; j++) {
+    const st = list[j];
+    if (st.kind !== NodeKind.CaseStmt) continue;
+    const body = (st as unknown as { statement: Statement }).statement;
+    if (body.kind === NodeKind.BreakStmt) {
+      let q = j;
+      while (q > 0 && list[q - 1].kind === NodeKind.CaseStmt && (list[q - 1] as unknown as { statement: Statement }).statement.kind === NodeKind.NullStmt) q--;
+      at = j; from = q;
+    }
+  }
+  if (at >= 0) {
+    const group = list.slice(from, at + 1).map(st => conv(constValue((st as unknown as { value: Expression }).value))!);
+    const all = [...group, ...added].sort((a, c) => (a < c ? -1 : a > c ? 1 : 0));
+    list.splice(from, at - from + 1, ...all.map((x, j) => caseOf(x, j === all.length - 1)));
+  } else {
+    const d = list.indexOf(dflt!);
+    list.splice(d, 0, ...added.map((x, j) => caseOf(x, j === added.length - 1)));
+  }
+  b.statements[k] = sw[0];
+}
+
+function doDec(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'dec' }>): void {
+  if (fn.parameters.some(p => isId((p as unknown as { name?: Identifier }).name, f.name))) refuse(`${f.name} is a parameter`);
+  const decls = [...walk(fn.body!)].filter(({ node }) => node.kind === NodeKind.VariableDecl && (node as VariableDecl).name.name === f.name);
+  if (decls.length !== 1) refuse(`${f.name} is not one local`);
+  const type = norm(emit((decls[0]!.node as VariableDecl).type as never));
+  if (!new Set(['int', 'signedint', 'unsignedint', 'int32_t', 'uint32_t']).has(type)) refuse(`${f.name} is not a 32-bit integer local`);
+  if (addressTaken(fn, f.name)) refuse(`&${f.name} is taken`);
+  if ([...walk(fn.body!)].some(({ node }) => node.kind === NodeKind.GotoStmt || node.kind === NodeKind.LabelStmt)) refuse('unstructured jump');
+
+  const match = (node: ASTNode): node is BinaryExpr => {
+    if (node.kind !== NodeKind.BinaryExpr || (node as BinaryExpr).operator !== '-') return false;
+    const e = node as BinaryExpr, k = litValue(e.right);
+    return isId(unparen(e.left), f.name) && k?.v === BigInt(f.amount) && k.suffix === '';
+  };
+  const hits = [...walk(fn.body!)].filter(({ node }) => match(node)).map(({ node }) => node as BinaryExpr);
+  if (hits.length < 2) refuse(`fewer than two ${f.name} - ${f.amount} reads`);
+  const parents = parentsOf(fn);
+  for (const hit of hits) {
+    for (let p = parents.get(hit); p; p = parents.get(p)) {
+      if ([NodeKind.WhileStmt, NodeKind.ForStmt, NodeKind.DoWhileStmt, NodeKind.SizeofExpr].includes(p.kind)) refuse('read in a loop or unevaluated expression');
+    }
+  }
+
+  // Pick the innermost block whose suffix contains every matching read. Its first
+  // affected statement must evaluate the difference in a pure first value test.
+  let chosen: { block: CompoundStmt; index: number; condition: Expression } | undefined;
+  for (const block of blocks(fn)) {
+    for (let index = 0; index < block.statements.length; index++) {
+      const stmt = block.statements[index];
+      if (stmt.kind !== NodeKind.IfStmt) continue;
+      const condition = (stmt as IfStmt).condition;
+      if (![...walk(condition)].some(({ node }) => match(node))) continue;
+      const suffix = block.statements.slice(index);
+      const covered = suffix.flatMap(s => [...walk(s)].filter(({ node }) => match(node)).map(({ node }) => node));
+      if (covered.length !== hits.length || !hits.every(h => covered.includes(h))) continue;
+      if (blockReadsAfter(fn, block, f.name, index)) continue;
+      chosen = { block, index, condition };
+    }
+  }
+  if (!chosen) refuse(`no single block suffix holds every ${f.name} - ${f.amount} read`);
+  // Full codegen may merge a following guard into `V - K > 0 && call()`.
+  // The right arm runs after the left difference test, so it need not be pure.
+  let firstTest = unparen(chosen.condition);
+  while (firstTest.kind === NodeKind.BinaryExpr && ['&&', '||'].includes((firstTest as BinaryExpr).operator)) {
+    const left = unparen((firstTest as BinaryExpr).left);
+    if (![...walk(left)].some(({ node }) => match(node))) refuse('a short-circuit arm precedes the first read');
+    firstTest = left;
+  }
+  for (const { node } of walk(firstTest)) {
+    if (node.kind === NodeKind.CallExpr || node.kind === NodeKind.AssignExpr || node.kind === NodeKind.PostfixExpr ||
+        (node.kind === NodeKind.UnaryExpr && ['++', '--'].includes((node as UnaryExpr).operator))) refuse('first condition has side effects');
+  }
+  const suffix = chosen.block.statements.slice(chosen.index);
+  const allowed = new Set<Identifier>(hits.map(h => unparen(h.left) as Identifier));
+  for (const stmt of suffix) {
+    for (const { node } of walk(stmt)) if (isId(node, f.name) && !allowed.has(node)) refuse(`${f.name} is read or stored otherwise after the decrement`);
+  }
+
+  for (const stmt of suffix) {
+    for (const { node, slot } of walk(stmt)) if (match(node) && slot) put(slot, { kind: NodeKind.Identifier, name: f.name } as Identifier);
+  }
+  const parsed = parse(`void __vc8f() { ${f.name} -= ${f.amount}; }`).declarations[0] as FunctionDecl;
+  chosen.block.statements.splice(chosen.index, 0, parsed.body!.statements[0]);
+}
+
+/** The declared type of local or parameter `name`, printed; undefined unless declared exactly once. */
+function declTypeOf(fn: FunctionDecl, name: string): string | undefined {
+  let t: string | undefined, n = 0;
+  for (const { node } of walk(fn)) {
+    if (node.kind !== NodeKind.VariableDecl && node.kind !== NodeKind.ParameterDecl) continue;
+    const d = node as unknown as { name?: Identifier | null; type: TypeNode };
+    if (d.name?.name !== name) continue;
+    n++; t = emit(d.type as never).trim();
+  }
+  return n === 1 ? t : undefined;
+}
+
+const U32_CASTS = new Set(['uint32_t', 'unsignedint', 'unsigned', 'uint', 'DWORD', 'UINT', 'ULONG', 'unsignedlong', 'size_t']);
+
+function doRange(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'range' }>): void {
+  const c = pick(fn, f.cond, f.index, (n): n is BinaryExpr => n.kind === NodeKind.BinaryExpr && ['<', '<=', '>', '>='].includes((n as BinaryExpr).operator));
+  let op: string = c.operator, d = unparen(c.left), kx = unparen(c.right);
+  if (litValue(d) && !litValue(kx)) { [d, kx] = [kx, d]; op = MIRROR[op]; }
+  const k = litValue(kx);
+  if (!k || k.v < 0n || k.v > 0xffffffffn) refuse('no constant bound');
+  let unsigned = /u/i.test(k.suffix);
+  if (d.kind === NodeKind.CStyleCastExpr) {
+    if (!U32_CASTS.has(text((d as CStyleCastExpr).type))) refuse('the difference is cast to no 32-bit unsigned type');
+    unsigned = true;
+    d = unparen((d as CStyleCastExpr).expression as Expression);
+  }
+  if (d.kind !== NodeKind.BinaryExpr || (d as BinaryExpr).operator !== '-') refuse('no difference');
+  const l = litValue((d as BinaryExpr).right);
+  if (!l || l.v < 1n) refuse('no positive constant subtracted');
+  if (/u/i.test(l.suffix)) unsigned = true;
+  const lhs = unparen((d as BinaryExpr).left);
+  if (!isId(lhs)) refuse('the difference is not of a local or parameter');
+  const e = lhs as Identifier;
+  const t = declTypeOf(fn, e.name);
+  const it = t !== undefined ? intType(t, false) : undefined;
+  if (!it || it.w !== 4) refuse(`${e.name} is not a 32-bit integer`);
+  if (it!.r.u) unsigned = true;
+  if (!unsigned) refuse('a signed comparison');
+  // Normalize to D > K (outside) or D <= K (inside).
+  const outside = op === '>' || op === '>=';
+  const kk = op === '>=' || op === '<' ? k.v - 1n : k.v;
+  if (kk < 0n) refuse('the comparison is constant');
+  const hi = l.v + kk;
+  if (hi > it!.r.hi) refuse(`${e.name} - ${l.v} wraps inside the range`);
+  const lit = (v: bigint) => (l.base === 16 ? '0x' + v.toString(16) : v.toString()) + (v > 0x7fffffffn ? 'U' : '');
+  const x = e.name;
+  const r = parseExpr(outside ? `(${x} < ${lit(l.v)} || ${x} > ${lit(hi)})` : `(${x} >= ${lit(l.v)} && ${x} <= ${lit(hi)})`);
+  for (const key of Object.keys(c)) delete (c as unknown as Record<string, unknown>)[key];
+  Object.assign(c, { kind: NodeKind.ParenExpr, expression: r });
+}
+
+const ENUM_CONST = /^(?:[A-Z][A-Z0-9_]*::)*[A-Z][A-Z0-9_]*$/;
+
+function doCastout(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'castout' }>): void {
+  const b = pick(fn, f.expr, f.index, (n): n is BinaryExpr => n.kind === NodeKind.BinaryExpr && ['+', '-'].includes((n as BinaryExpr).operator));
+  const intLocal = (x: Expression) => {
+    if (!isId(x)) return undefined;
+    const t = declTypeOf(fn, x.name);
+    const it = t !== undefined ? intType(t, true) : undefined;
+    return it && it.w <= 4 ? it : undefined;
+  };
+  const side = (x: Expression): CStyleCastExpr | undefined => {
+    x = unparen(x);
+    if (x.kind !== NodeKind.CStyleCastExpr) return undefined;
+    const it = intType(text((x as CStyleCastExpr).type), false);
+    return it && it.w < 4 && norm(text((x as CStyleCastExpr).type)) !== 'bool' ? x as CStyleCastExpr : undefined;
+  };
+  const castLeft = side(b.left);
+  const cast = castLeft ?? (b.operator === '+' ? side(b.right) : undefined);
+  if (!cast) refuse('no operand narrowed by a cast');
+  const other = unparen(cast === castLeft ? b.right : b.left);
+  const x = unparen(cast!.expression as Expression);
+  if (!intLocal(x)) refuse('the narrowed operand is not an integer local or parameter');
+  const plain = litValue(other) !== undefined || !!intLocal(other)
+    || ((isId(other) || other.kind === NodeKind.QualifiedId) && ENUM_CONST.test(text(other)) && !localNames(fn).has(text(other)));
+  if (!plain) refuse('the other operand is not an integer constant or local');
+  const T = intType(text(cast!.type), false)!;
+
+  const parents = parentsOf(fn);
+  let cur: ASTNode = b, p = parents.get(b);
+  while (p && p.kind === NodeKind.ParenExpr) { cur = p; p = parents.get(p); }
+  let target: string | undefined;
+  if (p?.kind === NodeKind.ReturnStmt) target = emit(fn.returnType as never).trim();
+  else if (p?.kind === NodeKind.VariableDecl && (p as VariableDecl).initializer === cur) target = emit((p as VariableDecl).type as never).trim();
+  else if (p?.kind === NodeKind.AssignExpr && (p as AssignExpr).operator === '=' && (p as AssignExpr).right === cur && isId(unparen((p as AssignExpr).left))) {
+    target = declTypeOf(fn, (unparen((p as AssignExpr).left) as Identifier).name);
+  }
+  if (!target) refuse('the value is not returned or stored into a local');
+  const R = norm(target!) === 'bool' ? undefined : intType(target!, false);
+  if (!R || R.w > T.w) refuse(`${target} is wider than the cast`);
+  const inner = cast === castLeft ? `__vc8a ${b.operator} __vc8b` : `__vc8b ${b.operator} __vc8a`;
+  const r = parseExpr(`(${target})(${inner})`) as CStyleCastExpr;
+  const sum = unparen(r.expression as Expression) as BinaryExpr;
+  const fill = (slot: 'left' | 'right') => {
+    const id = unparen(sum[slot]) as Identifier;
+    (sum as unknown as Record<string, unknown>)[slot] = id.name === '__vc8a' ? cloneNode(x) : cloneNode(other);
+  };
+  fill('left'); fill('right');
+  for (const key of Object.keys(b)) delete (b as unknown as Record<string, unknown>)[key];
+  Object.assign(b, r);
+}
+
+function doSignbit(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'signbit' }>): void {
+  const c = pick(fn, f.cond, f.index, (n): n is BinaryExpr => n.kind === NodeKind.BinaryExpr && ['<', '>='].includes((n as BinaryExpr).operator));
+  const z = litValue(c.right);
+  if (!z || z.v !== 0n) refuse('not a comparison with 0');
+  let x = unparen(c.left);
+  if (x.kind === NodeKind.CStyleCastExpr) {
+    const ct = intType(text((x as CStyleCastExpr).type), false);
+    if (!ct || ct.w !== 4 || ct.r.u) refuse('the cast is not to a signed 32-bit type');
+    x = unparen((x as CStyleCastExpr).expression as Expression);
+  }
+  if (!isId(x)) refuse('the operand is not a local or parameter');
+  const name = (x as Identifier).name;
+  const t = declTypeOf(fn, name);
+  const it = t !== undefined ? intType(t, false) : undefined;
+  if (!it || it.w !== 4) refuse(`${name} is not a 32-bit integer`);
+  if (it!.r.u && unparen(c.left) === x) refuse(`${name} is unsigned: the comparison is constant`);
+  // Only a truth test: the mask's value is 0x80000000, not 1.
+  const parents = parentsOf(fn);
+  let cur: ASTNode = c, p = parents.get(c);
+  while (p && p.kind === NodeKind.ParenExpr) { cur = p; p = parents.get(p); }
+  const o = p as unknown as Record<string, unknown> | undefined;
+  const truth = !!p && (
+    ([NodeKind.IfStmt, NodeKind.WhileStmt, NodeKind.DoWhileStmt, NodeKind.ForStmt, NodeKind.ConditionalExpr] as string[]).includes(p.kind) && o!.condition === cur
+    || p.kind === NodeKind.BinaryExpr && ['&&', '||'].includes((p as BinaryExpr).operator)
+    || p.kind === NodeKind.UnaryExpr && (p as UnaryExpr).operator === '!');
+  if (!truth) refuse('the comparison is not tested for truth');
+  const mask = parseExpr(`${c.operator === '<' ? '' : '!'}(__vc8a & 0x80000000)`);
+  const and = (c.operator === '<' ? mask : unparen((mask as UnaryExpr).operand)) as BinaryExpr;
+  const inner = unparen(and as Expression) as BinaryExpr;
+  inner.left = cloneNode(x);
+  for (const key of Object.keys(c)) delete (c as unknown as Record<string, unknown>)[key];
+  Object.assign(c, { kind: NodeKind.ParenExpr, expression: mask });
+}
+
+const CASE_INTEGER = /^-?(0x[0-9a-fA-F]+|\d+)[uUlL]*$/;
+const CASE_ENUM_STYLE = /^(?:[A-Z][A-Z0-9_]*::)*[A-Z][A-Z0-9_]*$/;
+const LOOPS = new Set<string>([NodeKind.ForStmt, NodeKind.WhileStmt, NodeKind.DoWhileStmt, NodeKind.ForRangeStmt, NodeKind.SwitchStmt]);
+
+/** Refuse case names that could be ordinary local values, and expressions that are not constant-like. */
+function caseConstant(e: Expression, locals: Set<string>): boolean {
+  const n = unparen(e);
+  const s = text(n);
+  if (CASE_INTEGER.test(s) && (n.kind === NodeKind.IntegerLiteral || n.kind === NodeKind.UnaryExpr)) return true;
+  if (n.kind !== NodeKind.Identifier && n.kind !== NodeKind.QualifiedId) return false;
+  return CASE_ENUM_STYLE.test(s) && !locals.has(s);
+}
+
+/** Compare integer values, not just their spelling (`0` and `0x0` are the same case). */
+function sameCaseValue(a: Expression, b: Expression): boolean {
+  const numeric = (e: Expression): bigint | undefined => {
+    const n = unparen(e);
+    if (n.kind === NodeKind.IntegerLiteral) return (n as IntegerLiteralExpr).value;
+    if (n.kind === NodeKind.UnaryExpr && (n as UnaryExpr).operator === '-') {
+      const operand = unparen((n as UnaryExpr).operand);
+      if (operand.kind === NodeKind.IntegerLiteral) return -(operand as IntegerLiteralExpr).value;
+    }
+    return undefined;
+  };
+  const av = numeric(a), bv = numeric(b);
+  return av !== undefined && bv !== undefined ? av === bv : text(a) === text(b);
+}
+
+/** The original tests X twice. A switch can read it once only if the expression itself is inert. */
+function inertSwitchValue(e: Expression, volatileNames: Set<string>): boolean {
+  const effectful = new Set<string>([
+    NodeKind.CallExpr, NodeKind.AssignExpr, NodeKind.PostfixExpr, NodeKind.NewExpr,
+    NodeKind.DeleteExpr, NodeKind.ThrowExpr, NodeKind.CoAwaitExpr, NodeKind.CoYieldExpr,
+  ]);
+  for (const { node } of walk(e)) {
+    if (effectful.has(node.kind)) return false;
+    if (node.kind === NodeKind.UnaryExpr && ['++', '--'].includes((node as UnaryExpr).operator)) return false;
+    if (node.kind === NodeKind.Identifier && volatileNames.has((node as Identifier).name)) return false;
+  }
+  return true;
+}
+
+/** Whether s holds a break that is not inside a loop or switch of its own. */
+function breaksOut(s: Statement): boolean {
+  const own = new Set<ASTNode>();
+  for (const { node } of walk(s)) if (LOOPS.has(node.kind)) for (const { node: c } of walk(node)) if (c !== node) own.add(c);
+  for (const { node } of walk(s)) if (node.kind === NodeKind.BreakStmt && !own.has(node)) return true;
+  return false;
+}
+
+function doSwitch(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'switch' }>): void {
+  const want = norm(f.expr);
+  const locals = new Set<string>();
+  const volatileNames = new Set<string>();
+  for (const p of fn.parameters) if (p.name) {
+    locals.add(p.name.name);
+    if (/\bvolatile\b/.test(emit(p.type))) volatileNames.add(p.name.name);
+  }
+  if (fn.body) for (const { node } of walk(fn.body)) if (node.kind === NodeKind.VariableDecl) {
+    const v = node as VariableDecl;
+    locals.add(v.name.name);
+    if (/\bvolatile\b/.test(emit(v.type))) volatileNames.add(v.name.name);
+  }
+  let seen = 0;
+  for (const b of blocks(fn)) {
+    for (let k = 0; k < b.statements.length; k++) {
+      const s = b.statements[k];
+      if (s.kind !== NodeKind.IfStmt) continue;
+      const x = s as IfStmt;
+      if (x.init || x.isConstexpr) continue;
+      const c = unparen(x.condition);
+      if (c.kind !== NodeKind.BinaryExpr) continue;
+      const bc = c as BinaryExpr;
+      if ((bc.operator !== '!=' && bc.operator !== '==') || text(bc.left) !== want) continue;
+      if (!x.elseBranch) {
+        // if (X != K1) { if (X != K2) J R } T  ->  switch (X) { case K2: { R } case K1: { T } } J
+        if (bc.operator !== '!=') continue;
+        const st = stmtsOf(x.thenBranch);
+        if (st.length < 2 || st[0].kind !== NodeKind.IfStmt) continue;
+        const y = st[0] as IfStmt;
+        const yc = unparen(y.condition);
+        if (y.elseBranch || y.init || y.isConstexpr || yc.kind !== NodeKind.BinaryExpr || (yc as BinaryExpr).operator !== '!=' || text((yc as BinaryExpr).left) !== want) continue;
+        if (++seen !== f.index) continue;
+        const k1 = bc.right, k2 = (yc as BinaryExpr).right;
+        if (!caseConstant(k1, locals) || !caseConstant(k2, locals) || sameCaseValue(k1, k2)) refuse('the cases are not two distinct constants');
+        if (!inertSwitchValue(bc.left, volatileNames)) refuse(`${f.expr} has side effects or a volatile local`);
+        const rest = asBlock({ kind: NodeKind.CompoundStmt, statements: st.slice(1) } as unknown as Statement);
+        const tail = asBlock({ kind: NodeKind.CompoundStmt, statements: b.statements.slice(k + 1) } as unknown as Statement);
+        if (!leaves(y.thenBranch) || !leaves(rest) || !leaves(tail)) refuse('an arm can fall out');
+        const movedDefault = stmtsOf(y.thenBranch);
+        if (movable(movedDefault, false)) refuse('the default arm cannot move after the switch');
+        if (breaksOut(y.thenBranch) || breaksOut(rest) || breaksOut(tail)) refuse('a break in an arm would leave the switch');
+        for (const a of [rest, tail]) for (const { node } of walk(a)) if (node.kind === NodeKind.LabelStmt || node.kind === NodeKind.CaseStmt || node.kind === NodeKind.DefaultStmt) refuse('a label in an arm');
+        const sw = {
+          kind: NodeKind.SwitchStmt, condition: bc.left,
+          body: { kind: NodeKind.CompoundStmt, statements: [
+            { kind: NodeKind.CaseStmt, value: k2, statement: rest }, { kind: NodeKind.CaseStmt, value: k1, statement: tail }] },
+        } as unknown as Statement;
+        b.statements.splice(k, b.statements.length - k, sw, ...movedDefault);
+        return;
+      }
+      const [inner, other] = bc.operator === '!=' ? [x.thenBranch, x.elseBranch] : [x.elseBranch, x.thenBranch];
+      const st = stmtsOf(inner);
+      if (st.length !== 1 || st[0].kind !== NodeKind.IfStmt) continue;
+      const y = st[0] as IfStmt;
+      if (y.elseBranch || y.init || y.isConstexpr) continue;
+      const parts = chain(y.condition, '&&');
+      const p0 = unparen(parts[0]);
+      if (p0.kind !== NodeKind.BinaryExpr || (p0 as BinaryExpr).operator !== '==' || text((p0 as BinaryExpr).left) !== want) continue;
+      if (++seen !== f.index) continue;
+      const k1 = bc.right, k2 = (p0 as BinaryExpr).right;
+      if (!caseConstant(k1, locals) || !caseConstant(k2, locals) || sameCaseValue(k1, k2)) refuse('the cases are not two distinct constants');
+      if (!inertSwitchValue(bc.left, volatileNames)) refuse(`${f.expr} has side effects or a volatile local`);
+      if (breaksOut(y.thenBranch) || breaksOut(other)) refuse('a break in an arm would leave the switch');
+      for (const a of [y.thenBranch, other]) for (const { node } of walk(a)) if (node.kind === NodeKind.LabelStmt) refuse('a label in an arm');
+      const body2 = parts.length > 1
+        ? ({ kind: NodeKind.IfStmt, condition: join(parts.slice(1), '&&'), thenBranch: y.thenBranch, elseBranch: null, isConstexpr: false } as unknown as Statement)
+        : y.thenBranch;
+      const arm = (v: Expression, body: Statement): Statement[] =>
+        [{ kind: NodeKind.CaseStmt, value: v, statement: asBlock(body) } as unknown as Statement,
+          ...(leaves(body) ? [] : [{ kind: NodeKind.BreakStmt } as unknown as Statement])];
+      b.statements[k] = {
+        kind: NodeKind.SwitchStmt, condition: bc.left,
+        body: { kind: NodeKind.CompoundStmt, statements: [...arm(k2, body2), ...arm(k1, other)] },
+      } as unknown as Statement;
+      return;
+    }
+  }
+  refuse(`no if #${f.index} testing ${f.expr} against two constants`);
+}
+
+// ---------------------------------------------------------------------------------------
+// opas: the value is updated once, ahead of its uses, in the original's order.
+
+type OpasUpdate = Extract<Vc8Form, { op: 'opas' }>['updates'][number];
+
+function doOpas(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'opas' }>): void {
+  const binding = (u: OpasUpdate, want: 'local' | 'param', type: string): void => {
+    const params = fn.parameters.filter(p => isId((p as unknown as { name?: Identifier | null }).name, u.name));
+    const decls = [...walk(fn.body!)].filter(x => x.node.kind === NodeKind.VariableDecl
+      && (x.node as VariableDecl).name.name === u.name);
+    if (want === 'local') {
+      if (params.length || decls.length !== 1) refuse(`${u.name} is shadowed or not one local`);
+      const d = soleDecl(fn, u.name);
+      if (text(d.type) !== type || !d.initializer) refuse(`${u.name} is not an initialized ${type} local`);
+      refusePinned(fn, u.name);
+    } else {
+      if (params.length !== 1 || decls.length) refuse(`${u.name} is shadowed or not one parameter`);
+      if (text((params[0] as unknown as { type: TypeNode }).type) !== type) refuse(`${u.name} is not a ${type} parameter`);
+    }
+    // No existing store to the named variable may be moved across the new update.
+    for (const { node } of walk(fn.body!)) {
+      if (node.kind === NodeKind.AssignExpr && isId(unparen((node as AssignExpr).left), u.name)) refuse(`${u.name} is already assigned`);
+    }
+  };
+  const matches = (e: Expression, u: OpasUpdate): boolean => {
+    const x = unparen(e);
+    return x.kind === NodeKind.BinaryExpr && (x as BinaryExpr).operator === u.operator
+      && isId(unparen((x as BinaryExpr).left), u.name)
+      && unparen((x as BinaryExpr).right).kind === NodeKind.IntegerLiteral
+      && (unparen((x as BinaryExpr).right) as IntegerLiteralExpr).value === BigInt(u.constant)
+      && !(unparen((x as BinaryExpr).right) as IntegerLiteralExpr).suffix;
+  };
+  const stale = (names: string[], first: Statement, converted: Set<ASTNode>): void => {
+    let after = false;
+    for (const { node } of walk(fn.body!)) {
+      if (node === first) after = true;
+      if (after && isId(node) && names.includes(node.name) && !converted.has(node)) refuse(`${node.name} is read after its update`);
+    }
+  };
+  const convertedIds = (e: ASTNode, u: OpasUpdate): Identifier[] => [...walk(e)]
+    .filter(x => isId(x.node, u.name)).map(x => x.node as Identifier);
+
+  // A jump can carry control back over the update (the guard and the uses then see the
+  // updated value) or past it into the uses; neither is value-preserving.
+  if ([...walk(fn.body!)].some(x => x.node.kind === NodeKind.GotoStmt || x.node.kind === NodeKind.LabelStmt))
+    refuse('a jump may cross the update');
+  if (f.updates.length !== 1) refuse('opas takes one update');
+  const u = f.updates[0];
+  if (u.operator === '>>') return opasShift(fn, u, matches, stale);
+  const plus = u.operator === '+' && BigInt(u.constant) === 1n;
+  const minus = u.operator === '-' && BigInt(u.constant) === 1n;
+  if (!plus && !minus) refuse('single opas supports only + 1 or byte - 1');
+  binding(u, 'local', plus ? 'int32_t' : 'uint8_t');
+  const candidates: Array<{ b: CompoundStmt; i: number; slots: Slot[]; ids: Identifier[]; hits: ASTNode[] }> = [];
+  for (const b of blocks(fn)) {
+    for (let i = 0; i + 1 < b.statements.length; i++) {
+      const slots: Slot[] = [], ids: Identifier[] = [], hits: ASTNode[] = [];
+      let valid = true;
+      for (const stmt of b.statements.slice(i, i + 2)) {
+        let count = 0;
+        for (const { node, slot } of walk(stmt)) {
+          if (!slot) continue;
+          if (plus && matches(node as Expression, u)) {
+            slots.push(slot); ids.push(...convertedIds(node, u)); hits.push(node); count++;
+          } else if (minus && node.kind === NodeKind.CStyleCastExpr && text((node as CStyleCastExpr).type) === 'uint8_t'
+            && matches((node as CStyleCastExpr).expression, u)) {
+            slots.push({ parent: node as unknown as Record<string, unknown>, key: 'expression' });
+            ids.push(...convertedIds((node as CStyleCastExpr).expression, u)); hits.push(node); count++;
+          }
+        }
+        if (count !== 1) { valid = false; break; }
+      }
+      if (valid && slots.length === 2) candidates.push({ b, i, slots, ids, hits });
+    }
+  }
+  if (candidates.length !== 1) refuse(`${candidates.length} adjacent two-use sites for ${u.name}`);
+  const { b, i, slots, ids, hits } = candidates[0];
+  const ancestry = parentsOf(fn);
+  const evaluatedOnEntry = (stmt: Statement, hit: ASTNode): boolean => {
+    let child = hit;
+    while (child !== stmt) {
+      const p = ancestry.get(child);
+      if (!p) return false;
+      if (p.kind === NodeKind.ForStmt) {
+        if (p !== stmt || (p as ForStmt).init !== child) return false;
+      } else if (p.kind === NodeKind.ExprStmt) {
+        if (p !== stmt && !(stmt.kind === NodeKind.ForStmt && (stmt as ForStmt).init === p)) return false;
+      } else if (p.kind === NodeKind.VariableDecl) {
+        if (stmt.kind !== NodeKind.DeclStmt || (stmt as DeclStmt).declarations.length !== 1
+          || (p as VariableDecl).initializer !== child) return false;
+      } else if (p.kind === NodeKind.DeclStmt) {
+        if (p !== stmt) return false;
+      } else if (p.kind === NodeKind.BinaryExpr) {
+        if (['&&', '||', ','].includes((p as BinaryExpr).operator)) return false;
+      } else if (![NodeKind.ParenExpr, NodeKind.CStyleCastExpr, NodeKind.AssignExpr, NodeKind.CallExpr].includes(p.kind)) return false;
+      child = p;
+    }
+    return stmt.kind === NodeKind.ExprStmt || stmt.kind === NodeKind.DeclStmt || stmt.kind === NodeKind.ForStmt;
+  };
+  if (!hits.every((h, j) => evaluatedOnEntry(b.statements[i + j], h))) refuse('the two expressions are not evaluated when their statements begin');
+  const firstUseAncestors = new Set<ASTNode>();
+  for (let n: ASTNode | undefined = hits[0]; n; n = ancestry.get(n)) {
+    firstUseAncestors.add(n);
+    if (n === b.statements[i]) break;
+  }
+  for (const { node } of walk(b.statements[i])) {
+    if (firstUseAncestors.has(node)) continue;
+    if ([NodeKind.CallExpr, NodeKind.AssignExpr, NodeKind.PostfixExpr, NodeKind.ThrowExpr,
+      NodeKind.CoAwaitExpr, NodeKind.NewExpr, NodeKind.DeleteExpr].includes(node.kind)
+      || (node.kind === NodeKind.UnaryExpr && ['++', '--'].includes((node as UnaryExpr).operator)))
+      refuse('the first use has another effect before its update');
+  }
+  const parent = ancestry.get(b);
+  const localDecl = soleDecl(fn, u.name);
+  const declarationStatement = ancestry.get(localDecl);
+  const truthy = (e: Expression): boolean => {
+    const z = unparen(e);
+    return isId(z, u.name) || (z.kind === NodeKind.BinaryExpr && (z as BinaryExpr).operator === '&&'
+      && (truthy((z as BinaryExpr).left) || truthy((z as BinaryExpr).right)));
+  };
+  if (parent?.kind === NodeKind.IfStmt && (parent as IfStmt).thenBranch === b && !(parent as IfStmt).elseBranch) {
+    if (declarationStatement?.kind !== NodeKind.DeclStmt || ancestry.get(declarationStatement) !== fn.body
+      || ancestry.get(parent) !== fn.body
+      || fn.body!.statements.indexOf(declarationStatement as Statement) >= fn.body!.statements.indexOf(parent as Statement))
+      refuse(`${u.name} is not declared before its guard in the outer block`);
+    const cond = unparen((parent as IfStmt).condition);
+    if (plus && text(cond) !== norm(`${u.name} != -1`)) refuse('int32 + 1 is not below its -1 guard');
+    if (minus && !truthy(cond)) refuse('byte - 1 is not below its nonzero guard');
+  } else {
+    if (!minus || b !== fn.body || declarationStatement?.kind !== NodeKind.DeclStmt
+      || ancestry.get(declarationStatement) !== b || b.statements.indexOf(declarationStatement as Statement) >= i)
+      refuse('uses are not in one guarded arm');
+    const declIndex = b.statements.indexOf(declarationStatement as Statement);
+    const prior = b.statements.slice(declIndex + 1, i);
+    const scalarByteGuard = (expression: Expression, guardIndex: number): boolean => {
+      const all = unparen(expression);
+      if (all.kind !== NodeKind.BinaryExpr || (all as BinaryExpr).operator !== '&&') return false;
+      const flags = unparen((all as BinaryExpr).left), range = unparen((all as BinaryExpr).right);
+      if (flags.kind !== NodeKind.BinaryExpr || (flags as BinaryExpr).operator !== '&&'
+        || range.kind !== NodeKind.BinaryExpr || (range as BinaryExpr).operator !== '<='
+        || !isId(unparen((flags as BinaryExpr).left), u.name)
+        || !isId(unparen((range as BinaryExpr).left), u.name)) return false;
+      const other = unparen((flags as BinaryExpr).right);
+      if (other.kind !== NodeKind.Identifier || (other as Identifier).name === u.name
+        || !isId(unparen((range as BinaryExpr).right), (other as Identifier).name)) return false;
+      const otherName = (other as Identifier).name;
+      if (fn.parameters.some(p => isId((p as unknown as { name?: Identifier | null }).name, otherName))) return false;
+      const declarations = [...walk(fn.body!)].filter(x => x.node.kind === NodeKind.VariableDecl
+        && (x.node as VariableDecl).name.name === otherName);
+      if (declarations.length !== 1) return false;
+      const d = declarations[0].node as VariableDecl, statement = ancestry.get(d);
+      return text(d.type) === 'uint8_t' && !!d.initializer && d.specifiers.length === 0
+        && statement?.kind === NodeKind.DeclStmt && ancestry.get(statement) === b
+        && b.statements.indexOf(statement as Statement) < guardIndex;
+    };
+    const guarded = prior.some((s, k) => {
+      if (s.kind !== NodeKind.IfStmt || (s as IfStmt).elseBranch || (s as IfStmt).isConstexpr
+        || !soleReturn((s as IfStmt).thenBranch)) return false;
+      const condition = unparen((s as IfStmt).condition);
+      return condition.kind === NodeKind.UnaryExpr && (condition as UnaryExpr).operator === '!'
+        && scalarByteGuard((condition as UnaryExpr).operand, declIndex + 1 + k) && !effects(condition)
+        && prior.every((other, j) => j === k || !mentions(other, u.name));
+    });
+    if (!guarded) refuse('no preceding flattened nonzero byte guard');
+  }
+  stale([u.name], b.statements[i], new Set(ids));
+  for (const slot of slots) put(slot, { kind: NodeKind.Identifier, name: u.name } as Identifier);
+  b.statements.splice(i, 0, ...parseStmts(`${u.name} ${u.operator}= ${u.constant};`));
+}
+
+/**
+ * `opas(V,>>,K)`: V, one 32-bit integer local or parameter that is never stored, is read
+ * only as `V >> K` from some statement of a block on. `V >>= K;` goes right after the last
+ * statement of that block that names V before those reads (after any updates already
+ * written there, so two tags keep their order), or before the first read when none does.
+ * When V's address is taken, nothing from the update on may call or reach memory other
+ * than through an unmodified parameter, since that memory could be V.
+ */
+function opasShift(fn: FunctionDecl, u: OpasUpdate, matches: (e: Expression, u: OpasUpdate) => boolean,
+  stale: (names: string[], first: Statement, converted: Set<ASTNode>) => void): void {
+  const k = BigInt(u.constant);
+  if (k < 1n || k > 31n) refuse('the shift count is not 1..31');
+  const paramName = (p: unknown) => (p as { name?: Identifier | null }).name;
+  const params = fn.parameters.filter(p => isId(paramName(p), u.name));
+  const decls = [...walk(fn.body!)].filter(x => x.node.kind === NodeKind.VariableDecl && (x.node as VariableDecl).name.name === u.name);
+  if (params.length + decls.length !== 1) refuse(`${u.name} is shadowed or not one variable`);
+  const type = params.length ? text((params[0] as unknown as { type: TypeNode }).type) : text(soleDecl(fn, u.name).type);
+  if (!['int', 'signedint', 'int32_t', 'unsignedint', 'uint32_t'].includes(type)) refuse(`${u.name} is not a 32-bit integer`);
+  for (const { node } of walk(fn.body!)) {
+    if (node.kind === NodeKind.AssignExpr && isId(unparen((node as AssignExpr).left), u.name)) refuse(`${u.name} is already assigned`);
+    if ((node.kind === NodeKind.UnaryExpr || node.kind === NodeKind.PostfixExpr) && ['++', '--'].includes((node as UnaryExpr).operator)
+      && isId(unparen((node as UnaryExpr).operand), u.name)) refuse(`${u.name} is stepped`);
+    if ((node.kind === NodeKind.SizeofExpr || node.kind === NodeKind.InitListExpr) && mentions(node, u.name)) refuse(`${u.name} is in a sizeof or brace initializer`);
+  }
+
+  // Each read `V >> K` with the slot of its outermost parentheses.
+  const slots = new Map<ASTNode, Slot | undefined>();
+  for (const { node, slot } of walk(fn.body!)) slots.set(node, slot);
+  const ancestry = parentsOf(fn);
+  const hits: Array<{ node: ASTNode; slot: Slot }> = [];
+  for (const { node } of walk(fn.body!)) {
+    if (node.kind !== NodeKind.BinaryExpr || !matches(node as Expression, u)) continue;
+    let outer: ASTNode = node;
+    while (ancestry.get(outer)?.kind === NodeKind.ParenExpr) outer = ancestry.get(outer)!;
+    const slot = slots.get(outer);
+    if (!slot) refuse('a read has no slot');
+    hits.push({ node, slot: slot! });
+  }
+  if (!hits.length) refuse(`no ${u.name} >> ${u.constant} read`);
+
+  // The innermost block holding every read, and the first of its statements that holds one.
+  const chain = (n: ASTNode): ASTNode[] => { const out: ASTNode[] = []; for (let p = ancestry.get(n); p; p = ancestry.get(p)) out.push(p); return out; };
+  const common = chain(hits[0].node).filter(p => p.kind === NodeKind.CompoundStmt && hits.every(h => chain(h.node).includes(p)));
+  const b = common[0] as CompoundStmt | undefined;
+  if (!b) refuse('the reads share no block');
+  for (let p: ASTNode | undefined = b; p && p !== fn; p = ancestry.get(p)) {
+    if ([NodeKind.WhileStmt, NodeKind.ForStmt, NodeKind.DoWhileStmt, NodeKind.SwitchStmt].includes(p.kind)) refuse('the reads sit in a loop or switch');
+  }
+  const indexOf = (n: ASTNode): number => { let c = n; while (ancestry.get(c) !== b) c = ancestry.get(c)!; return b!.statements.indexOf(c as Statement); };
+  const i = Math.min(...hits.map(h => indexOf(h.node)));
+  let at = i;
+  for (let j = i - 1; j >= 0; j--) if (mentions(b!.statements[j], u.name)) { at = j + 1; break; }
+  const isUpdate = (s: Statement): boolean => {
+    const st = storeOf(s);
+    return !!st && st.operator !== '=' && isId(unparen(st.left)) && unparen(st.right).kind === NodeKind.IntegerLiteral;
+  };
+  while (at < i && isUpdate(b!.statements[at])) at++;
+  const first = b!.statements[at];
+
+  const converted = new Set<ASTNode>(hits.flatMap(h => [...walk(h.node)].filter(x => isId(x.node, u.name)).map(x => x.node)));
+  stale([u.name], first, converted);
+  if (addressTaken(fn, u.name)) {
+    const steady = (e: Expression): boolean => {
+      let x = unparen(e);
+      while (x.kind === NodeKind.CStyleCastExpr) x = unparen((x as CStyleCastExpr).expression);
+      if (!isId(x) || x.name === u.name || !fn.parameters.some(p => isId(paramName(p), (x as Identifier).name))) return false;
+      const name = x.name;
+      return !addressTaken(fn, name) && ![...walk(fn.body!)].some(y => (y.node.kind === NodeKind.AssignExpr && isId(unparen((y.node as AssignExpr).left), name))
+        || ((y.node.kind === NodeKind.UnaryExpr || y.node.kind === NodeKind.PostfixExpr) && ['++', '--'].includes((y.node as UnaryExpr).operator)
+          && isId(unparen((y.node as UnaryExpr).operand), name)));
+    };
+    let after = false;
+    for (const { node } of walk(fn.body!)) {
+      if (node === first) after = true;
+      if (!after) continue;
+      if (node.kind === NodeKind.CallExpr) refuse(`a call after the update may read ${u.name} through its address`);
+      if (node.kind === NodeKind.MemberExpr && (node as MemberExpr).isArrow && !steady((node as MemberExpr).object as Expression)
+        || node.kind === NodeKind.UnaryExpr && (node as UnaryExpr).operator === '*' && !steady((node as UnaryExpr).operand)
+        || node.kind === NodeKind.SubscriptExpr)
+        refuse(`memory after the update may be ${u.name}`);
+    }
+  }
+  for (const h of hits) put(h.slot, { kind: NodeKind.Identifier, name: u.name } as Identifier);
+  b!.statements.splice(at, 0, ...parseStmts(`${u.name} >>= ${u.constant};`));
+}
+
 const APPLY: { [K in Vc8Form['op']]: (fn: FunctionDecl, f: Extract<Vc8Form, { op: K }>) => void } = {
-  seq: doSeq, fold: doFold, cache: doCache, own: doOwn, guards: doGuards, 'merge-guards': doMergeGuards,
-  retval: doRetval, width: doWidth, arms: doArms,
-  nest: doNest, 'merge-tail': doMergeTail, continue: doContinue, dup: doDup, tarms: doTarms, zero: doZero, nonzero: doNonzero,
-  cmp: doCmp, swap: doSwap, ifsel: doIfsel, split: doSplit, select: doSelect, decl: doDecl, unselect: doUnselect,
+  seq: doSeq, fold: doFold, join: doJoin, cache: doCache, own: doOwn, guards: doGuards, 'merge-guards': doMergeGuards,
+  retval: doRetval, width: doWidth, boolflag: doBoolflag, retwiden: doRetwiden, arms: doArms,
+  nest: doNest, 'merge-tail': doMergeTail, tailguard: doTailguard, tailcopy: doTailcopy, continue: doContinue, dup: doDup, tarms: doTarms, zero: doZero, nonzero: doNonzero,
+  bool: doBool,
+  cmp: doCmp, swap: doSwap, ifsel: doIfsel, clamp: doClamp, split: doSplit, select: doSelect, decl: doDecl, unselect: doUnselect,
+  tsel: doTsel, hoist: doHoist, nestcall: doNestcall, fill: doFill, elems: doElems, copy: doCopy, shift: doShift, ptrwalk: doPtrwalk, rowptr: doRowptr,
+  acc: doAcc,
+  retvar: doRetvar, onecall: doOnecall, roundup: doRoundup, opas: doOpas, swmerge: doSwmerge, dec: doDec, switch: doSwitch,
+  range: doRange, castout: doCastout, signbit: doSignbit,
 };
 
 /**
  * Apply the forms to the (single) function definition in tu, in order. Each form works on
  * a copy and is kept only when it applied whole.
  */
+/**
+ * A form's expressions in the spelling the body now has. seed-roll-step turns a seed
+ * temporary `X` from a D2SeedStrc into the uint32_t low word it reads (`X.nSeedLow` becomes
+ * `X`); a tag recorded before that names `X.nSeedLow`, which nothing prints any more
+ * (AITHINK_Fn1_Arach 005f4510's `nest((int)(DVar1.nSeedLow % 100) >= ...)`). Where X is a
+ * local of the function no longer declared D2SeedStrc, the member is read as X itself -
+ * the same word the rewrite made X hold.
+ */
+function respellForm(fn: FunctionDecl, form: Vc8Form): Vc8Form {
+  const words = new Set<string>();
+  for (const { node } of walk(fn.body!)) {
+    if (node.kind !== NodeKind.VariableDecl) continue;
+    const d = node as VariableDecl;
+    if (!/\bD2SeedStrc\b/.test(text(d.type))) words.add(d.name.name);
+  }
+  let changed = false;
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(form)) {
+    if (k === 'op' || typeof v !== 'string') { out[k] = v; continue; }
+    const r = v.replace(/\b([A-Za-z_]\w*)\s*\.\s*nSeedLow\b/g, (m, x: string) => (words.has(x) ? x : m));
+    if (r !== v) changed = true;
+    out[k] = r;
+  }
+  return changed ? (out as unknown as Vc8Form) : form;
+}
+
+/**
+ * The one function definition of a unit: a plain one, or an explicit specialization
+ * (`template<> void TSGrowableArray<SGAMEDATA>::Reserve(...)`) as the tree prints a member
+ * of a template instance.
+ */
+export function definitionOf(tu: TranslationUnit): FunctionDecl | undefined {
+  for (const d of tu.declarations) {
+    const f = d.kind === NodeKind.TemplateDecl ? (d as unknown as { declaration: ASTNode }).declaration : d;
+    if (f.kind === NodeKind.FunctionDecl && (f as FunctionDecl).body) return f as FunctionDecl;
+  }
+  return undefined;
+}
+
 export function applyVc8Forms(tu: TranslationUnit, forms: Array<{ form: Vc8Form; tag?: string }>,
-  onSite?: (s: Vc8FormSite) => void): TranslationUnit {
+  onSite?: (s: Vc8FormSite) => void, tables?: Vc8FormTables): TranslationUnit {
   if (forms.length === 0) return tu;
+  selectTables = tables;
   let cur = tu;
   for (const { form, tag } of forms) {
     const next = cloneNode(cur);
-    const fn = next.declarations.find(d => d.kind === NodeKind.FunctionDecl && (d as FunctionDecl).body) as FunctionDecl | undefined;
+    const fn = definitionOf(next);
+    prefixUsed = new Set();
     try {
       if (!fn) refuse('no function body');
-      (APPLY[form.op] as (fn: FunctionDecl, f: Vc8Form) => void)(fn!, form);
+      (APPLY[form.op] as (fn: FunctionDecl, f: Vc8Form) => void)(fn!, respellForm(fn!, form));
       cur = next;
-      onSite?.({ form, tag, applied: true });
+      onSite?.({ form, tag, applied: true, ...(prefixUsed.size ? { prefix: [...prefixUsed] } : {}) });
     } catch (e) {
       if (!(e instanceof Refuse)) throw e;
       onSite?.({ form, tag, applied: false, why: e.message });

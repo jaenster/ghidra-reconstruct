@@ -55,6 +55,8 @@ export function decompiledBody(decompiled: string): string | null {
 
 export interface OutParamOracle {
   outParamWidth(callee: string, index: number): number | null;
+  /** The same for an argument that is not null (`&local`): the callee's own null test of it is decided. */
+  outParamWidthNonNull(callee: string, index: number): number | null;
   typeSize(spelling: string): number | null;
 }
 
@@ -67,9 +69,11 @@ export function createOutParamOracle(
   dataTypes: readonly ExtractedDataType[],
 ): OutParamOracle {
   const typeSize = makeTypeSize(dataTypes);
-  const results = new Map<ExtractedFunction, Map<number, number> | 'pending'>();
+  const plain = new Map<ExtractedFunction, Map<number, number> | 'pending'>();
+  const nonNullResults = new Map<ExtractedFunction, Map<number, number> | 'pending'>();
   const noreturn = new Set<string>([...DEFAULT_NORETURN_FUNCTIONS]);
-  const analyse = (fn: ExtractedFunction): Map<number, number> => {
+  const analyse = (fn: ExtractedFunction, nonNull = false): Map<number, number> => {
+    const results = nonNull ? nonNullResults : plain;
     const done = results.get(fn);
     if (done === 'pending') return new Map();
     if (done) return done;
@@ -91,9 +95,10 @@ export function createOutParamOracle(
             },
             typeSize,
             calleeOut: (callee: string, index: number) => outParamWidth(callee, index),
+            calleeOutNonNull: (callee: string, index: number) => outParamWidthNonNull(callee, index),
             noreturn,
           };
-          answer = outParamWidths(stmts, params.map(p => p.name ?? ''), ctx);
+          answer = outParamWidths(stmts, params.map(p => p.name ?? ''), ctx, { nonNull });
         }
       }
     } catch {
@@ -107,5 +112,10 @@ export function createOutParamOracle(
     if (!fn) return null;
     return analyse(fn).get(index) ?? null;
   };
-  return { outParamWidth, typeSize };
+  const outParamWidthNonNull = (callee: string, index: number): number | null => {
+    const fn = byKey.get(callee) ?? byKey.get(callee.replace(/^::/, ''));
+    if (!fn) return null;
+    return analyse(fn, true).get(index) ?? null;
+  };
+  return { outParamWidth, outParamWidthNonNull, typeSize };
 }

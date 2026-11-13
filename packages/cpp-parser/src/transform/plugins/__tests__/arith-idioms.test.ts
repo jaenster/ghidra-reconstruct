@@ -191,11 +191,42 @@ describe('arith-idioms', () => {
       assert.strictEqual(run('x = (a ^ (int)a >> 0x1f) - ((int)a >> 0x1f);', 'int a, int x'), 'x = abs(a);');
     });
 
-    it('refuses an unsigned result, mismatched operands and a 64-bit value', () => {
+    it('gives an unsigned dword its unsigned difference back', () => {
+      // WEATHER_ApproximateDistance 00474080: `cdq; mov ecx, eax; xor ecx, edx; sub ecx, edx`.
       assert.strictEqual(run('x = (u ^ (int)u >> 0x1f) - ((int)u >> 0x1f);', 'uint32_t u, int x'),
-        'x = (u ^ (int)u >> 0x1f) - ((int)u >> 0x1f);');
+        'x = (uint32_t)abs((int)u);');
+    });
+
+    it('refuses mismatched operands and a 64-bit value', () => {
       assert.strictEqual(run('x = (a ^ b >> 0x1f) - (b >> 0x1f);', 'int a, int b, int x'), 'x = (a ^ b >> 0x1f) - (b >> 0x1f);');
       assert.strictEqual(run('x = (q ^ q >> 0x1f) - (q >> 0x1f);', 'int64_t q, int x'), 'x = (q ^ q >> 0x1f) - (q >> 0x1f);');
+    });
+  });
+
+  describe('shifts under a narrowing cast', () => {
+    it('shifts a signed value arithmetically where the cast drops the top bits', () => {
+      // CLIENT_SetUnitLightColor 004609a0: `sar eax, 0x10` / `sar ecx, 8`.
+      assert.strictEqual(run('b = (uint8_t)((uint32_t)n >> 0x10);', 'int n, uint8_t b'), 'b = (uint8_t)(n >> 0x10);');
+      assert.strictEqual(run('w = (uint16_t)((uint32_t)n >> 8);', 'int n, uint16_t w'), 'w = (uint16_t)(n >> 8);');
+      assert.strictEqual(run('b = (uint8_t)((uint32_t)h >> 8);', 'int16_t h, uint8_t b'), 'b = (uint8_t)(h >> 8);');
+    });
+
+    it('refuses a top bit the cast keeps, bool, an unsigned value and a wide target', () => {
+      assert.strictEqual(run('w = (uint16_t)((uint32_t)n >> 0x11);', 'int n, uint16_t w'), 'w = (uint16_t)((uint32_t)n >> 0x11);');
+      // HIWORD's spelling: the original is split between shr and sar there.
+      assert.strictEqual(run('w = (int16_t)((uint32_t)n >> 0x10);', 'int n, int16_t w'), 'w = (int16_t)((uint32_t)n >> 0x10);');
+      assert.strictEqual(run('c = (bool)((uint32_t)n >> 0x1f);', 'int n, bool c'), 'c = (bool)((uint32_t)n >> 0x1f);');
+      assert.strictEqual(run('b = (uint8_t)((uint32_t)u >> 8);', 'uint32_t u, uint8_t b'), 'b = (uint8_t)((uint32_t)u >> 8);');
+      assert.strictEqual(run('r = (int)((uint32_t)n >> 8);', 'int n, int r'), 'r = (int)((uint32_t)n >> 8);');
+      assert.strictEqual(run('b = (uint8_t)((uint32_t)q >> 8);', 'int64_t q, uint8_t b'), 'b = (uint8_t)((uint32_t)q >> 8);');
+    });
+
+    it('folds the power-of-two bias of an unsigned sum the cast truncates', () => {
+      // VIEW_AllocByteTable 00475b80: `cdq; and edx, 0xffff; add eax, edx; sar eax, 0x10`.
+      assert.strictEqual(run('b = (uint8_t)(n + (n >> 0x1f & 0xffffU) >> 0x10);', 'int n, uint8_t b'), 'b = (uint8_t)(n / 65536);');
+      // Not when the cast keeps a bit the shifts disagree on.
+      assert.strictEqual(run('w = (uint16_t)(n + (n >> 0x1f & 0x1ffffU) >> 0x11);', 'int n, uint16_t w'),
+        'w = (uint16_t)(n + (n >> 0x1f & 0x1ffffU) >> 0x11);');
     });
   });
 
@@ -293,6 +324,9 @@ describe('arith-idioms', () => {
       assert.strictEqual(run('r = _allmul((uint32_t)q, *(uint32_t*)((char*)&q + 4), 0x21, 0);', 'uint64_t q, int64_t r'),
         'r = (int64_t)q * 0x21;');
       assert.strictEqual(run('r = _allmul(n, 0, (uint32_t)q, *(int*)((uintptr_t)&q + 4));', 'uint32_t n, uint64_t q, int64_t r'),
+        'r = (int64_t)n * (int64_t)q;');
+      // pointer-cast-normalize spells the signed `(int)&q` as `(intptr_t)&q`.
+      assert.strictEqual(run('r = _allmul(n, 0, (uint32_t)q, *(int*)((intptr_t)&q + 4));', 'uint32_t n, uint64_t q, int64_t r'),
         'r = (int64_t)n * (int64_t)q;');
     });
 
@@ -564,6 +598,12 @@ describe('arith-idioms values', () => {
       { decls: 'int n, uint32_t r', body: 'r = 0x11f - (uint32_t)(n != 0);', values: 'S' },
       { decls: 'uint32_t u, uint32_t r', body: 'r = (u > 7) + 0x80000001;', values: 'U' },
       { decls: 'uint32_t u, int r', body: 'r = (u == 0) * 2 - 1;', values: 'U' },
+      { decls: 'uint32_t u, uint32_t r', body: 'r = (u ^ (int)u >> 0x1f) - ((int)u >> 0x1f);', values: 'U' },
+      { decls: 'int n, uint8_t r', body: 'r = (uint8_t)((uint32_t)n >> 0x10);', values: 'S' },
+      { decls: 'int n, uint16_t r', body: 'r = (uint16_t)((uint32_t)n >> 8);', values: 'S' },
+      { decls: 'int n, uint8_t r', body: 'r = (uint8_t)((uint32_t)n >> 0x18);', values: 'S' },
+      { decls: 'int n, uint8_t r', body: 'r = (uint8_t)(n + (n >> 0x1f & 0xffffU) >> 0x10);', values: 'S' },
+      { decls: 'int n, uint16_t r', body: 'r = (uint16_t)(n + (n >> 0x1f & 0xffU) >> 8);', values: 'S' },
     ];
     const VALUES: Record<string, string> = {
       U: '0u, 1u, 2u, 3u, 6u, 7u, 9u, 10u, 34u, 35u, 36u, 0x7fffffffu, 0x80000000u, 0x80000001u, 0xfffffffeu, 0xffffffffu, 123456789u',

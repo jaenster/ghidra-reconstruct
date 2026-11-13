@@ -1,3 +1,5 @@
+import type { ReconstructionOptions } from '@ghidra-mcp/reconstruct';
+
 /**
  * The namespace exclusions, copied verbatim from `run.ts`.
  *
@@ -35,3 +37,17 @@ export const EXCLUDE_PATTERNS: RegExp[] = [
   /^MacSpecific$/,
   /^StormMac$/,
 ];
+
+/**
+ * The extraction options every live path runs with: the daemon's model (and so its
+ * full re-extraction, `refreshAllFunctions`) and the codegen child. One object, so the
+ * escalation path lists, excludes and closes over exactly the function set the batch
+ * regen extracted. Without `excludePatterns` the full re-extraction admitted every
+ * excluded-namespace function (661 at v2021: `compiler`, `_Wrappers`, `UnDecorator`),
+ * none of which the batch extraction keeps unless a kept body reaches it.
+ */
+export const LIVE_EXTRACTION_OPTIONS: Pick<ReconstructionOptions, 'decompileTimeout' | 'excludeLibraryCode' | 'excludePatterns'> = {
+  decompileTimeout: 60,
+  excludeLibraryCode: false,
+  excludePatterns: EXCLUDE_PATTERNS,
+};

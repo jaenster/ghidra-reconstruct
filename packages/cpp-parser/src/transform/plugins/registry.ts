@@ -204,6 +204,8 @@ export class PluginRegistry {
     if (disablePlugins) {
       plugins = plugins.filter((p) => !disablePlugins.includes(p.id));
     }
+    const late = options.stage === 'after-source-forms';
+    plugins = plugins.filter((p) => !!p.afterSourceForms === late);
 
     // Create shared injection collector
     const collector = new InjectionCollector();

@@ -1,0 +1,12 @@
+id	hash	file	scope	kind	addr	fn	ns	old_start	old_len	new_start	new_len	off_in_fn	n_added	n_removed	weak	first_line
+h001	4a3e31ac1229	Source/A/Alpha.cpp	file	include				1	0	2	1		1	0	0	#include <cstring>
+h002	1ed8c6b8a640	Source/A/Alpha.cpp	function	code	00401000	One	D2::Alpha	11	0	13	1	6	1	0	0	a ^= 1; // hand fix é
+h003	75e0261ec40b	Source/A/Alpha.cpp	multi	code	00401000			16	2	18	1		1	2	0	} // end of One
+h004	e2c7988dc652	Source/A/Alpha.cpp	function	code	00401040	Three	D2::Alpha	32	1	33	1	11	1	1	0	return c * 3 + kHandBias;
+h005	01aa0f413719	Source/A/Alpha.cpp	function	code	00401080	Four	D2::Alpha	43	1	43	0	8	0	1	1	Two(3);
+h006	e35bd188e7cc	Source/A/Alpha.cpp	multi	code	00401100			46	0	47	3		3	0	0	// 1.14d: 00401100
+h007	27835a65942e	Source/B/Beta.cpp	file	include				1	0	2	1		1	0	0	#include "Hand.h"
+h008	dc789ced94cc	Source/B/Beta.cpp	function	code	00402040	Seven	D2::Beta	23	1	24	1	8	1	1	0	t += 5 + s_counter + Alpha::kHandBias;
+h009	6d806faa5f00	Source/B/Beta.cpp	function	code	00402040	Seven	D2::Beta	27	1	28	1	12	1	1	0	t += HandHelper(t);
+h010	4236520c0e28	Source/C/Crlf.cpp	function	code	00403000	Eight	D2	8	0	9	1	3	1	0	0	v += 1; // hand
+-	-	Source/B/Hand.h	hand-file	-											0	whole file absent from base

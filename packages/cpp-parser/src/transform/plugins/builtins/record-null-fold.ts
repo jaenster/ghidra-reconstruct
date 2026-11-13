@@ -161,7 +161,10 @@ function rewriteFunction(fn: FunctionDecl, opts: RecordNullFoldOptions): Functio
       // The original's one exit for the null test, the range tests and the record's null test.
       const rets: ReturnStmt[] = [g0.ret, g3.ret];
       // The select is the getter's split tests written back, placed on the store's line.
-      const tests: ASTNode[] = [g0.cond, st[i + 2], g3.cond];
+      // record-getter-guard writes the record's test `!X` new, with no line of its own: it
+      // is the getter's last test, printed on the store's line (MISSILE_CltHitFn54_VinesTrail
+      // 004d0ff0).
+      const tests: ASTNode[] = [g0.cond, st[i + 2], placedLine(g3.cond) === null ? st[i + 2] : g3.cond];
       const lines = [placedLine(st[i]), placedLine(st[i + 2]), placedLine(st[i + 3])];
       const oneIf = lines.every(l => l !== null) && gate.oneCondition(lines as number[]);
       if (!oneIf && !gate.sharedExit(rets, tests, conjuncts(test).length + 2, true)) continue;

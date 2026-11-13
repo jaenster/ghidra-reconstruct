@@ -308,6 +308,12 @@ export function computeDeclarationClosure(inputs: ClosureInputs): ClosureResult 
     }
 
     const global = globalByName.get(name);
+    if (global?.compilerOutput !== undefined) {
+      // The compiler or the linker defines it (compiler-data.ts): the bodies reach it as
+      // a constant, a literal or the linker's symbol, never through a declaration.
+      note(`made by the compiler (${global.compilerOutput}), declared by no source`, name);
+      continue;
+    }
     if (global) {
       const decl = inputs.renderExtern(global);
       if (decl) { declarations.push({ name, decl, origin: 'undeclared-global' }); continue; }

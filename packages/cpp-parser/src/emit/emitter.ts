@@ -3,7 +3,7 @@
  * Pretty printer that emits valid C++ code from AST nodes
  */
 
-import { NodeKind } from '../ast/kinds.js';
+import { NodeKind, isExpression } from '../ast/kinds.js';
 import { TriviaKind, type Trivia } from '../lexer/trivia.js';
 import type {
   AnyNode,
@@ -803,7 +803,7 @@ export class CppEmitter {
     this.emitTypeNode(node.elementType);
     this.write('[');
     if (node.size) {
-      this.emitNode(node.size);
+      this.emitAssignmentExpression(node.size);
     }
     this.write(']');
   }
@@ -822,6 +822,73 @@ export class CppEmitter {
       current = arr.elementType;
     }
     return { elementType: current, arraySizes };
+  }
+
+  /** Keep the shared base type separate from each name's pointer/array declarator. */
+  private localDeclarator(type: TypeNode, name: string): { base: TypeNode; name: string } {
+    switch (type.kind) {
+      case NodeKind.PointerType: {
+        const pointer = type as PointerType;
+        const qualifiers = pointer.qualifiers.length ? pointer.qualifiers.join(' ') + ' ' : '';
+        let decorated = '*' + qualifiers + name;
+        if (pointer.pointee.kind === NodeKind.ArrayType || pointer.pointee.kind === NodeKind.FunctionType) {
+          const convention = pointer.pointee.kind === NodeKind.FunctionType
+            ? (pointer.pointee as FunctionType).callingConvention
+            : undefined;
+          decorated = '(' + (convention ? convention + ' ' : '') + decorated + ')';
+        }
+        return this.localDeclarator(pointer.pointee, decorated);
+      }
+      case NodeKind.ReferenceType: {
+        const ref = type as ReferenceType;
+        const wrapped = ref.referenced.kind === NodeKind.ArrayType || ref.referenced.kind === NodeKind.FunctionType;
+        const convention = ref.referenced.kind === NodeKind.FunctionType
+          ? (ref.referenced as FunctionType).callingConvention : undefined;
+        const decorated = wrapped ? '(' + (convention ? convention + ' ' : '') + '&' + name + ')' : '&' + name;
+        return this.localDeclarator(ref.referenced, decorated);
+      }
+      case NodeKind.RValueReferenceType: {
+        const ref = type as RValueReferenceType;
+        const wrapped = ref.referenced.kind === NodeKind.ArrayType || ref.referenced.kind === NodeKind.FunctionType;
+        const convention = ref.referenced.kind === NodeKind.FunctionType
+          ? (ref.referenced as FunctionType).callingConvention : undefined;
+        const decorated = wrapped ? '(' + (convention ? convention + ' ' : '') + '&&' + name + ')' : '&&' + name;
+        return this.localDeclarator(ref.referenced, decorated);
+      }
+      case NodeKind.QualifiedType: {
+        const qualified = type as QualifiedType;
+        if (qualified.type.kind === NodeKind.PointerType) {
+          const pointer = qualified.type as PointerType;
+          return this.localDeclarator({
+            ...pointer,
+            qualifiers: [...pointer.qualifiers, ...qualified.qualifiers],
+          }, name);
+        }
+        if (qualified.type.kind === NodeKind.ArrayType) {
+          const array = qualified.type as ArrayType;
+          return this.localDeclarator({
+            ...array,
+            elementType: { ...qualified, type: array.elementType },
+          }, name);
+        }
+        return { base: type, name };
+      }
+      case NodeKind.ArrayType: {
+        const arr = type as ArrayType;
+        const size = arr.size ? new CppEmitter(this.style).emit(arr.size as AnyNode) : '';
+        return this.localDeclarator(arr.elementType, name + '[' + size + ']');
+      }
+      case NodeKind.FunctionType: {
+        const fn = type as FunctionType;
+        const separator = this.style.spaceAfterComma ? ', ' : ',';
+        const parameters = fn.parameters.map(p => new CppEmitter(this.style).emit(p as AnyNode));
+        if (fn.isVariadic) parameters.push('...');
+        const qualifiers = fn.qualifiers.length ? ' ' + fn.qualifiers.join(' ') : '';
+        return this.localDeclarator(fn.returnType, name + '(' + parameters.join(separator) + ')' + qualifiers);
+      }
+      default:
+        return { base: type, name };
+    }
   }
 
   /**
@@ -855,6 +922,73 @@ export class CppEmitter {
     return true;
   }
 
+  /** Build a named function declarator through pointer, reference, array and cv wrappers. */
+  private namedFunctionDeclarator(type: TypeNode, name: string): { fn: FunctionType; name: string } | null {
+    if (type.kind === NodeKind.QualifiedType) {
+      const qualified = type as QualifiedType;
+      if (qualified.type.kind === NodeKind.PointerType) {
+        const pointer = qualified.type as PointerType;
+        return this.namedFunctionDeclarator({
+          ...pointer, qualifiers: [...pointer.qualifiers, ...qualified.qualifiers],
+        }, name);
+      }
+      if (qualified.type.kind === NodeKind.ArrayType) {
+        const array = qualified.type as ArrayType;
+        return this.namedFunctionDeclarator({
+          ...array, elementType: { ...qualified, type: array.elementType },
+        }, name);
+      }
+      return null;
+    }
+    if (type.kind === NodeKind.ArrayType) {
+      const array = type as ArrayType;
+      const size = array.size ? new CppEmitter(this.style).emit(array.size as AnyNode) : '';
+      return this.namedFunctionDeclarator(array.elementType, name + '[' + size + ']');
+    }
+    if (type.kind === NodeKind.PointerType || type.kind === NodeKind.ReferenceType ||
+        type.kind === NodeKind.RValueReferenceType) {
+      const next = type.kind === NodeKind.PointerType ? (type as PointerType).pointee
+        : type.kind === NodeKind.ReferenceType ? (type as ReferenceType).referenced
+        : (type as RValueReferenceType).referenced;
+      const marker = type.kind === NodeKind.PointerType
+        ? '*' + ((type as PointerType).qualifiers.length ? ' ' + (type as PointerType).qualifiers.join(' ') + ' ' : '')
+        : type.kind === NodeKind.ReferenceType ? '&' : '&&';
+      let decorated = marker + name;
+      const wrapped = next.kind === NodeKind.ArrayType || next.kind === NodeKind.FunctionType ||
+        (next.kind === NodeKind.QualifiedType &&
+          ((next as QualifiedType).type.kind === NodeKind.ArrayType ||
+           (next as QualifiedType).type.kind === NodeKind.FunctionType));
+      if (wrapped) {
+        const fn = next.kind === NodeKind.FunctionType ? next as FunctionType : null;
+        decorated = '(' + (fn?.callingConvention ? fn.callingConvention + ' ' : '') + decorated + ')';
+      }
+      return this.namedFunctionDeclarator(next, decorated);
+    }
+    return type.kind === NodeKind.FunctionType ? { fn: type as FunctionType, name } : null;
+  }
+
+  /** A named function pointer keeps its name inside the pointer declarator. */
+  private emitNamedFunctionPointerDecl(type: TypeNode, name: Identifier, specifiers: readonly string[] = []): boolean {
+    const declarator = this.namedFunctionDeclarator(type, name.name);
+    if (!declarator) return false;
+    const { fn } = declarator;
+    if (specifiers.length > 0) this.write(specifiers.join(' ') + ' ');
+    this.emitTypeNode(fn.returnType);
+    this.write(' ' + declarator.name);
+    this.write('(');
+    for (let i = 0; i < fn.parameters.length; i++) {
+      if (i > 0) this.write(this.style.spaceAfterComma ? ', ' : ',');
+      this.emitTypeNode(fn.parameters[i]);
+    }
+    if (fn.isVariadic) {
+      if (fn.parameters.length > 0) this.write(this.style.spaceAfterComma ? ', ' : ',');
+      this.write('...');
+    }
+    this.write(')');
+    if (fn.qualifiers.length > 0) this.write(' ' + fn.qualifiers.join(' '));
+    return true;
+  }
+
   /**
    * Emit an ABSTRACT pointer-to-array declarator `T (*)[N]` — the nameless twin of
    * `emitPointerToArrayDecl`. Legal wherever a type-id is, which is where a cast
@@ -885,7 +1019,7 @@ export class CppEmitter {
   private emitArrayDimensions(sizes: (Expression | null)[]): void {
     for (const size of sizes) {
       this.write('[');
-      if (size) this.emitNode(size);
+      if (size) this.emitAssignmentExpression(size);
       this.write(']');
     }
   }
@@ -992,6 +1126,11 @@ export class CppEmitter {
 
   private emitAttributes(attrs: Attribute[]): void {
     if (attrs.length === 0) return;
+    // GCC's own attributes are read from `__attribute__((...))` and printed back that way.
+    if (attrs.every(a => a.namespace?.name === 'gnu' && a.arguments.length === 0)) {
+      this.write(`__attribute__((${attrs.map(a => a.name.name).join(', ')})) `);
+      return;
+    }
     this.write('[[');
     for (let i = 0; i < attrs.length; i++) {
       if (i > 0) {
@@ -1016,7 +1155,9 @@ export class CppEmitter {
           this.write(',');
           if (this.style.spaceAfterComma) this.write(' ');
         }
-        this.emitNode(attr.arguments[i] as ASTNode);
+        const arg = attr.arguments[i];
+        if (isExpression(arg.kind)) this.emitAssignmentExpression(arg as Expression);
+        else this.emitNode(arg as ASTNode);
       }
       this.write(')');
     }
@@ -1082,6 +1223,13 @@ export class CppEmitter {
   }
 
   private emitParameterDecl(node: ParameterDecl): void {
+    if (node.name && this.emitNamedFunctionPointerDecl(node.type, node.name)) {
+      if (node.defaultValue) {
+        this.write(this.style.spaceAroundOperators ? ' = ' : '=');
+        this.emitExprWithPrecedence(node.defaultValue, 17);
+      }
+      return;
+    }
     // Unwrap array type — C/C++ requires brackets after the declarator name
     const { elementType: paramElemType, arraySizes: paramArraySizes } = this.unwrapArrayType(node.type);
     this.emitTypeNode(paramElemType);
@@ -1099,7 +1247,7 @@ export class CppEmitter {
       } else {
         this.write('=');
       }
-      this.emitNode(node.defaultValue);
+      this.emitAssignmentExpression(node.defaultValue);
     }
   }
 
@@ -1115,7 +1263,9 @@ export class CppEmitter {
     // the C declarator syntax, NOT `T[N]* name` (invalid C++). Without this,
     // Ghidra's `D2UnitStrc*(*)[5]` locals emit as `D2UnitStrc*[5]* name` and the
     // declaration — plus every use of the name — fails to compile.
-    if (!this.emitPointerToArrayDecl(node.type, node.name)) {
+    const namedFunctionPointer = this.emitNamedFunctionPointerDecl(node.type, node.name);
+    if (!namedFunctionPointer &&
+        !this.emitPointerToArrayDecl(node.type, node.name)) {
       // Unwrap array type — C/C++ requires brackets after the declarator name
       const { elementType, arraySizes } = this.unwrapArrayType(node.type);
       this.emitTypeNode(elementType);
@@ -1134,7 +1284,7 @@ export class CppEmitter {
         } else {
           this.write('=');
         }
-        this.emitNode(node.initializer);
+        this.emitAssignmentExpression(node.initializer);
       }
     }
     this.write(';');
@@ -1213,8 +1363,8 @@ export class CppEmitter {
     }
   }
 
-  private emitUnionDecl(node: UnionDecl): void {
-    this.write(this.indent());
+  private emitUnionDecl(node: UnionDecl, noIndent = false): void {
+    if (!noIndent) this.write(this.indent());
     this.emitAttributes(node.attributes);
     this.write('union');
 
@@ -1285,7 +1435,7 @@ export class CppEmitter {
       } else {
         this.write('=');
       }
-      this.emitNode(node.value);
+      this.emitAssignmentExpression(node.value);
     }
   }
 
@@ -1321,9 +1471,11 @@ export class CppEmitter {
   private emitTypedefDecl(node: TypedefDecl): void {
     this.write(this.indent());
     this.write('typedef ');
-    this.emitTypeNode(node.type);
-    this.write(' ');
-    this.emitIdentifier(node.name);
+    if (!this.emitNamedFunctionPointerDecl(node.type, node.name)) {
+      this.emitTypeNode(node.type);
+      this.write(' ');
+      this.emitIdentifier(node.name);
+    }
     this.write(';');
   }
 
@@ -1471,7 +1623,7 @@ export class CppEmitter {
         default: return false;
       }
     };
-    if (!bare(expr)) {
+    if (!bare(expr) && !this.isCommaOperatorExpr(expr)) {
       this.emitNode(expr);
       return;
     }
@@ -1520,17 +1672,19 @@ export class CppEmitter {
     }
 
     // Unwrap array type — C/C++ requires brackets after the declarator name
-    const { elementType: fieldElemType, arraySizes: fieldArraySizes } = this.unwrapArrayType(node.type);
-    this.emitTypeNode(fieldElemType);
-    this.write(' ');
-    this.emitIdentifier(node.name);
-    this.emitArrayDimensions(fieldArraySizes);
+    if (!this.emitNamedFunctionPointerDecl(node.type, node.name)) {
+      const { elementType: fieldElemType, arraySizes: fieldArraySizes } = this.unwrapArrayType(node.type);
+      this.emitTypeNode(fieldElemType);
+      this.write(' ');
+      this.emitIdentifier(node.name);
+      this.emitArrayDimensions(fieldArraySizes);
+    }
 
     if (node.bitWidth) {
       if (this.style.spaceBeforeColon) this.write(' ');
       this.write(':');
       if (this.style.spaceAfterColon) this.write(' ');
-      this.emitNode(node.bitWidth);
+      this.emitAssignmentExpression(node.bitWidth);
     }
 
     if (node.initializer) {
@@ -1542,7 +1696,7 @@ export class CppEmitter {
         } else {
           this.write('=');
         }
-        this.emitNode(node.initializer);
+        this.emitAssignmentExpression(node.initializer);
       }
     }
     this.write(';');
@@ -1656,7 +1810,7 @@ export class CppEmitter {
           this.write(',');
           if (this.style.spaceAfterComma) this.write(' ');
         }
-        this.emitNode(node.arguments[i]);
+        this.emitAssignmentExpression(node.arguments[i]);
       }
       this.write(')');
     } else {
@@ -1722,7 +1876,7 @@ export class CppEmitter {
   private emitStaticAssertDecl(node: StaticAssertDecl, noIndent = false): void {
     if (!noIndent) this.write(this.indent());
     this.write('static_assert(');
-    this.emitNode(node.condition);
+    this.emitAssignmentExpression(node.condition);
     if (node.message) {
       this.write(',');
       if (this.style.spaceAfterComma) this.write(' ');
@@ -1873,6 +2027,7 @@ export class CppEmitter {
     if (stmt.declarations.length !== 1) return false;
     switch (stmt.declarations[0].kind) {
       case NodeKind.StructDecl:
+      case NodeKind.UnionDecl:
       case NodeKind.StaticAssertDecl:
         return true;
       default:
@@ -1891,8 +2046,19 @@ export class CppEmitter {
       const decl = node.declarations[0];
       this.emitTrivia(decl.leadingTrivia);
       if (decl.kind === NodeKind.StructDecl) this.emitStructDecl(decl as StructDecl, true);
+      else if (decl.kind === NodeKind.UnionDecl) this.emitUnionDecl(decl as UnionDecl, true);
       else this.emitStaticAssertDecl(decl as StaticAssertDecl, true);
       return;
+    }
+    const variableDecls = node.declarations.every(d => d.kind === NodeKind.VariableDecl)
+      ? node.declarations as VariableDecl[] : [];
+    const variableDeclarators = variableDecls.length > 1
+      ? variableDecls.map(v => this.localDeclarator(v.type, v.name.name)) : null;
+    if (variableDeclarators) {
+      const bases = variableDeclarators.map(d => new CppEmitter(this.style).emit(d.base as AnyNode));
+      if (bases.some(base => base !== bases[0])) {
+        throw new Error('Cannot emit a declaration list with different base types');
+      }
     }
     for (let i = 0; i < node.declarations.length; i++) {
       if (i > 0) {
@@ -1903,9 +2069,39 @@ export class CppEmitter {
       if (decl.kind === NodeKind.VariableDecl) {
         // For DeclStmt, emit inline (without indent and trailing semicolon)
         const v = decl as VariableDecl;
+        if (variableDeclarators) {
+          if (i === 0) {
+            if (v.specifiers.length > 0) this.write(v.specifiers.join(' ') + ' ');
+            this.emitTypeNode(variableDeclarators[0].base);
+            this.write(' ');
+          }
+          this.write(variableDeclarators[i].name);
+          if (v.initializer) {
+            if (v.initializer.kind === NodeKind.InitListExpr) {
+              if (v.copyListInit) this.write(this.style.spaceAroundOperators ? ' = ' : '=');
+              this.emitInitListExpr(v.initializer as InitListExpr);
+            } else {
+              this.write(this.style.spaceAroundOperators ? ' = ' : '=');
+              this.emitExprWithPrecedence(v.initializer, 17);
+            }
+          }
+          continue;
+        }
         // Pointer-to-array (`T (*name)[N]`) needs the C declarator syntax. Handle
         // the (common) single-declarator case here so body locals like
         // `D2UnitStrc*(*)[5] ppUnitTable` don't emit as invalid `T[N]* name`.
+        if (i === 0 && node.declarations.length === 1 && this.emitNamedFunctionPointerDecl(v.type, v.name, v.specifiers)) {
+          if (v.initializer) {
+            if ((v.initializer as ASTNode).kind === NodeKind.InitListExpr) {
+              if (v.copyListInit) this.write(this.style.spaceAroundOperators ? ' = ' : '=');
+              this.emitInitListExpr(v.initializer as InitListExpr);
+            } else {
+              this.write(this.style.spaceAroundOperators ? ' = ' : '=');
+              this.emitExprWithPrecedence(v.initializer, 17);
+            }
+          }
+          continue;
+        }
         if (i === 0 && node.declarations.length === 1 && this.isPointerToArray(v.type)) {
           if (v.specifiers.length > 0) this.write(v.specifiers.join(' ') + ' ');
           this.emitPointerToArrayDecl(v.type, v.name);
@@ -1915,7 +2111,7 @@ export class CppEmitter {
               this.emitInitListExpr(v.initializer as InitListExpr);
             } else {
               this.write(this.style.spaceAroundOperators ? ' = ' : '=');
-              this.emitNode(v.initializer);
+              this.emitAssignmentExpression(v.initializer);
             }
           }
           continue;
@@ -1941,7 +2137,7 @@ export class CppEmitter {
             } else {
               this.write('=');
             }
-            this.emitNode(v.initializer);
+            this.emitAssignmentExpression(v.initializer);
           }
         }
       } else {
@@ -1971,7 +2167,10 @@ export class CppEmitter {
     if (this.style.spaceInsideParens) this.write(' ');
     this.write(')');
 
-    this.emitControlFlowBody(node.thenBranch);
+    // A following `else` binds to the nearest unmatched `if`, including one
+    // at the end of an unbraced loop or label body. Keep the AST's owner by
+    // bracing the then branch only when that branch could absorb this else.
+    this.emitControlFlowBody(node.thenBranch, !!node.elseBranch && this.canAbsorbElse(node.thenBranch));
 
     if (node.elseBranch) {
       if (this.style.braceStyle === 'stroustrup' || this.style.braceStyle === 'k&r') {
@@ -1991,8 +2190,37 @@ export class CppEmitter {
     }
   }
 
-  private emitControlFlowBody(stmt: Statement): void {
-    if (stmt.kind === NodeKind.CompoundStmt || this.style.alwaysUseBraces) {
+  private canAbsorbElse(stmt: Statement): boolean {
+    switch (stmt.kind) {
+      case NodeKind.IfStmt:
+        return !(stmt as IfStmt).elseBranch || this.canAbsorbElse((stmt as IfStmt).elseBranch!);
+      case NodeKind.WhileStmt:
+        return this.canAbsorbElse((stmt as WhileStmt).body);
+      case NodeKind.ForStmt:
+        return this.canAbsorbElse((stmt as ForStmt).body);
+      case NodeKind.ForRangeStmt:
+        return this.canAbsorbElse((stmt as ForRangeStmt).body);
+      case NodeKind.SwitchStmt:
+        return this.canAbsorbElse((stmt as SwitchStmt).body);
+      case NodeKind.CaseStmt:
+        return this.canAbsorbElse((stmt as CaseStmt).statement);
+      case NodeKind.DefaultStmt:
+        return this.canAbsorbElse((stmt as DefaultStmt).statement);
+      case NodeKind.LabelStmt:
+        return this.canAbsorbElse((stmt as LabelStmt).statement);
+      case NodeKind.PpConditionalStmt:
+        // Preprocessing can expose an unmatched if (or several statements)
+        // from either branch, so the emitted if body needs its own braces.
+        return true;
+      default:
+        // A compound statement and a do-while's closing `while` both stop a
+        // later `else` from reaching an if nested inside them.
+        return false;
+    }
+  }
+
+  private emitControlFlowBody(stmt: Statement, forceBraces = false): void {
+    if (stmt.kind === NodeKind.CompoundStmt || this.style.alwaysUseBraces || forceBraces) {
       this.write(' ');
       if (stmt.kind === NodeKind.CompoundStmt) {
         this.emitCompoundStmt(stmt as CompoundStmt);
@@ -2060,7 +2288,7 @@ export class CppEmitter {
 
   private emitCaseStmt(node: CaseStmt): void {
     this.write('case ');
-    this.emitNode(node.value);
+    this.emitAssignmentExpression(node.value);
     this.write(':');
     this.newline();
     this.indentLevel++;
@@ -2297,7 +2525,28 @@ export class CppEmitter {
   }
 
   private emitStringLiteral(node: StringLiteralExpr): void {
-    this.write(node.raw);
+    if (node.isRaw) {
+      this.write(node.raw);
+      return;
+    }
+    // Parsed literals retain their source spelling. Escape only question marks
+    // not already escaped in that spelling, so C++03 phase-one trigraph
+    // substitution cannot change their contents. Keep prefix and suffix intact.
+    const firstQuote = node.raw.indexOf('"');
+    const lastQuote = node.raw.lastIndexOf('"');
+    if (firstQuote < 0 || lastQuote <= firstQuote) {
+      this.write(node.raw);
+      return;
+    }
+    let out = node.raw.slice(0, firstQuote + 1);
+    let backslashes = 0;
+    for (let i = firstQuote + 1; i < lastQuote; i++) {
+      const ch = node.raw[i];
+      if (ch === '?' && backslashes % 2 === 0) out += '\\';
+      out += ch;
+      backslashes = ch === '\\' ? backslashes + 1 : 0;
+    }
+    this.write(out + node.raw.slice(lastQuote));
   }
 
   private emitBoolLiteral(node: BoolLiteralExpr): void {
@@ -2334,8 +2583,10 @@ export class CppEmitter {
 
   private emitParenExpr(node: ParenExpr): void {
     const inner = node.expression;
-    // CommaExpr needs explicit parens — without them, foo((a, b)) becomes foo(a, b)
-    if (inner.kind === NodeKind.CommaExpr) {
+    // The parser represents the comma operator as BinaryExpr(',', ...), while
+    // transforms may construct CommaExpr. In either form, foo((a, b)) must stay
+    // a one-argument call rather than becoming foo(a, b).
+    if (this.isCommaOperatorExpr(inner)) {
       this.write('(');
       this.emitNode(inner);
       this.write(')');
@@ -2344,12 +2595,17 @@ export class CppEmitter {
     this.emitNode(inner);
   }
 
+  private isCommaOperatorExpr(expr: Expression): boolean {
+    return expr.kind === NodeKind.CommaExpr
+      || (expr.kind === NodeKind.BinaryExpr && ((expr as BinaryExpr).operator as string) === ',');
+  }
+
   private getExprPrecedence(expr: Expression): number {
     // Look through transparent ParenExpr to get the inner expression's precedence
     if (expr.kind === NodeKind.ParenExpr) {
       const inner = (expr as ParenExpr).expression;
-      // CommaExpr parens are kept explicitly, so treat as atom
-      if (inner.kind === NodeKind.CommaExpr) return 0;
+      // Comma-operator parens are kept explicitly, so treat them as an atom.
+      if (this.isCommaOperatorExpr(inner)) return 0;
       return this.getExprPrecedence(inner);
     }
     switch (expr.kind) {
@@ -2396,6 +2652,11 @@ export class CppEmitter {
     }
   }
 
+  /** One expression in a comma-delimited grammar position. */
+  private emitAssignmentExpression(expr: Expression): void {
+    this.emitExprWithPrecedence(expr, OPERATOR_PRECEDENCE['=']);
+  }
+
   private emitBinaryExpr(node: BinaryExpr): void {
     const precedence = OPERATOR_PRECEDENCE[node.operator] ?? 20;
     // `(a < b) > c` printed as `a < b > c` is the same comparison only while `a`
@@ -2409,16 +2670,78 @@ export class CppEmitter {
     } else {
       this.emitExprWithPrecedence(node.left, precedence);
     }
+    // Right child grouping also determines whether the first right token is visible.
+    const rightPrec = this.rightChildSameAssociativeOp(node) ? precedence : precedence - 1;
     if (this.style.spaceAroundOperators) {
       this.write(' ' + node.operator + ' ');
     } else {
       this.write(node.operator);
+      if (this.binaryRightNeedsTokenSeparator(node, rightPrec)) this.write(' ');
     }
     // Right child: use precedence - 1 to force parens for same-precedence ops
     // (e.g. a - (b - c) ≠ a - b - c). But if the right child is the same
     // associative operator, parens are unnecessary (e.g. a && b && c).
-    const rightPrec = this.rightChildSameAssociativeOp(node) ? precedence : precedence - 1;
     this.emitExprWithPrecedence(node.right, rightPrec);
+  }
+
+  /** Prevent compact binary/unary tokens from merging or starting a comment. */
+  private binaryRightNeedsTokenSeparator(node: BinaryExpr, rightPrecedence: number): boolean {
+    const op = node.operator;
+    if (op !== '+' && op !== '-' && op !== '&' && op !== '/') return false;
+    const first = this.firstEmittedExprToken(node.right, rightPrecedence);
+    return first?.startsWith(op === '/' ? '*' : op) ?? false;
+  }
+
+  /** Trace only the expression's emitted left edge, including inserted parentheses. */
+  private firstEmittedExprToken(expr: Expression, parentPrecedence: number): string | null {
+    while (true) {
+      if (this.getExprPrecedence(expr) > parentPrecedence) return '(';
+      switch (expr.kind) {
+        case NodeKind.ParenExpr: {
+          const inner = (expr as ParenExpr).expression;
+          if (inner.kind === NodeKind.CommaExpr) return '(';
+          expr = inner;
+          break;
+        }
+        case NodeKind.BinaryExpr: {
+          const binary = expr as BinaryExpr;
+          if (binary.operator.startsWith('>') && this.isLessThanComparison(binary.left)) return '(';
+          parentPrecedence = OPERATOR_PRECEDENCE[binary.operator] ?? 20;
+          expr = binary.left;
+          break;
+        }
+        case NodeKind.UnaryExpr:
+          return (expr as UnaryExpr).operator;
+        case NodeKind.IntegerLiteral:
+        case NodeKind.FloatingLiteral:
+        case NodeKind.UserDefinedLiteral:
+          return expr.raw;
+        case NodeKind.PostfixExpr: {
+          const postfix = expr as PostfixExpr;
+          parentPrecedence = OPERATOR_PRECEDENCE[postfix.operator + '_post'] ?? 2;
+          expr = postfix.operand;
+          break;
+        }
+        case NodeKind.MemberExpr:
+          expr = (expr as MemberExpr).object;
+          parentPrecedence = 2;
+          break;
+        case NodeKind.SubscriptExpr:
+          expr = (expr as SubscriptExpr).array;
+          parentPrecedence = 2;
+          break;
+        case NodeKind.CallExpr:
+          expr = (expr as CallExpr).callee;
+          parentPrecedence = 2;
+          break;
+        case NodeKind.PackExpansionExpr:
+          expr = (expr as PackExpansionExpr).pattern;
+          parentPrecedence = Infinity;
+          break;
+        default:
+          return null;
+      }
+    }
   }
 
   /** A `<` comparison, looking through ParenExpr. */
@@ -2440,16 +2763,23 @@ export class CppEmitter {
     return ASSOCIATIVE_OPS.has(node.operator);
   }
 
-  private emitUnaryExpr(node: UnaryExpr): void {
+  /** Keep adjacent prefix operators and signed literal text from lexing as ++, --, or &&. */
+  private unaryOperandNeedsTokenSeparator(node: UnaryExpr): boolean {
     const op = node.operator;
-    // Prefix increment/decrement and other prefix operators
-    if (op === '++' || op === '--') {
-      this.write(op);
-      this.emitNode(node.operand);
-    } else {
-      this.write(op);
-      this.emitExprWithPrecedence(node.operand, 3);
+    if (op !== '+' && op !== '-' && op !== '&') return false;
+    let operand = node.operand;
+    while (operand.kind === NodeKind.ParenExpr) operand = (operand as ParenExpr).expression;
+    if (operand.kind === NodeKind.UnaryExpr) return (operand as UnaryExpr).operator.startsWith(op);
+    if (operand.kind === NodeKind.IntegerLiteral || operand.kind === NodeKind.FloatingLiteral) {
+      return (operand as IntegerLiteralExpr | FloatingLiteralExpr).raw.startsWith(op);
     }
+    return false;
+  }
+
+  private emitUnaryExpr(node: UnaryExpr): void {
+    this.write(node.operator);
+    if (this.unaryOperandNeedsTokenSeparator(node)) this.write(' ');
+    this.emitExprWithPrecedence(node.operand, 3);
   }
 
   private emitPostfixExpr(node: PostfixExpr): void {
@@ -2464,7 +2794,9 @@ export class CppEmitter {
 
   private emitConditionalExpr(node: ConditionalExpr): void {
     const precedence = OPERATOR_PRECEDENCE['?:'];
-    this.emitExprWithPrecedence(node.condition, precedence);
+    // C++ parses the condition as a logical-or expression. A conditional,
+    // assignment, or comma expression here needs its own parentheses.
+    this.emitExprWithPrecedence(node.condition, OPERATOR_PRECEDENCE['||']);
     if (this.style.spaceAroundOperators) {
       this.write(' ? ');
     } else {
@@ -2495,7 +2827,20 @@ export class CppEmitter {
         this.write(',');
         if (this.style.spaceAfterComma) this.write(' ');
       }
-      this.emitNode(node.expressions[i]);
+      const expression = node.expressions[i];
+      let inner = expression;
+      while (inner.kind === NodeKind.ParenExpr) inner = (inner as ParenExpr).expression;
+      // The comma operator associates left-to-right. A comma expression in a
+      // later slot is the right operand and needs grouping, especially when
+      // operator comma is overloaded. ParenExpr already preserves a CommaExpr
+      // wrapper, while a BinaryExpr comma wrapper can be transparent.
+      const commaOperator = inner.kind === NodeKind.CommaExpr ||
+        (inner.kind === NodeKind.BinaryExpr && ((inner as BinaryExpr).operator as string) === ',');
+      const preservedParen = expression.kind === NodeKind.ParenExpr && inner.kind === NodeKind.CommaExpr;
+      const groupRightComma = i > 0 && commaOperator && !preservedParen;
+      if (groupRightComma) this.write('(');
+      this.emitNode(expression);
+      if (groupRightComma) this.write(')');
     }
   }
 
@@ -2508,7 +2853,7 @@ export class CppEmitter {
   private emitSubscriptExpr(node: SubscriptExpr): void {
     this.emitExprWithPrecedence(node.array, 2);
     this.write('[');
-    this.emitNode(node.index);
+    this.emitAssignmentExpression(node.index);
     this.write(']');
   }
 
@@ -2522,7 +2867,9 @@ export class CppEmitter {
         this.write(',');
         if (this.style.spaceAfterComma) this.write(' ');
       }
-      this.emitNode(node.arguments[i]);
+      // A call argument is an assignment-expression; a top-level comma is
+      // the argument separator, so a comma-operator AST needs parentheses.
+      this.emitAssignmentExpression(node.arguments[i]);
     }
     if (this.style.spaceInsideParens && node.arguments.length > 0) this.write(' ');
     this.write(')');
@@ -2575,7 +2922,7 @@ export class CppEmitter {
         this.write(',');
         if (this.style.spaceAfterComma) this.write(' ');
       }
-      this.emitNode(node.arguments[i]);
+      this.emitAssignmentExpression(node.arguments[i]);
     }
     this.write(')');
   }
@@ -2624,7 +2971,7 @@ export class CppEmitter {
           this.write(',');
           if (this.style.spaceAfterComma) this.write(' ');
         }
-        this.emitNode(node.placement[i]);
+        this.emitAssignmentExpression(node.placement[i]);
       }
       this.write(')');
     }
@@ -2633,7 +2980,7 @@ export class CppEmitter {
       this.emitTypeNode(node.type);
       this.write('[');
       if (node.arraySize) {
-        this.emitNode(node.arraySize);
+        this.emitAssignmentExpression(node.arraySize);
       }
       this.write(']');
     } else {
@@ -2644,7 +2991,7 @@ export class CppEmitter {
         this.emitInitListExpr(node.initializer as InitListExpr);
       } else {
         this.write('(');
-        this.emitNode(node.initializer);
+        this.emitAssignmentExpression(node.initializer);
         this.write(')');
       }
     }
@@ -2750,7 +3097,7 @@ export class CppEmitter {
         } else {
           this.write('=');
         }
-        this.emitNode(node.initializer);
+        this.emitAssignmentExpression(node.initializer);
       }
     }
     if (node.isPackExpansion) {
@@ -2803,7 +3150,7 @@ export class CppEmitter {
       this.indentLevel++;
       node.elements.forEach((e, i) => {
         this.write(this.indent());
-        this.emitNode(e);
+        this.emitAssignmentExpression(e);
         if (i < node.elements.length - 1) this.write(',');
         this.newline();
       });
@@ -2817,7 +3164,7 @@ export class CppEmitter {
         this.write(',');
         if (this.style.spaceAfterComma) this.write(' ');
       }
-      this.emitNode(node.elements[i]);
+      this.emitAssignmentExpression(node.elements[i]);
     }
     this.write('}');
   }
@@ -2829,7 +3176,7 @@ export class CppEmitter {
         this.emitIdentifier(designator.name);
       } else {
         this.write('[');
-        this.emitNode(designator.index);
+        this.emitAssignmentExpression(designator.index);
         this.write(']');
       }
     }
@@ -2841,12 +3188,12 @@ export class CppEmitter {
     if ((node.initializer as ASTNode).kind === NodeKind.InitListExpr) {
       this.emitInitListExpr(node.initializer as InitListExpr);
     } else {
-      this.emitNode(node.initializer as Expression);
+      this.emitAssignmentExpression(node.initializer as Expression);
     }
   }
 
   private emitPackExpansionExpr(node: PackExpansionExpr): void {
-    this.emitNode(node.pattern);
+    this.emitAssignmentExpression(node.pattern);
     this.write('...');
   }
 
@@ -2915,18 +3262,18 @@ export class CppEmitter {
     this.write('throw');
     if (node.expression) {
       this.write(' ');
-      this.emitNode(node.expression);
+      this.emitAssignmentExpression(node.expression);
     }
   }
 
   private emitCoYieldExpr(node: CoYieldExpr): void {
     this.write('co_yield ');
-    this.emitNode(node.expression);
+    this.emitAssignmentExpression(node.expression);
   }
 
   private emitCoAwaitExpr(node: CoAwaitExpr): void {
     this.write('co_await ');
-    this.emitNode(node.expression);
+    this.emitAssignmentExpression(node.expression);
   }
 
   // ============================================

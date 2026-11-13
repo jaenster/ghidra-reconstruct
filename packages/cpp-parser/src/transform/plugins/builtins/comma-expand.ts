@@ -444,9 +444,59 @@ function expandBlock(block: CompoundStmt, layout: LayoutCtx | null = null): Comp
  * Pattern 3: while (AND-chain containing a comma side effect) BODY
  *   → while (true) { <break guards>; BODY }
  */
+/**
+ * `(v = e, v)`, `(v = e, !v)`, `(v = e, v OP k)` / `(v = e, k OP v)` with OP a comparison:
+ * one load (no call) into a plain variable, then one test that reads it once. Folds to the test on
+ * the assignment itself (`(v = e) != 0`), which keeps the loop's condition: VC8 compiles the
+ * folded form to the same load, store and compare the decompiler saw, and the source had a
+ * condition, not breaks (UNICODE_CompareWideStringsN 00526540). Anything else: null.
+ */
+function foldAssignTest(op: Expression): Expression | null {
+  const { assigns, cond } = splitComma(op);
+  if (assigns.length !== 1) return null;
+  const a = unwrap(assigns[0]);
+  if (a.kind !== NodeKind.AssignExpr || (a as AssignExpr).operator !== '=') return null;
+  const target = unwrap((a as AssignExpr).left);
+  if (target.kind !== NodeKind.Identifier) return null;
+  // A load only: an assignment from a call keeps the break-guard form (the packet case).
+  let calls = false;
+  for (const x of traverseAST((a as AssignExpr).right as ASTNode)) if (x.kind === NodeKind.CallExpr) calls = true;
+  if (calls) return null;
+  const name = (target as { name: string }).name;
+  const isV = (e: Expression) => { const u = unwrap(e); return u.kind === NodeKind.Identifier && (u as { name: string }).name === name; };
+  const reads = (e: Expression): number => {
+    let n = 0;
+    for (const x of traverseAST(e as ASTNode)) if (x.kind === NodeKind.Identifier && (x as unknown as { name: string }).name === name) n++;
+    return n;
+  };
+  const assigned = (): ParenExpr => ({ kind: NodeKind.ParenExpr, expression: cloneNode(a) as Expression, location: a.location, leadingTrivia: [], trailingTrivia: [] });
+  const c = unwrap(cond);
+  if (isV(c)) return assigned();
+  if (c.kind === NodeKind.UnaryExpr && (c as UnaryExpr).operator === '!' && isV((c as UnaryExpr).operand)) {
+    return updateNode(c as UnaryExpr, { operand: assigned() });
+  }
+  if (c.kind === NodeKind.BinaryExpr && FLIP[(c as BinaryExpr).operator] !== undefined) {
+    const b = c as BinaryExpr;
+    if (isV(b.left) && reads(b.right) === 0) return updateNode(b, { left: assigned() });
+    if (isV(b.right) && reads(b.left) === 0) return updateNode(b, { right: assigned() });
+  }
+  return null;
+}
+
+/** Rebuild a left-associative `&&` chain. */
+function andChain(ops: Expression[], like: Expression): Expression {
+  return ops.slice(1).reduce<Expression>((l, r) => ({
+    kind: NodeKind.BinaryExpr, operator: '&&', left: l, right: r, location: like.location, leadingTrivia: [], trailingTrivia: [],
+  } as BinaryExpr), ops[0]);
+}
+
 function expandWhile(w: WhileStmt): WhileStmt | null {
   const ops = flattenChain(w.condition, '&&');
   if (ops.length < 1 || !hasCommaOperand(ops)) return null;
+
+  // Every comma operand an assignment its own test reads: fold, and keep the condition.
+  const folded = ops.map(o => (isComma(o) ? foldAssignTest(o) : o));
+  if (folded.every(f => f !== null)) return updateNode(w, { condition: andChain(folded as Expression[], w.condition) });
 
   const guards: Statement[] = [];
   for (const op of ops) {

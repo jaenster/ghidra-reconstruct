@@ -45,6 +45,8 @@ export interface BuildModuleGraphInput {
   globalsHeaderPath?: string;
   /** The template header (codegen/templates), when the project registers templates */
   templateHeaderPath?: string;
+  /** The implementation file of a unit whose header other units share (the template member units) */
+  unitImplPaths?: ReadonlyMap<string, string>;
 }
 
 /** Stands for "a registered template-id": all of them are defined by the one template header. */
@@ -71,6 +73,7 @@ export function buildModuleGraph(input: BuildModuleGraphInput): ModuleGraph {
     sharedEnumTypes,
     globalsHeaderPath,
     templateHeaderPath,
+    unitImplPaths,
   } = input;
 
   // A template-id cannot be forward-declared, and its spelling is no type name a
@@ -127,6 +130,14 @@ export function buildModuleGraph(input: BuildModuleGraphInput): ModuleGraph {
     });
 
     mod.functions = unitFunctions;
+    // Several units can share one header (the template member units). The module is
+    // keyed by the header, so it is created once; every unit is listed on it, or the
+    // ones after the first would be in no module and never found dirty.
+    (mod.units ??= []).push({
+      unitName,
+      implPath: unitImplPaths?.get(unitName) ?? headerPath.replace(/\.h$/, implExt),
+      functions: unitFunctions,
+    });
 
     // Register functions as exports
     for (const func of unitFunctions) {

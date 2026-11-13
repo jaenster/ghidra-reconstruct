@@ -308,6 +308,26 @@ describe('createParamReachOracle', () => {
     assert.strictEqual(aFirst[2], null);
   });
 
+  it('reads a field through the typedef that names its aggregate (POINT -> tagPOINT)', () => {
+    const dts = [
+      { name: 'POINT', category: '/WinDef.h', size: 8, kind: 'TYPEDEF', underlyingType: 'tagPOINT' },
+      { name: 'tagPOINT', category: '/WinDef.h', size: 8, kind: 'STRUCTURE', alignment: 4,
+        fields: [{ name: 'x', dataType: 'LONG', offset: 0, size: 4 }, { name: 'y', dataType: 'LONG', offset: 4, size: 4 }] },
+    ] as never;
+    const f = fn('GetCoords', [['POINT *', 'pPoint']], '  pPoint->y = 0;');
+    assert.deepStrictEqual(createParamReachOracle(new Map([[f.name, f]]), dts).argReach('GetCoords', 0, 1), { lo: 4, hi: 8 });
+    assert.strictEqual(createParamReachOracle(new Map([[f.name, f]]), []).argReach('GetCoords', 0, 1), null);
+  });
+
+  it('bodyReach reads a caller\'s own pointer with the oracle\'s callees', () => {
+    const o = oracleOf([fn('C', [['int *', 'p']], '  p[1] = 0;')]);
+    const tu = parse('void f() { int *q; int a[2]; q = a; C(q); }') as never as { declarations: { body: never }[] };
+    const body = tu.declarations[0].body as never as { statements: { declarations?: { name: unknown }[]; expression?: { left: unknown } }[] };
+    const skip = new Set<unknown>([body.statements[0].declarations![0].name, body.statements[2].expression!.left]);
+    assert.deepStrictEqual(o.bodyReach(body as never, 'q', 'int *', { include: u => !skip.has(u) }), { lo: 4, hi: 8 });
+    assert.strictEqual(o.bodyReach(body as never, 'q', 'int *'), null);
+  });
+
   it('settles a function outside any cycle', () => {
     const o = oracleOf([fn('C', [['int *', 'p']], '  p[1] = 0;')]);
     assert.deepStrictEqual(o.argReach('C', 0, 1), { lo: 4, hi: 8 });

@@ -1,0 +1,353 @@
+{
+ "base": "6bfcd897fbe10ce0e9454d9be061379ae2f0dc6f",
+ "head": "2790a8fbee22bcddda6530610fd153b9d0c6af92",
+ "base_ref": "source/regen",
+ "head_ref": "source/modified",
+ "tree": "<TREE>",
+ "top_namespaces": [
+  "D2"
+ ],
+ "hand_files": [
+  "Source/B/Hand.h"
+ ],
+ "hunks": [
+  {
+   "file": "Source/A/Alpha.cpp",
+   "old_start": 1,
+   "old_len": 0,
+   "new_start": 2,
+   "new_len": 1,
+   "removed": [],
+   "added": [
+    "#include <cstring>\n"
+   ],
+   "scope": "file",
+   "kind": "include",
+   "addrs": [],
+   "addr": null,
+   "fn": "",
+   "ns": "",
+   "off_old": null,
+   "off_new": null,
+   "ctx_before": [
+    "#include \"Alpha.h\"\n"
+   ],
+   "ctx_after": [
+    "\n",
+    "namespace D2 {\n",
+    "namespace Alpha {\n"
+   ],
+   "hash": "4a3e31ac1229",
+   "weak": false,
+   "id": "h001"
+  },
+  {
+   "file": "Source/A/Alpha.cpp",
+   "old_start": 11,
+   "old_len": 0,
+   "new_start": 13,
+   "new_len": 1,
+   "removed": [],
+   "added": [
+    "    a ^= 1; // hand fix \u00e9\n"
+   ],
+   "scope": "function",
+   "kind": "code",
+   "addrs": [
+    "00401000"
+   ],
+   "addr": "00401000",
+   "fn": "One",
+   "ns": "D2::Alpha",
+   "off_old": 6,
+   "off_new": 6,
+   "ctx_before": [
+    "int __stdcall One(int a)\n",
+    "{\n",
+    "    const char* s = \"{ not a brace\";\n"
+   ],
+   "ctx_after": [
+    "    if (a > 0) {\n",
+    "        return a + 1;\n",
+    "    }\n"
+   ],
+   "hash": "1ed8c6b8a640",
+   "weak": false,
+   "id": "h002"
+  },
+  {
+   "file": "Source/A/Alpha.cpp",
+   "old_start": 16,
+   "old_len": 2,
+   "new_start": 18,
+   "new_len": 1,
+   "removed": [
+    "}\n",
+    "\n"
+   ],
+   "added": [
+    "} // end of One\n"
+   ],
+   "scope": "multi",
+   "kind": "code",
+   "addrs": [
+    "00401000"
+   ],
+   "addr": null,
+   "fn": "",
+   "ns": "",
+   "off_old": null,
+   "off_new": null,
+   "ctx_before": [
+    "        return a + 1;\n",
+    "    }\n",
+    "    return 0;\n"
+   ],
+   "ctx_after": [
+    "// 1.14d: 00401020\n",
+    "static int Two(int b);\n",
+    "\n"
+   ],
+   "hash": "75e0261ec40b",
+   "weak": false,
+   "id": "h003"
+  },
+  {
+   "file": "Source/A/Alpha.cpp",
+   "old_start": 32,
+   "old_len": 1,
+   "new_start": 33,
+   "new_len": 1,
+   "removed": [
+    "    return c * 3;\n"
+   ],
+   "added": [
+    "    return c * 3 + kHandBias;\n"
+   ],
+   "scope": "function",
+   "kind": "code",
+   "addrs": [
+    "00401040"
+   ],
+   "addr": "00401040",
+   "fn": "Three",
+   "ns": "D2::Alpha",
+   "off_old": 11,
+   "off_new": 11,
+   "ctx_before": [
+    "        c += 2;\n",
+    "    }\n",
+    "    auto r = R\"x(}{)x\";\n"
+   ],
+   "ctx_after": [
+    "}\n"
+   ],
+   "hash": "e2c7988dc652",
+   "weak": false,
+   "id": "h004"
+  },
+  {
+   "file": "Source/A/Alpha.cpp",
+   "old_start": 43,
+   "old_len": 1,
+   "new_start": 43,
+   "new_len": 0,
+   "removed": [
+    "    Two(3);\n"
+   ],
+   "added": [],
+   "scope": "function",
+   "kind": "code",
+   "addrs": [
+    "00401080"
+   ],
+   "addr": "00401080",
+   "fn": "Four",
+   "ns": "D2::Alpha",
+   "off_old": 8,
+   "off_new": 8,
+   "ctx_before": [
+    "    char q = '{';\n",
+    "    Two(1);\n",
+    "    Two(2);\n"
+   ],
+   "ctx_after": [
+    "    Two(4);\n",
+    "}\n"
+   ],
+   "hash": "01aa0f413719",
+   "weak": true,
+   "id": "h005"
+  },
+  {
+   "file": "Source/A/Alpha.cpp",
+   "old_start": 46,
+   "old_len": 0,
+   "new_start": 47,
+   "new_len": 3,
+   "removed": [],
+   "added": [
+    "// 1.14d: 00401100\n",
+    "int Five() { return 5; }\n",
+    "\n"
+   ],
+   "scope": "multi",
+   "kind": "code",
+   "addrs": [
+    "00401100"
+   ],
+   "addr": null,
+   "fn": "",
+   "ns": "",
+   "off_old": null,
+   "off_new": null,
+   "ctx_before": [
+    "    Two(4);\n",
+    "}\n",
+    "\n"
+   ],
+   "ctx_after": [
+    "}  // namespace Alpha\n",
+    "}  // namespace D2\n"
+   ],
+   "hash": "e35bd188e7cc",
+   "weak": false,
+   "id": "h006"
+  },
+  {
+   "file": "Source/B/Beta.cpp",
+   "old_start": 1,
+   "old_len": 0,
+   "new_start": 2,
+   "new_len": 1,
+   "removed": [],
+   "added": [
+    "#include \"Hand.h\"\n"
+   ],
+   "scope": "file",
+   "kind": "include",
+   "addrs": [],
+   "addr": null,
+   "fn": "",
+   "ns": "",
+   "off_old": null,
+   "off_new": null,
+   "ctx_before": [
+    "#include \"Beta.h\"\n"
+   ],
+   "ctx_after": [
+    "\n",
+    "namespace D2 {\n",
+    "namespace Beta {\n"
+   ],
+   "hash": "27835a65942e",
+   "weak": false,
+   "id": "h007"
+  },
+  {
+   "file": "Source/B/Beta.cpp",
+   "old_start": 23,
+   "old_len": 1,
+   "new_start": 24,
+   "new_len": 1,
+   "removed": [
+    "    t += 5;\n"
+   ],
+   "added": [
+    "    t += 5 + s_counter + Alpha::kHandBias;\n"
+   ],
+   "scope": "function",
+   "kind": "code",
+   "addrs": [
+    "00402040"
+   ],
+   "addr": "00402040",
+   "fn": "Seven",
+   "ns": "D2::Beta",
+   "off_old": 8,
+   "off_new": 8,
+   "ctx_before": [
+    "    t += 2;\n",
+    "    t += 3;\n",
+    "    t += 4;\n"
+   ],
+   "ctx_after": [
+    "    t += 6;\n",
+    "    t += 7;\n",
+    "    t += 8;\n"
+   ],
+   "hash": "dc789ced94cc",
+   "weak": false,
+   "id": "h008"
+  },
+  {
+   "file": "Source/B/Beta.cpp",
+   "old_start": 27,
+   "old_len": 1,
+   "new_start": 28,
+   "new_len": 1,
+   "removed": [
+    "    t += 9;\n"
+   ],
+   "added": [
+    "    t += HandHelper(t);\n"
+   ],
+   "scope": "function",
+   "kind": "code",
+   "addrs": [
+    "00402040"
+   ],
+   "addr": "00402040",
+   "fn": "Seven",
+   "ns": "D2::Beta",
+   "off_old": 12,
+   "off_new": 12,
+   "ctx_before": [
+    "    t += 6;\n",
+    "    t += 7;\n",
+    "    t += 8;\n"
+   ],
+   "ctx_after": [
+    "    return t;\n",
+    "}\n"
+   ],
+   "hash": "6d806faa5f00",
+   "weak": false,
+   "id": "h009"
+  },
+  {
+   "file": "Source/C/Crlf.cpp",
+   "old_start": 8,
+   "old_len": 0,
+   "new_start": 9,
+   "new_len": 1,
+   "removed": [],
+   "added": [
+    "    v += 1; // hand\n"
+   ],
+   "scope": "function",
+   "kind": "code",
+   "addrs": [
+    "00403000"
+   ],
+   "addr": "00403000",
+   "fn": "Eight",
+   "ns": "D2",
+   "off_old": 3,
+   "off_new": 3,
+   "ctx_before": [
+    "// 1.14d: 00403000\n",
+    "int Eight()\n",
+    "{\n"
+   ],
+   "ctx_after": [
+    "    int v = 8;\n",
+    "    return v;\n",
+    "}\n"
+   ],
+   "hash": "4236520c0e28",
+   "weak": false,
+   "id": "h010"
+  }
+ ]
+}

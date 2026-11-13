@@ -843,6 +843,29 @@ export const WIN32_ZERO_ARITY_CALLBACK_CASTS: Record<string, Record<number, {
 };
 
 /**
+ * Callback slots whose callee discards what the callback returns, in parts like
+ * `WIN32_ZERO_ARITY_CALLBACK_CASTS`. The compiler's array iterators call a
+ * constructor or destructor per element and drop its EAX: a constructor returns
+ * the object it was given (`MOV EAX,ECX`, LINKEDLIST_LinkBefore 0041ee80,
+ * InitCriticalSection 0040eb50), which the declaration here cannot spell for every
+ * element type. A function whose parameters match the slot in number and
+ * convention, every one a pointer as the slot's are, is cast to the slot's type
+ * where its own prototype differs; the cast is what lets the database say what the
+ * constructor returns.
+ */
+export const CRT_DISCARDED_RETURN_CALLBACK_CASTS: Record<string, Record<number, {
+  returnType: string; paramTypes: string[]; convention?: string;
+}>> = {
+  _eh_vector_constructor_iterator_: {
+    3: { returnType: 'void', paramTypes: ['void*'], convention: '__fastcall' },
+    4: { returnType: 'void', paramTypes: ['void*'], convention: '__fastcall' },
+  },
+  _eh_vector_destructor_iterator_: {
+    3: { returnType: 'void', paramTypes: ['void*'], convention: '__fastcall' },
+  },
+};
+
+/**
  * Win32 names the TARGET toolchain declares as an overload set, and the exact
  * type that picks the member the import is.
  *

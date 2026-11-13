@@ -32,6 +32,15 @@
  * subpiece-access's `*(uintM_t *)` does. Anything else - a local of another type, a piece
  * that is incremented or has its address taken, a piece past the end of x - is left to
  * subpiece-access.
+ *
+ * A local only the low piece of which is read takes whole stores (see lowPieceLocals). Where
+ * the facts give the width the original's instruction writes at a low store
+ * (extract/access-order.ts), they decide each store: a write of exactly the piece
+ * (`MOV byte ptr [EBP-0x20],1`, MONSTER_SpawnRoomMonsters 0054ec90) stays a piece store, a
+ * wider one (`LEA EBX,[EDI+6]`, `MOV EBX,[EDI]`, SUNITNPC_ApplyScrollSkill 00576e40) is a
+ * whole store. Either way every read sees the same low bytes. An enum-typed local takes
+ * whole stores only when the facts show every low store wider than the piece; its value is
+ * cast to the enum.
  */
 
 import { NodeKind } from '../../../ast/kinds.js';
@@ -42,14 +51,20 @@ import type {
   CharLiteralExpr, IntegerLiteralExpr, CStyleCastExpr,
 } from '../../../ast/nodes.js';
 import { Expr, Type } from '../../../ast/factory.js';
-import { findNodesByKind, traverseAST } from '../../../ast/visitor.js';
+import { findNodesByKind, getChildren, traverseAST } from '../../../ast/visitor.js';
 import { emit } from '../../../emit/index.js';
 import { createTransformer, updateNode, type Transformer } from '../../transformer.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
 import { isPure } from './pseudo-op-lower.js';
 import { subpieceOf, stripThreeByteCast } from './subpiece-access.js';
+import { placed as placedNode, type AccessOrderEvidence } from './access-order-evidence.js';
 
-export type ScalarPieceArithmeticOptions = PluginOptions;
+export interface ScalarPieceArithmeticOptions extends PluginOptions {
+  /** The original's stores per line; their `width` decides each low-piece store. */
+  accessOrder?: AccessOrderEvidence | null;
+  /** Every enum type name: such a local takes whole low stores when the widths say so. */
+  enumTypes?: readonly string[];
+}
 
 /** Builtin integer spellings (Ghidra's and C's) and their sizes. */
 const INTEGER_SIZES: Record<string, number> = {
@@ -66,7 +81,7 @@ const INTEGER_SIZES: Record<string, number> = {
 
 const UNSIGNED: Record<number, string> = { 1: 'uint8_t', 2: 'uint16_t', 3: 'uint32_t', 4: 'uint32_t', 8: 'uint64_t' };
 
-interface Local { name: string; size: number; type: TypeNode }
+interface Local { name: string; size: number; type: TypeNode; isEnum?: boolean }
 
 const unparen = (e: Expression): Expression => {
   let x = e;
@@ -378,7 +393,157 @@ function rewriteInitialised(body: CompoundStmt, locals: Map<string, Local>, rmw:
   return { body: r.stmt as CompoundStmt, changed };
 }
 
-function createScalarPieceArithmeticTransformer(): Transformer {
+/** The byte width of an integer cast's type, or undefined for any other cast. */
+function castWidth(e: ASTNode): number | undefined {
+  if (e.kind !== NodeKind.CStyleCastExpr) return undefined;
+  const spelled = emit((e as CStyleCastExpr).type as never).replace(/\s+/g, ' ').trim();
+  return spelled === 'bool' ? undefined : INTEGER_SIZES[spelled];
+}
+
+/**
+ * Locals only the low piece of which anything reads, each with that piece's width M.
+ * Ghidra prints a register the code writes through its low part, `MOV AX, ...`, or a
+ * 32-bit value it then passes on as its low word, as `x._0_M_ = v` on a wider local:
+ * every store is a whole store or the low piece, every read keeps at most the low M
+ * bytes (an integer cast to M bytes or fewer, or a low piece). The bytes above M are
+ * then never read, so a whole store holds what every read sees.
+ */
+function lowPieceLocals(body: CompoundStmt, locals: Map<string, Local>, unfit: ReadonlySet<string>): Map<string, number> {
+  const width = new Map<string, number>();
+  const bad = new Set<string>(unfit);
+  const visit = (n: ASTNode, parent: ASTNode | undefined): void => {
+    const piece = pieceOfLocal(n, locals);
+    if (piece) {
+      const name = piece.local.name;
+      const stored = parent?.kind === NodeKind.AssignExpr && unparen((parent as AssignExpr).left) === n;
+      if (piece.offset !== 0 || piece.size >= piece.local.size || piece.size === 3) bad.add(name);
+      else if (stored) {
+        if ((parent as AssignExpr).operator !== '=') bad.add(name);
+        else if (width.has(name) && width.get(name) !== piece.size) bad.add(name);
+        else width.set(name, piece.size);
+      }
+      return;
+    }
+    if (n.kind === NodeKind.Identifier && locals.has((n as Identifier).name)) {
+      const name = (n as Identifier).name;
+      if (parent?.kind === NodeKind.MemberExpr) return; // the piece itself, handled above
+      if (parent?.kind === NodeKind.AssignExpr && unparen((parent as AssignExpr).left) === n) {
+        if ((parent as AssignExpr).operator !== '=') bad.add(name);
+        return;
+      }
+      if (parent?.kind === NodeKind.VariableDecl) return;
+      readers.push({ name, parent });
+      return;
+    }
+    for (const c of getChildren(n)) {
+      // A read through parentheses is judged by what holds the parentheses.
+      visit(c, n.kind === NodeKind.ParenExpr ? parent : n);
+    }
+  };
+  const readers: Array<{ name: string; parent: ASTNode | undefined }> = [];
+  visit(body, undefined);
+  const out = new Map<string, number>();
+  for (const [name, m] of width) {
+    if (bad.has(name)) continue;
+    const reads = readers.filter(r => r.name === name);
+    if (reads.some(r => { const w = r.parent ? castWidth(r.parent) : undefined; return w === undefined || w > m; })) continue;
+    // Low-piece reads of x keep no more than M bytes either.
+    let wide = false;
+    for (const n of traverseAST(body)) {
+      const p = pieceOfLocal(n, locals);
+      if (p && p.local.name === name && p.size > m) wide = true;
+    }
+    if (!wide) out.set(name, m);
+  }
+  return out;
+}
+
+/**
+ * The value of `x._0_M_ = v` as a whole store: v without its cast to an M-byte integer
+ * (`(undefined2)`, `(short)`, `(uint16_t)`), whose low M bytes are v's own either way.
+ */
+function lowValue(v: Expression, m: number): Expression {
+  const x = unparen(v);
+  if (castWidth(x) === m) return (x as CStyleCastExpr).expression;
+  return v;
+}
+
+/** Whether v reads x's low piece back unchanged: `(uintM)x`, `x._0_M_`. */
+function readsBackLow(v: Expression, name: string, m: number, locals: Map<string, Local>): boolean {
+  const x = unparen(v);
+  const p = pieceOfLocal(x, locals);
+  if (p) return p.local.name === name && p.offset === 0 && p.size === m;
+  const w = castWidth(x);
+  if (w === undefined || w !== m) return false;
+  const inner = unparen((x as CStyleCastExpr).expression);
+  return inner.kind === NodeKind.Identifier && (inner as Identifier).name === name;
+}
+
+/**
+ * Each low-piece store of a local `lowPieceLocals` found, as a whole store: `x._0_M_ = v`
+ * becomes `x = v`, its cast to M bytes dropped (the low M bytes stored are the same, the
+ * bytes above them are never read), and `x._0_M_ = (uintM)x`, which stores what is
+ * there, goes. VC8 compiles the whole store as the original's full-register MOV (CheckIf-
+ * CoordsAreInRange's coordinates in SCMD_0x3E_QuestItemPickup 0054bf60, `MOV EBX,[ECX+0xc]`
+ * and `XOR EBX,EBX`), where the piece store through `&x` keeps x in memory.
+ */
+function wholeLowStores(
+  body: CompoundStmt, locals: Map<string, Local>, low: Map<string, number>, widthOf: (s: Statement) => number,
+): { body: CompoundStmt; changed: boolean } {
+  let changed = false;
+  const t = createTransformer({
+    visitCompoundStmt(block: CompoundStmt): ASTNode | undefined {
+      let touched = false;
+      const out: Statement[] = [];
+      for (const st of block.statements) {
+        const p = pieceStoreStmt(st, locals);
+        const m = p ? low.get(p.local.name) : undefined;
+        // The original wrote just the piece here: so does the source.
+        if (!p || m === undefined || widthOf(st) === m) { out.push(st); continue; }
+        touched = true;
+        if (readsBackLow(p.value, p.local.name, m, locals)) continue;
+        const e = st as ExprStmt;
+        const v = lowValue(p.value, m);
+        out.push({ ...e, expression: Expr.assign(Expr.identifier(p.local.name), p.local.isEnum ? castType(p.local.type, v) : v) } as ExprStmt);
+      }
+      if (!touched) return undefined;
+      changed = true;
+      return updateNode(block, { statements: out });
+    },
+  });
+  return { body: t(body) as CompoundStmt, changed };
+}
+
+/**
+ * The width the facts give the instruction behind a statement's `=`: a statement alone on
+ * its line with the line's one store. 0 when the facts do not say.
+ */
+function storeWidths(ev: AccessOrderEvidence | null | undefined): (s: Statement) => number {
+  if (!ev || ev.stores.size === 0) return () => 0;
+  return (s) => {
+    if (!placedNode(s) || s.location.end.line !== s.location.start.line) return 0;
+    const facts = ev.stores.get(s.location.start.line);
+    if (!facts || facts.length !== 1 || facts[0].ord !== 0) return 0;
+    return facts[0].width ?? 0;
+  };
+}
+
+/** Whether the facts show every low store of `name` writing more than M bytes. */
+function everyStoreWider(body: CompoundStmt, locals: Map<string, Local>, name: string, m: number, widthOf: (s: Statement) => number): boolean {
+  let stores = 0;
+  for (const n of traverseAST(body)) {
+    if (n.kind !== NodeKind.ExprStmt) continue;
+    const p = pieceStoreStmt(n as Statement, locals);
+    if (!p || p.local.name !== name) continue;
+    stores++;
+    if (!(widthOf(n as Statement) > m)) return false;
+  }
+  return stores > 0;
+}
+
+function createScalarPieceArithmeticTransformer(options: ScalarPieceArithmeticOptions = {}): Transformer {
+  const widthOf = storeWidths(options.accessOrder);
+  const enums = new Set(options.enumTypes ?? []);
   return createTransformer({
     visitFunctionDecl(fn: FunctionDecl): ASTNode | undefined {
       if (!fn.body) return undefined;
@@ -394,8 +559,10 @@ function createScalarPieceArithmeticTransformer(): Transformer {
         if (decls.length !== 1 || params.has(name)) continue;
         const v = decls[0];
         if (v.specifiers.length > 0) continue;
-        const size = INTEGER_SIZES[emit(v.type as never).replace(/\s+/g, ' ').trim()];
+        const spelled = emit(v.type as never).replace(/\s+/g, ' ').trim();
+        const size = INTEGER_SIZES[spelled];
         if (size) locals.set(name, { name, size, type: v.type });
+        else if (enums.has(spelled.replace(/^(?:enum\s+)?(?:::)?/, ''))) locals.set(name, { name, size: 4, type: v.type, isEnum: true });
       }
       if (locals.size === 0) return undefined;
 
@@ -423,10 +590,18 @@ function createScalarPieceArithmeticTransformer(): Transformer {
       if (withPieces.size === 0) return undefined;
       for (const name of [...locals.keys()]) if (!withPieces.has(name)) locals.delete(name);
 
-      const combined = combineCoveringRuns(body0, locals);
+      const low = lowPieceLocals(body0, locals, unfit);
+      for (const [name, m] of low) {
+        if (locals.get(name)!.isEnum && !everyStoreWider(body0, locals, name, m, widthOf)) low.delete(name);
+      }
+      const lowered = low.size > 0 ? wholeLowStores(body0, locals, low, widthOf) : { body: body0, changed: false };
+      for (const name of low.keys()) locals.delete(name);
+      // An enum local is no integer to do arithmetic on: what is left of it stays pieces.
+      for (const [name, l] of locals) if (l.isEnum) locals.delete(name);
+      const combined = combineCoveringRuns(lowered.body, locals);
       const rmw = new Set([...locals.keys()].filter(n => !unfit.has(n)));
       const rewritten = rmw.size > 0 ? rewriteInitialised(combined.body, locals, rmw) : { body: combined.body, changed: false };
-      if (!combined.changed && !rewritten.changed) return undefined;
+      if (!lowered.changed && !combined.changed && !rewritten.changed) return undefined;
       return updateNode(fn, { body: rewritten.body } as Partial<FunctionDecl>);
     },
   });
@@ -443,5 +618,5 @@ export const scalarPieceArithmeticPlugin: TransformPlugin = {
   // turns the pieces that are left into memory accesses.
   priority: 14.5,
   tags: ['correctness', 'ghidra'],
-  createTransformer: () => createScalarPieceArithmeticTransformer(),
+  createTransformer: (options?: PluginOptions) => createScalarPieceArithmeticTransformer(options as ScalarPieceArithmeticOptions),
 };

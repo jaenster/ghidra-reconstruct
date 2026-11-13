@@ -37,6 +37,12 @@ export interface GhidraMetadata {
    */
   securityCookie?: boolean;
   /**
+   * On a function: the original seeds a /GS cookie in its prologue (`boilerplate-cleanup`
+   * saw `DEFAULT_SECURITY_COOKIE ^ <frame>`). Without one, VC8 never saw a byte or word
+   * array among its locals.
+   */
+  stackCookie?: boolean;
+  /**
    * The comparison was rewritten from its CMP/TEST and Jcc as an unsigned compare of this
    * width (`compare-form`); `compare-signedness` keeps it unsigned under the final types.
    */
@@ -83,6 +89,8 @@ export interface GhidraMetadata {
    * `zero-extend-cast` writes it as the cast to the unsigned type of that width.
    */
   zeroExtendWidth?: number;
+  /** That MOVZX read its source from memory (`movzx eax, byte ptr [m]`). */
+  zeroExtendMemory?: boolean;
   /**
    * The decompiler zero-extends this 32-bit operation's result to 64 bits and printed the
    * extension as a cast (`zext-site`); `arith-idioms` writes the cast's truncation to 32 bits
