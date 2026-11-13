@@ -193,6 +193,22 @@ void __fastcall Award(struct D2UnitStrc * pUnit, int nXp) {
     assert.strictEqual(rel.changed.size, 0);
   });
 
+  it('re-spells a moved function body and the labels derived from its name', () => {
+    const unit = UNIT_V1.replace('    gnTotal = gnTotal + nXp + nLevel;', '    static int s_n = 0; D2_STATIC_GUARD(s_n, "Game::Unit::Award::s_n");\n    gnTotal = gnTotal + nXp + nLevel;');
+    const rec = record(tree(HEADER_V1, unit, GLOBALS), '00401100', 'pin');
+    // Award moved to Game::Xp and was renamed; GetLevel stayed in Game::Unit.
+    const header2 = HEADER_V1.replace('void __fastcall Award(struct D2UnitStrc * pUnit, int nXp); // 1.14d: 00401100\n}', '}\nnamespace Game::Xp {\nvoid __fastcall XP_Award(struct D2UnitStrc * pUnit, int nXp); // 1.14d: 00401100\n}');
+    const unit2 = UNIT_V1.replace('// 1.14d: 00401100\nvoid __fastcall Award(', '} // namespace Game::Unit\nnamespace Game::Xp {\n// 1.14d: 00401100\nvoid __fastcall XP_Award(')
+      .replace('GetLevel(pUnit, 12)', 'Unit::GetLevel(pUnit, 12)').replace('gnTotal = gnTotal', 'Unit::gnTotal = Unit::gnTotal');
+    const now = tree(header2, unit2, GLOBALS);
+    const out = applyRecords(now, [rec]);
+    assert.strictEqual(row(out.rows, '00401100').status, 'pinned');
+    const b = body(now, out, '00401100');
+    assert.ok(b.includes('int nLevel = Unit::GetLevel(pUnit, 12);'), b);
+    assert.ok(b.includes('Unit::gnTotal = Unit::gnTotal + nXp + nLevel;'), b);
+    assert.ok(b.includes('"Game::Xp::XP_Award::s_n"'), b);
+  });
+
   it('applies a pin whatever the generator says', () => {
     const edited = UNIT_V1.replace('    gnTotal = gnTotal + nXp + nLevel;', '    TRACE_Award(nXp);\n    gnTotal = gnTotal + nXp + nLevel;');
     const pin = record(tree(HEADER_V1, edited, GLOBALS), '00401100', 'pin');

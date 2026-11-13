@@ -12,7 +12,8 @@ import { bindSites, bodyForm, bindingKey, scanSites, type Binding, type SiteScan
 import { rewriteBody } from './rewrite.js';
 import type { RatchetRecord, RecordKind, StoredBody } from './store.js';
 import type { SymbolIndex } from './symbol-index.js';
-import type { FunctionExtent } from './scan.js';
+import { TokenKind } from '@ghidra-mcp/cpp-parser';
+import { lexTokens, type FunctionExtent } from './scan.js';
 
 export interface Located {
   file: string;
@@ -231,7 +232,7 @@ export function applyRecords(index: SymbolIndex, records: RatchetRecord[], opts:
       if (retyped.length > 0) { errors.push({ m, errors: retyped }); continue; }
       const r = rewriteBody(m.stored.text, m.scan!, m.bindings!, { index, scope: fresh.scope, params, preferred });
       if (r.text === undefined) errors.push({ m, errors: r.errors });
-      else out.push({ m, text: r.text, renames: r.renames });
+      else out.push({ m, text: relabel(r.text, m.stored.name, now?.qname), renames: r.renames });
     }
     if (errors.length > 0) {
       // Loud, per function, and the old body kept beside the new one for whoever fixes it.
@@ -277,6 +278,24 @@ export function applyRecords(index: SymbolIndex, records: RatchetRecord[], opts:
     changed.set(file, s);
   }
   return { rows, changed };
+}
+
+/**
+ * A body names its own function in string labels the generator derives from it
+ * (`D2_STATIC_GUARD(x, "NS::Fn::x")`): after a move or rename they follow the function.
+ */
+function relabel(body: string, oldName: string, newName: string | undefined): string {
+  if (!newName || newName === oldName) return body;
+  const toks = lexTokens(body);
+  if (!toks) return body;
+  const prefix = `"${oldName}::`;
+  let out = body;
+  for (const t of [...toks].reverse()) {
+    if (t.kind === TokenKind.StringLiteral && t.text.startsWith(prefix)) {
+      out = `${out.slice(0, t.start)}"${newName}::${t.text.slice(prefix.length)}${out.slice(t.end)}`;
+    }
+  }
+  return out;
 }
 
 export function formatApplyReport(rows: ApplyRow[]): string {
