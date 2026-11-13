@@ -4435,6 +4435,9 @@ function transformDecompiledCode(
         forms: vc8.forms,
         selectTables: {
           ...(perPluginOptions['select-argument'] as SelectArgumentOptions | undefined),
+          structLayouts: context?.funcPtrArgCasts?.structLayouts,
+          aggregateMembers: context?.funcPtrArgCasts?.aggregateMembers,
+          unionNames: context?.funcPtrArgCasts?.unionNames,
           accessors: context?.accessorTwins,
           ...(context?.funcPtrArgCasts?.outParams ? {
             outParamWidth: (callee: string, index: number) => context.funcPtrArgCasts!.outParams!.outParamWidthDocumented(callee, index),

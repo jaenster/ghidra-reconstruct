@@ -27,6 +27,7 @@ import type { ASTNode, FunctionDecl, TranslationUnit } from '../../packages/cpp-
 import { vc8FormSpec, vc8formBodyHash } from '../../packages/reconstruct/src/codegen/vc8form-spec.js';
 import { normalizeSignatureType } from '../../packages/reconstruct/src/codegen/platform-types.js';
 import { respellPlaceholderType } from '../../packages/reconstruct/src/codegen/placeholder-types.js';
+import { emittedMemberNames } from '../../packages/reconstruct/src/codegen/header.js';
 import { accessorTwins } from '../../packages/reconstruct/src/codegen/accessor-twins.js';
 import { registerEnumTypedefTargets } from '../../packages/reconstruct/src/codegen/enum-width.js';
 import type { Vc8Accessor } from '../../packages/cpp-parser/dist/index.js';
@@ -58,15 +59,21 @@ const body = (tu: TranslationUnit) => emit(tu as never).trimEnd();
 // ---------------------------------------------------------------------------------------
 // Types, for the forms that declare a local: the Ghidra model's own field and global types.
 
-interface Field { name: string; dataType: string }
+interface Field { name: string; dataType: string; offset: number; size: number; bitSize?: number }
 let structs = new Map<string, { kind: string; fields?: Field[]; typedefOf?: string }>();
 let globals = new Map<string, string>();
 /** Typedef and enum names to the integer type the tree declares them as (castout reads a return type's width). */
 const typedefTargets: Record<string, string> = {};
 
 /** The tables `acc` reads: the struct fields, the enumerators and the accessors (accessor-twins.ts). */
-const accTables: { structFields: Record<string, Record<string, string>>; enumValues: Record<string, number>; accessors: Vc8Accessor[] } =
-  { structFields: {}, enumValues: {}, accessors: [] };
+const accTables: {
+  structFields: Record<string, Record<string, string>>;
+  structLayouts: Record<string, Array<{ name: string; offset: number; size: number; type: string; bitSize?: number }>>;
+  aggregateMembers: Record<string, string[]>;
+  unionNames: string[];
+  enumValues: Record<string, number>;
+  accessors: Vc8Accessor[];
+} = { structFields: {}, structLayouts: {}, aggregateMembers: {}, unionNames: [], enumValues: {}, accessors: [] };
 
 function loadTypes(path?: string) {
   if (!path) return;
@@ -79,6 +86,17 @@ function loadTypes(path?: string) {
     if (structs.has(t.name)) continue;
     structs.set(t.name, { kind: t.kind, fields: t.fields, typedefOf: t.underlyingType });
     if (t.fields) accTables.structFields[t.name] = Object.fromEntries(t.fields.filter((f: Field) => f.name).map((f: Field) => [f.name, spell(f.dataType)]));
+    if (t.kind === 'STRUCTURE' || t.kind === 'UNION') {
+      accTables.structLayouts[t.name] = (t.fields ?? []).map((f: Field) => ({
+        name: f.name ?? '', offset: f.offset, size: f.size,
+        // Keep unnamed undefined bytes as raw layout facts. The emitter's member
+        // set below, not a guessed spelling, admits their byte aliases.
+        type: f.name ? spell(f.dataType) : f.dataType,
+        ...(f.bitSize != null ? { bitSize: f.bitSize } : {}),
+      }));
+      accTables.aggregateMembers[t.name] = [...emittedMemberNames(t)];
+      if (t.kind === 'UNION') accTables.unionNames.push(t.name);
+    }
   }
 }
 
@@ -466,6 +484,17 @@ function sites(c: Ctx, maxAnchors: number): string[] {
       out.add(`ptrwalk(${i},${x},${free('t2_p')},${t},${nth})`);
     }
   }
+  // recordwalk: the same immediate-block, last-pointer-store sites the form
+  // indexes. Its type, initialization, liveness and escape proofs filter these.
+  const recordWalks: string[] = [];
+  for (const block of blocks) for (const loop of block.statements as N[]) {
+    if (loop.kind !== NodeKind.ForStmt || loop.body.kind !== NodeKind.CompoundStmt) continue;
+    const last = loop.body.statements[loop.body.statements.length - 1];
+    const e = last?.kind === NodeKind.ExprStmt ? unparen(last.expression) : undefined;
+    if (e?.kind === NodeKind.AssignExpr && e.operator === '=' && unparen(e.left).kind === NodeKind.Identifier)
+      recordWalks.push(unparen(e.left).name);
+  }
+  for (const { t, i } of indexed(recordWalks)) out.add(withIdx('recordwalk', t, i, true));
   // rowptr: a row X[I] (I no constant), or the base of a flat X[I + k], with X a named table.
   const rows = new Map<string, { x: N; e: string }>();
   for (const n of all) {
@@ -599,7 +628,7 @@ function sites(c: Ctx, maxAnchors: number): string[] {
 
 /** The names a form declares, for the phase control: each new local is one more front-end symbol. */
 function adds(form: Vc8Form): number {
-  return (form.op === 'cache' && form.type) || form.op === 'split' || (form.op === 'own' && form.rename) ? 1 : 0;
+  return (form.op === 'cache' && form.type) || form.op === 'recordwalk' || form.op === 'split' || (form.op === 'own' && form.rename) ? 1 : 0;
 }
 
 function tryForm(tu: TranslationUnit, text: string): { text: string; form: Vc8Form } | { why: string } {
