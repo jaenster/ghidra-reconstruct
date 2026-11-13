@@ -3759,6 +3759,11 @@ function transformDecompiledCode(
     if (accessOrder) {
       perPluginOptions['scalar-piece-arithmetic'] = { accessOrder, enumTypes: context?.funcPtrArgCasts?.enumTypes };
     }
+    // A loop-carried value the decompiler merged into a local array element, printed as a
+    // store no instruction makes, goes into a local (loop-phi-element-copy.ts).
+    if (accessOrder) {
+      perPluginOptions['loop-phi-element-copy'] = { accessOrder };
+    }
     if (context?.funcPtrArgCasts?.globalElementSizes || accessOrder) {
       perPluginOptions['array-fill-collapse'] = { globalElementSizes: context?.funcPtrArgCasts?.globalElementSizes, accessOrder };
     }
