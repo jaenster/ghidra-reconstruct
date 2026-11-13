@@ -2,9 +2,9 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert';
 import { parse } from '../../../parser/index.js';
 import { emit } from '../../../emit/index.js';
-import type { AnyNode } from '../../../ast/nodes.js';
+import type { AnyNode, TranslationUnit } from '../../../ast/nodes.js';
 import { strlenDifferencePlugin, type StrlenDifferenceOptions } from '../builtins/strlen-difference.js';
-import { transformGhidraCode } from '../../../index.js';
+import { transformGhidraCode, NodeKind } from '../../../index.js';
 import { compileAndRun, hasNativeGpp } from '../../../testing/native-cpp.js';
 
 const flat = (s: string) => s.replace(/\s+/g, ' ').trim();
@@ -104,6 +104,9 @@ describe('strlen-difference proof boundaries', () => {
     const source = 'struct Unknown { operator int(); }; Unknown x; ' + scan('return x + ((intptr_t)p - (intptr_t)(s + 1));');
     assert.deepStrictEqual(run(source).sites, []);
     assert.deepStrictEqual(run(source.replace(/Unknown/g, 'BOOL')).sites, []);
+    const namedClass = source.replace(/struct Unknown/g, 'class BOOL').replace(/Unknown x/g, 'BOOL x').replace('{ operator int();', '{ public: operator int();');
+    assert.deepStrictEqual(run(namedClass).sites, []);
+    assert.deepStrictEqual(run(namedClass, [], { typedefTargets: { BOOL: 'int' } }).sites, []);
     const convert = 'struct Convert { Convert(int); }; void Consume(Convert, int); ' + scan('Consume(0, (intptr_t)p - (intptr_t)(s + 1));');
     assert.deepStrictEqual(run(convert).sites, []);
   });
@@ -140,6 +143,12 @@ describe('strlen-difference proof boundaries', () => {
       prelude += code.replace('f(', `before${i}(`) + '\n' + run(code).out.replace('f(', `after${i}(`) + '\n';
       checks.push(`for(unsigned k=0;k<128;++k)a[k]=b[k]=k<len?'A':0; errors += before${i}(a)!=after${i}(b);`);
     }
+    const classDecl = 'class BOOL { public: char *s; operator int() { s[0]=0; return 1; } };';
+    const classCode = 'int f(char *s) { BOOL x = {s}; char *p=s; p=p+strlen(p)+1; return x && ((intptr_t)p-(intptr_t)(s+1)); }';
+    const classTree = strlenDifferencePlugin.createTransformer()(parse(classDecl + classCode)) as TranslationUnit;
+    const classFn = classTree.declarations.find(n => n.kind === NodeKind.FunctionDecl)!;
+    prelude += classDecl + '\n' + classCode.replace('f(', 'beforeClass(') + '\n' + emit(classFn as AnyNode).replace('f(', 'afterClass(') + '\n';
+    checks.push("for(unsigned k=0;k<128;++k)a[k]=b[k]=k<len?'A':0; errors += beforeClass(a)!=afterClass(b);");
     const result = compileAndRun(prelude, 'unsigned errors=0; char a[128], b[128]; for(unsigned len=0;len<127;++len){' +
       checks.join('\n') + '} printf("%u\\n",errors);', { optimize: true });
     assert.strictEqual(result.trim(), '0');

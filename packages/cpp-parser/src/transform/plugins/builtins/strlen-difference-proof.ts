@@ -47,6 +47,8 @@ export function createStrlenProof(ast: ASTNode, fn: FunctionDecl, opts: StrlenPr
     let failed = false;
     const out = s.replace(/\b[A-Za-z_]\w*\b/g, name => {
       if (ambiguous.has(name)) { failed = true; return name; }
+      // A source-declared class/struct overrides a familiar SDK alias spelling.
+      if (declaredAggregates.has(name)) return name;
       const target = aliases[name] ?? opts.typedefTargets?.[name];
       if (!target || target.trim() === name || target.trim() === `struct ${name}`) return name;
       if (seen.has(name) || seen.size >= 16) { failed = true; return name; }
@@ -89,7 +91,7 @@ export function createStrlenProof(ast: ASTNode, fn: FunctionDecl, opts: StrlenPr
   }
   const namedType = (name: string): DeclaredType | undefined => duplicates.has(name) ? undefined
     : locals.get(name) ?? opts.enclosingVarTypes?.[name] ?? globals[name] ?? opts.globalTypes?.[name];
-  const aggregateKinds = [NodeKind.StructDecl, NodeKind.UnionDecl];
+  const aggregateKinds = [NodeKind.StructDecl, NodeKind.ClassDecl, NodeKind.UnionDecl];
   const aggregates = top.filter(d => aggregateKinds.includes(d.kind));
   if (fn.body) for (const kind of aggregateKinds) aggregates.push(...findNodesByKind(fn.body, kind));
   const aggregateRoot = { ...ast, kind: NodeKind.TranslationUnit, declarations: aggregates } as ASTNode;
