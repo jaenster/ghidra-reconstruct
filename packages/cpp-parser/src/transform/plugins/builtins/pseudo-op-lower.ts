@@ -1471,6 +1471,10 @@ function createPseudoOpLowerTransformer(options: PseudoOpLowerOptions = {}): Tra
       ? (() => {
         const list = (registersRetired as unknown as { statements: Statement[] }).statements;
         const deps = { classify, isPure, locals: new Set(localTypes.keys()) };
+        // The word-memcmp pass checks its loop shape before asking for these
+        // tables. Most functions should not scan the global type inventory.
+        let wordVolatileNames: Set<string> | undefined;
+        let wordByteArrays: Set<string> | undefined;
         const stringDeps = {
           shape: (e: Expression) => shape(e), isPure, locals: deps.locals,
           localArrays: localArraysOf(body), localArrayPointers: localArrayPointersOf(body),
@@ -1478,19 +1482,19 @@ function createPseudoOpLowerTransformer(options: PseudoOpLowerOptions = {}): Tra
           structFields: options.structFields, aggregateSizes: options.aggregateSizes,
           declarationCounts,
           typeIsVolatile: (type: TypeNode) => volatileTypeSpelling(emit(type as AnyNode)),
-          volatileNames: new Set([
+          get volatileNames() { return wordVolatileNames ??= new Set([
             ...[...localTypes].filter(([, t]) => volatileTypeSpelling(emit(t as AnyNode))).map(([name]) => name),
             ...Object.entries({ ...options.globalTypes, ...options.enclosingVarTypes })
               .filter(([name, type]) => !localTypes.has(name) && volatileTypeSpelling(type)).map(([name]) => name),
-          ]),
-          byteArrays: new Set([
+          ]); },
+          get byteArrays() { return wordByteArrays ??= new Set([
             ...[...localArraysOf(body)].filter(([, a]) => a.elem === 1).map(([name]) => name),
             ...Object.entries({ ...options.globalTypes, ...options.enclosingVarTypes })
               .filter(([name, type]) => !localTypes.has(name) && !volatileTypeSpelling(type)
                 && /\[[1-9]\d*\]\s*$/.test(type) && shape({ kind: NodeKind.Identifier, name } as Identifier)?.stars === 1
                 && ['char', 'signed char', 'unsigned char'].includes(shape({ kind: NodeKind.Identifier, name } as Identifier)!.base))
               .map(([name]) => name),
-          ]),
+          ]); },
         };
         const next = lowerStringIntrinsics(
           lowerCarryChains(lowerNegTestConditions(lowerFlagConditions(list, deps), deps), carryDeps), stringDeps);
