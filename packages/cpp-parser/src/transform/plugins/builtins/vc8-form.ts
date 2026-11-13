@@ -70,6 +70,10 @@
  *                        the guard is a nonvolatile integer field test.
  *   width(V,T)           local V is declared T; a cast of V to T, a cast to V's old type
  *                        stored into V, and a cast of V to T's width in a truth test go.
+ *   nullfault32()        the sole `*(volatile uint8_t*)0 = 0;` in a void, no-argument
+ *                        function (optionally followed by a bare return) becomes a
+ *                        volatile dword null fault through a local.
+ *                        This is a VC8 x86 source spelling; null dereference remains UB.
  *   boolflag(V)          the bool local V, stored only `true`/`false` and read only as a
  *                        condition (an if/loop/`?:` test, an operand of `!`, `&&`, `||`), is
  *                        declared BOOL and stores 1/0: the original's flag lives in a 32-bit
@@ -362,6 +366,7 @@ import { initializerIsDead } from './store-liveness.js';
 import { recordWalk, type RecordWalkTables } from './record-walk.js';
 
 export type Vc8Form =
+  | { op: 'nullfault32' }
   | { op: 'seq'; targets: string[]; index?: number }
   | { op: 'fold'; name: string }
   | { op: 'join'; into: string; from: string }
@@ -463,7 +468,7 @@ export interface Vc8FormOptions {
   selectTables?: Vc8FormTables;
 }
 
-const OPS = new Set(['seq', 'fold', 'join', 'coalesce', 'recordwalk', 'cache', 'own', 'guards', 'merge-guards', 'retval', 'branchret', 'width', 'boolflag', 'retwiden', 'arms',
+const OPS = new Set(['nullfault32', 'seq', 'fold', 'join', 'coalesce', 'recordwalk', 'cache', 'own', 'guards', 'merge-guards', 'retval', 'branchret', 'width', 'boolflag', 'retwiden', 'arms',
   'nest', 'merge-tail', 'tailguard', 'tailcopy', 'continue', 'dup', 'tarms', 'zero', 'nonzero', 'bool', 'cmp', 'swap', 'ifsel', 'clamp', 'split', 'select', 'decl', 'unselect', 'tsel', 'hoist',
   'nestcall', 'fill', 'elems', 'copy', 'shift', 'ptrwalk', 'rowptr', 'acc', 'retvar', 'onecall', 'roundup', 'swmerge', 'switch', 'dec', 'opas', 'range', 'castout', 'signbit']);
 
@@ -491,12 +496,13 @@ function splitArgs(s: string, cacheType = false): string[] {
  * wrong argument count.
  */
 export function parseVc8Form(text: string): Vc8Form | undefined {
-  const m = /^\s*([a-z-]+)\s*\(([\s\S]*)\)\s*$/.exec(text);
+  const m = /^\s*([a-z][a-z0-9-]*)\s*\(([\s\S]*)\)\s*$/.exec(text);
   if (!m || !OPS.has(m[1])) return undefined;
   const args = splitArgs(m[2], m[1] === 'cache');
   const anchor = args.length > 0 && args[args.length - 1].startsWith('@') ? args.pop()!.slice(1) : undefined;
   const int = (s: string | undefined, d: number) => (s === undefined || s === '' ? d : /^\d+$/.test(s) ? Number(s) : NaN);
   switch (m[1]) {
+    case 'nullfault32': return args.length === 0 && !anchor ? { op: 'nullfault32' } : undefined;
     case 'seq': {
       // `seq(a,b,@N)`: the N-th run, when several store these.
       const n = anchor === undefined ? 0 : /^\d+$/.test(anchor) ? Number(anchor) : NaN;
@@ -864,6 +870,28 @@ const refuse = (why: string): never => { throw new Refuse(why); };
 
 // ---------------------------------------------------------------------------------------
 // The forms
+
+/** Exact CrashGame fault spelling. This is a VC8 x86 codegen choice, not a portable
+ * C++ equivalence: dereferencing null remains undefined behavior. */
+function doNullfault32(fn: FunctionDecl): void {
+  if (text(fn.returnType) !== 'void' || fn.parameters.length !== 0 || fn.isVariadic) refuse('not a void no-argument function');
+  const statements = fn.body!.statements;
+  const trailingReturn = statements.length === 2 && statements[1].kind === NodeKind.ReturnStmt
+    && !(statements[1] as ReturnStmt).value;
+  if (!(statements.length === 1 || trailingReturn) || statements[0].kind !== NodeKind.ExprStmt)
+    refuse('not a sole fault store');
+  const assignment = unparen((statements[0] as ExprStmt).expression);
+  if (assignment.kind !== NodeKind.AssignExpr || (assignment as AssignExpr).operator !== '=') refuse('not a plain fault store');
+  const a = assignment as AssignExpr;
+  if (text(a.right) !== '0') refuse('the stored value is not zero');
+  const lhs = unparen(a.left);
+  if (lhs.kind !== NodeKind.UnaryExpr || (lhs as UnaryExpr).operator !== '*') refuse('not a dereference');
+  const pointer = unparen((lhs as UnaryExpr).operand);
+  if (pointer.kind !== NodeKind.CStyleCastExpr || text((pointer as CStyleCastExpr).type) !== 'volatileuint8_t*')
+    refuse('not a volatile byte pointer');
+  if (!['0', '0x0'].includes(text((pointer as CStyleCastExpr).expression))) refuse('not a null address');
+  fn.body!.statements = parseStmts('volatile uint32_t* pNull = 0; *pNull = (uint32_t)(uintptr_t)pNull;');
+}
 
 /** What a statement stores to for seq: a plain or compound store, ++/--, or an initialized declaration. */
 function seqLhs(s: Statement): Expression | undefined {
@@ -4474,6 +4502,7 @@ function opasShift(fn: FunctionDecl, u: OpasUpdate, matches: (e: Expression, u: 
 }
 
 const APPLY: { [K in Vc8Form['op']]: (fn: FunctionDecl, f: Extract<Vc8Form, { op: K }>) => void } = {
+  nullfault32: doNullfault32,
   seq: doSeq, fold: doFold, join: doJoin, coalesce: doCoalesce, recordwalk: doRecordwalk, cache: doCache, own: doOwn, guards: doGuards, 'merge-guards': doMergeGuards,
   retval: doRetval, branchret: doBranchret, width: doWidth, boolflag: doBoolflag, retwiden: doRetwiden, arms: doArms,
   nest: doNest, 'merge-tail': doMergeTail, tailguard: doTailguard, tailcopy: doTailcopy, continue: doContinue, dup: doDup, tarms: doTarms, zero: doZero, nonzero: doNonzero,

@@ -217,6 +217,9 @@ function sites(c: Ctx, maxAnchors: number): string[] {
   const { fn, vars, locals } = c;
   const all = [...walk(fn.body!)];
   const blocks = all.filter(n => n.kind === NodeKind.CompoundStmt);
+  // nullfault32: the form checks the sole volatile byte store and its null address.
+  if (pr(fn.returnType) === 'void' && fn.parameters.length === 0 && !fn.isVariadic
+      && fn.body!.statements.length <= 2) out.add('nullfault32()');
   const free = (stem: string) => { for (let k = 0; ; k++) if (!vars.has(`${stem}${k}`)) return `${stem}${k}`; };
 
   // seq: adjacent stores, every other order of each run of two to four.
