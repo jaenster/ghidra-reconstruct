@@ -1,0 +1,12 @@
+[regen] renamed 2 file(s) the way rsync does: delete + add
+[regen] moved 2 function(s) across 4 file(s)
+[control] merge exit 1, 1 conflicted file(s)
+    conflict: Source/B/Beta.cpp
+[control] conflicts resolved with --theirs
+[tool] git-mv.sh exit 0 
+[tool] lift.patch exit 0 
+[tool] merge exit 1, 1 conflicted file(s)
+    conflict: Source/C/Gamma.cpp
+[tool] conflicts resolved with --theirs
+RESULT gold control: 1 conflicted file(s); present 7, reverted 3
+RESULT gold tool: 1 conflicted file(s); fn-missing 1, present 9

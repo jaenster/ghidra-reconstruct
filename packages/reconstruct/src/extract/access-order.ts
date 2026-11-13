@@ -9,8 +9,12 @@
  *           convention's choice and not recorded.
  *   stores  each `=` the line prints, in print order: the offset of the instruction that
  *           stores it (null when the decompiler's op does not name one), the stored size,
- *           and for an 8-byte store which half the original wrote first. The
- *           `store-order` pass reads them.
+ *           for an 8-byte store which half the original wrote first, and how many bytes
+ *           the instruction behind the op writes. The `store-order` pass reads the order;
+ *           `scalar-piece-arithmetic` reads the width, which tells a piece store the
+ *           decompiler prints (`x._0_1_ = v`) the original made as a whole-register or
+ *           whole-slot write (`MOV EBX,[EDI]`, `LEA EBX,[EDI+6]`, `MOV dword ptr [EBP-4],6`)
+ *           from one it made a byte or word at a time (`MOV byte ptr [EBP-0x20],1`).
  *
  * Lines are numbered as `DecompilerUtils.toLines` numbers them (as extract/call-order.ts),
  * so they are the lines of the snapshot's decompile text; `lineCount` lets the consumer
@@ -37,6 +41,13 @@ export interface StoreSite {
   size: number;
   /** For an 8-byte store: 'h' when the high half was written first, 'l' when the low. */
   half: 'h' | 'l' | null;
+  /**
+   * Bytes the instruction behind the `=` writes: its destination register's width, or the
+   * size of the memory it stores; 0 when unknown (a call, no instruction). Absent for an
+   * older snapshot's four-field row, so a model read before the width existed compares
+   * and hashes as it did then; readers take absent as 0.
+   */
+  width?: number;
 }
 
 export interface AccessOrderFacts {
@@ -51,7 +62,8 @@ function offset(s: string): number {
 
 /**
  * Parse an `A` row's fields after the tag: `entry \t lineCount \t args \t stores`, where
- * args is `line:name,at,paramCount,p@REG.p@REG|...;...` and stores `line:ord,at,size,half|...;...`.
+ * args is `line:name,at,paramCount,p@REG.p@REG|...;...` and stores
+ * `line:ord,at,size,half,width|...;...` (an older row has no width).
  * Null when the row does not parse.
  */
 export function parseAccessOrderRow(row: string): { entry: string; facts: AccessOrderFacts } | null {
@@ -85,13 +97,18 @@ export function parseAccessOrderRow(row: string): { entry: string; facts: Access
     const list: StoreSite[] = [];
     for (const one of part.slice(i + 1).split('|')) {
       const f = one.split(',');
-      if (f.length !== 4) return null;
-      list.push({
+      if (f.length !== 4 && f.length !== 5) return null;
+      const site: StoreSite = {
         ord: Number(f[0]),
         at: f[1] === '?' ? null : offset(f[1]),
         size: Number(f[2]),
         half: f[3] === 'h' || f[3] === 'l' ? f[3] : null,
-      });
+      };
+      if (f.length === 5) {
+        const width = Number(f[4]);
+        site.width = Number.isInteger(width) && width > 0 ? width : 0;
+      }
+      list.push(site);
     }
     stores.push([ln, list]);
   }
@@ -184,9 +201,24 @@ export const ACCESS_ORDER_TOKEN_JAVA = `
                 int sord = storeOrd++;
                 ghidra.program.model.pcode.PcodeOp sop = ((ghidra.app.decompiler.ClangOpToken) t).getPcodeOp();
                 String soff = "?", shalf = "-";
-                int ssize = 0;
+                int ssize = 0, swid = 0;
                 if (sop != null) {
                   ghidra.program.model.address.Address sat = sop.getSeqnum().getTarget();
+                  // The bytes the op's instruction writes: a written destination register's
+                  // width, else the size of what it stores. A call's STORE is its return
+                  // address, not the value.
+                  ghidra.program.model.listing.Instruction swi = L.getInstructionAt(sat);
+                  if (swi != null && !swi.getFlowType().isCall() && swi.getNumOperands() >= 1) {
+                    ghidra.program.model.lang.Register swr = ghidra.program.model.lang.OperandType.isRegister(swi.getOperandType(0)) ? swi.getRegister(0) : null;
+                    boolean swrote = false;
+                    if (swr != null) for (Object sro : swi.getResultObjects()) if (swr.equals(sro)) swrote = true;
+                    if (swrote) swid = swr.getBitLength() / 8;
+                    else if (swr == null) {
+                      for (ghidra.program.model.pcode.PcodeOp swp : swi.getPcode()) {
+                        if (swp.getOpcode() == ghidra.program.model.pcode.PcodeOp.STORE) swid = swp.getInput(2).getSize();
+                      }
+                    }
+                  }
                   ghidra.program.model.pcode.Varnode sout = sop.getOutput();
                   ghidra.program.model.address.Address gaddr = null;
                   if (sop.getOpcode() == ghidra.program.model.pcode.PcodeOp.STORE) {
@@ -283,6 +315,6 @@ export const ACCESS_ORDER_TOKEN_JAVA = `
                     }
                   }
                 }
-                oneSt.append(oneSt.length() > 0 ? "|" : "").append(sord).append(',').append(soff).append(',').append(ssize).append(',').append(shalf);
+                oneSt.append(oneSt.length() > 0 ? "|" : "").append(sord).append(',').append(soff).append(',').append(ssize).append(',').append(shalf).append(',').append(swid);
               }
 `;

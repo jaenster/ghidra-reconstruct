@@ -201,6 +201,16 @@ describe('compare-form derivation', () => {
     assert.strictEqual(decide(site({ text: '<', opcode: 'INT_LESS', k: 0x101n, bValue: 0x100n, width: 2, size: 2, user: 'JG' })), null);
   });
 
+  it('two variables, an unsigned op read by a signed Jcc: decided signed for the pass to prove zero-extended', () => {
+    // CLIENT_UpdateUnitLightRadius 00460930: MOVZX ECX,byte; MOVZX EAX,AL; CMP EAX,ECX; JGE.
+    const vv = { constSide: -1, k: undefined, fp: ['e', 'e'] as [string, string], bKind: 'r' };
+    const d = decide(site({ ...vv, text: '<', opcode: 'INT_LESS', user: 'JGE' }))!;
+    assert.deepStrictEqual([d.keep, d.signed, d.zextPair], [true, true, true]);
+    assert.strictEqual(decide(site({ ...vv, text: '<', opcode: 'INT_LESS', user: 'JGE', width: 2, size: 2 })), null);
+    // An unsigned Jcc on an unsigned op needs no proof.
+    assert.strictEqual(decide(site({ ...vv, text: '<', opcode: 'INT_LESS', user: 'JNC' }))?.zextPair, undefined);
+  });
+
   it('a sign-flag branch is a signed compare against 0: -1 < n -> n >= 0, n < 0 kept', () => {
     // 005daa40: `-1 < n` read by JS straight after the SUB that computed n (no CMP/TEST).
     let d = decide(site({ text: '<', opcode: 'INT_SLESS', constSide: 0, k: 0xffffffffn, setter: undefined, width: 0, onPair: false, user: 'JS' }))!;

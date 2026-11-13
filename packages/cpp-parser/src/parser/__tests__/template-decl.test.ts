@@ -77,6 +77,19 @@ describe('the two forms that failed with "Expected Identifier, got template"', (
     assert.strictEqual(td.declaration.name.qualifier[0].kind, NodeKind.TemplateType);
     assert.ok(td.declaration.body);
   });
+
+  it('a GCC attribute among the specifiers, `__attribute__((noinline)) inline`', () => {
+    const src = 'template<> __attribute__((noinline)) inline void TSTableEx<NODE>::Count() { m_count = 0; }';
+    const fn: any = (parse(src).declarations[0] as any).declaration;
+    assert.strictEqual(fn.kind, NodeKind.FunctionDecl);
+    assert.deepStrictEqual(fn.specifiers, ['inline']);
+    assert.deepStrictEqual(fn.attributes.map((a: any) => `${a.namespace.name}::${a.name.name}`), ['gnu::noinline']);
+    assert.strictEqual(roundTrip(src), 'template<> __attribute__((noinline)) inline void TSTableEx<NODE>::Count() { m_count = 0; }');
+    // A calling convention spelled as an attribute is still the convention.
+    const cc: any = parse('__attribute__((fastcall)) int f(int a);').declarations[0];
+    assert.strictEqual(cc.callingConvention, '__fastcall');
+    assert.deepStrictEqual(cc.attributes, []);
+  });
 });
 
 describe('class templates', () => {

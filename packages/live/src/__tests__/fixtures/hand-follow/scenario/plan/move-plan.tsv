@@ -1,0 +1,11 @@
+id	hash	file	scope	kind	addr	fn	action	new_file	notes
+h001	4a3e31ac1229	Source/A/Alpha.cpp	file	include			stay	Source/A/Alpha.cpp	
+h002	1ed8c6b8a640	Source/A/Alpha.cpp	function	code	00401000	One	stay	Source/A/Alpha.cpp	
+h003	75e0261ec40b	Source/A/Alpha.cpp	multi	code	00401000		stay	Source/A/Alpha.cpp	
+h004	e2c7988dc652	Source/A/Alpha.cpp	function	code	00401040	Three	stay	Source/A/Alpha.cpp	
+h005	01aa0f413719	Source/A/Alpha.cpp	function	code	00401080	Four	stay	Source/A/Alpha.cpp	
+h006	e35bd188e7cc	Source/A/Alpha.cpp	multi	code	00401100		stay	Source/A/Alpha.cpp	
+h007	27835a65942e	Source/B/Beta.cpp	file	include			review	Source/B/Beta.cpp	1 function(s) leave this TU
+h008	dc789ced94cc	Source/B/Beta.cpp	function	code	00402040	Seven	move-fn	Source/A/Alpha.cpp	uses file statics of the old TU the generated body does not: s_counter; target lacks #include "Hand.h" (file-level h007 of the old TU); namespace-relative qualifiers, re-check in the new namespace: Alpha
+h009	6d806faa5f00	Source/B/Beta.cpp	function	code	00402040	Seven	move-fn	Source/A/Alpha.cpp	target lacks #include "Hand.h" (file-level h007 of the old TU)
+h010	4236520c0e28	Source/C/Crlf.cpp	function	code	00403000	Eight	follow-file	Source/C/Gamma.cpp	

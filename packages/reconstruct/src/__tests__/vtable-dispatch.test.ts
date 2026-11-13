@@ -163,7 +163,7 @@ describe('the generator dispatches through a typed receiver', () => {
 
   it('a `void *` receiver keeps the untyped call: the type is Ghidra\'s to give', () => {
     const impl = code(gen(func('void *', '  (**(code **)*(undefined4 *)this)(nEntry);')));
-    assert.ok(impl.includes('(**(code**)(char*)*(void**)(uintptr_t)pThis)(nEntry)'), impl);
+    assert.ok(impl.includes('(**(code**)(char*)*(void**)pThis)(nEntry)'), impl);
     assert.ok(!impl.includes('vmethod_'), impl);
   });
 });

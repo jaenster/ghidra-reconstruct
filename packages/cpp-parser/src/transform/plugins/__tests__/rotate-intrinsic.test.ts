@@ -71,4 +71,107 @@ describe('rotateIntrinsicPlugin', () => {
     ]);
     assert.doesNotMatch(out, /_rotl/);
   });
+
+  // SHA1_Transform 00528c90: `rol edi, 5` and `rol edx, 0x1e`, printed as multiplies.
+  it('writes a multiply pair as the intrinsic whatever the count', () => {
+    const out = run([
+      'void f(unsigned int x, unsigned int *p, unsigned int *q) {',
+      '[l5] *p = *p + (x * 0x20 | x >> 0x1b);',
+      '[l1e] *q = x * 0x40000000 | x >> 2;',
+      '[r2] *q = x >> 2 | 0x40000000 * x;',
+      '}',
+    ]);
+    assert.match(out, /\*p = \*p \+ _rotl\(x, 5\);/);
+    assert.match(out, /\*q = _rotl\(x, 0x1e\);/);
+    assert.match(out, /\*q = _rotr\(x, 2\);/);
+  });
+
+  it('types the operand through a pointer parameter and a local', () => {
+    const out = run([
+      'void f(uint32_t *w) {',
+      'uint32_t s = w[1];',
+      '[l1e] w[0] = w[1] * 0x40000000 | w[1] >> 2;',
+      '[l5] w[2] = s * 0x20 | s >> 0x1b;',
+      '}',
+    ]);
+    assert.match(out, /w\[0\] = _rotl\(w\[1\], 0x1e\);/);
+    assert.match(out, /w\[2\] = _rotl\(s, 5\);/);
+  });
+
+  // A signed `>>` is arithmetic and the product of an int can overflow: no rotate.
+  it('leaves a multiply pair over a signed or untyped operand', () => {
+    const out = run([
+      'void f(int x, unsigned short h, unsigned int *p) {',
+      '[l5] *p = x * 0x20 | x >> 0x1b;',
+      '[l5] *p = h * 0x20 | h >> 0x1b;',
+      '[l5] *p = g * 0x20 | g >> 0x1b;',
+      '[l1e] *p = x << 0x1e | x >> 2;',
+      '}',
+    ]);
+    assert.doesNotMatch(out, /_rot/);
+  });
+
+  it('leaves a multiply pair whose counts or operands do not make a rotate', () => {
+    const out = run([
+      'void f(unsigned int x, unsigned int y, unsigned int *p) {',
+      '[l5] *p = x * 0x20 | x >> 0x1a;',
+      '[l5] *p = x * 0x20 | y >> 0x1b;',
+      '[l5] *p = x * 0x21 | x >> 0x1b;',
+      '[l6] *p = x * 0x20 | x >> 0x1b;',
+      '}',
+    ]);
+    assert.doesNotMatch(out, /_rot/);
+  });
+
+  // SHA1_Transform 00528c90: `rol edx, 0x18; and 0xff00ff00; rol esi, 8; and 0xff00ff; or`.
+  it('writes the byte swap the original builds from two rotates', () => {
+    const out = run([
+      'void f(uint32_t *w, uint32_t *o) {',
+      'uint32_t d = *w;',
+      '[l18,l8] *o = d << 0x18 | d >> 8 & -16711936 | (d & 0xff00) << 8 | d >> 0x18;',
+      '[l8,r8] o[1] = d << 0x18 | d >> 8 & 0xff00ff00 | (d & 0xff00) << 8 | d >> 0x18;',
+      '}',
+    ]);
+    assert.match(out, /\*o = _rotl\(d, 0x18\) & 0xff00ff00 \| _rotl\(d, 8\) & 0xff00ff;/);
+    assert.match(out, /o\[1\] = _rotl\(d, 8\) & 0xff00ff \| _rotr\(d, 8\) & 0xff00ff00;/);
+  });
+
+  it('leaves a byte swap without both rotates, over a signed operand, or not exactly a swap', () => {
+    const out = run([
+      'void f(unsigned int d, int s, unsigned int *o) {',
+      '[l18] *o = d << 0x18 | d >> 8 & 0xff00ff00 | (d & 0xff00) << 8 | d >> 0x18;',
+      '*o = d << 0x18 | d >> 8 & 0xff00ff00 | (d & 0xff00) << 8 | d >> 0x18;',
+      '[l18,l8] *o = s << 0x18 | s >> 8 & 0xff00ff00 | (s & 0xff00) << 8 | s >> 0x18;',
+      '[l18,l8] *o = d << 0x18 | d >> 8 & 0xff00ff00 | (d & 0xff0000) << 8 | d >> 0x18;',
+      '[l18,l8] *o = d << 0x18 | d >> 8 & 0xff00ff00 | (d & 0xff00) << 8;',
+      '}',
+    ]);
+    assert.doesNotMatch(out, /_rot/);
+  });
+
+  // SHA1_Transform 00528c90's schedule: `rol edx, 1`, the top bit printed as a sign test.
+  it('writes a rotate by 1 printed with the sign test', () => {
+    const out = run([
+      'void f(uint32_t *w, uint32_t s) {',
+      '[l1] w[0] = s << 1 | (uint32_t)((int)s < 0);',
+      '[l1] w[1] = (uint32_t)((int)w[2] < 0) | w[2] * 2;',
+      '}',
+    ]);
+    assert.match(out, /w\[0\] = _rotl\(s, 1\);/);
+    assert.match(out, /w\[1\] = _rotl\(w\[2\], 1\);/);
+  });
+
+  it('leaves a sign test that is not the top bit of the shifted operand', () => {
+    const out = run([
+      'void f(uint32_t *w, uint32_t s, uint32_t t, int i) {',
+      '[l1] w[0] = s << 1 | (uint32_t)((int)t < 0);',
+      '[l1] w[0] = s << 1 | (uint32_t)((short)s < 0);',
+      '[l1] w[0] = s << 1 | (uint32_t)((int)s < 1);',
+      '[l1] w[0] = s << 2 | (uint32_t)((int)s < 0);',
+      '[l1] w[0] = i << 1 | (uint32_t)((int)i < 0);',
+      '}',
+    ]);
+    assert.doesNotMatch(out, /_rot/);
+  });
 });
+

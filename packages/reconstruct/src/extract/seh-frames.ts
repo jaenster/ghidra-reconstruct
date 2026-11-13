@@ -238,7 +238,7 @@ export async function attachSehFrames(connection: GhidraConnection, functions: E
   try {
     const result = await connection.sendCommand<{ success?: boolean; output?: string; error?: string }>(
       'execute_script',
-      { language: 'java', code: SEH_FRAME_SCRIPT, scriptTimeout: 300, _commandTimeout: 360000 }
+      { language: 'java', readOnly: true, code: SEH_FRAME_SCRIPT, scriptTimeout: 300, _commandTimeout: 360000 }
     );
     if (result.success === false || typeof result.output !== 'string') {
       console.warn(`  SEH frames unavailable: ${result.error ?? 'no output'}`);

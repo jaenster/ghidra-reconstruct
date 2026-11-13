@@ -105,10 +105,16 @@ export function compareFormDecision(site: CompareSite): CompareFormOutcome {
   // compares signed. Decided as signed, and `zextSum` asks the pass to prove the operand is
   // a sum of zero-extended narrow values, which no compare can tell from a signed one.
   let zextSum = false;
+  // The same for two non-constant operands: `zextPair` asks the pass to prove both are
+  // values zero-extended from 8 or 16 bits (CLIENT_UpdateUnitLightRadius 00460930:
+  // `MOVZX ECX,byte; MOVZX EAX,AL; CMP EAX,ECX; JGE`), where the two compares agree.
+  let zextPair = false;
   if (ordered) {
     const ccSigned = SIGNED_CC.has(cc) ? true : UNSIGNED_CC.has(cc) ? false : undefined;
     if (ccSigned === true && form.signed === false && site.width === 4
       && (site.constSide === 0 || site.constSide === 1) && site.bKind === 'i') zextSum = true;
+    else if (ccSigned === true && form.signed === false && site.width === 4
+      && site.constSide !== 0 && site.constSide !== 1 && (site.bKind === 'r' || site.bKind === 'm')) zextPair = true;
     else if (ccSigned !== form.signed) return { reason: `${site.opcode} read by ${site.user.mnemonic}` };
   }
 
@@ -172,8 +178,9 @@ export function compareFormDecision(site: CompareSite): CompareFormOutcome {
   if (site.bKind !== 'r' && site.bKind !== 'm') return { reason: `variables against ${site.bKind}` };
   if (!ordered) return { decision: { ...base, keep: true } };
   const inF = F.has(site.text), mirInF = F.has(MIRROR[site.text]);
-  if (inF && !mirInF) return { decision: { ...base, keep: true } };
-  if (mirInF && !inF) return { decision: { ...base, op: MIRROR[site.text], swap: true, delta: 0 } };
+  const pair = zextPair ? { signed: true, zextPair } : {};
+  if (inF && !mirInF) return { decision: { ...base, keep: true, ...pair } };
+  if (mirInF && !inF) return { decision: { ...base, op: MIRROR[site.text], swap: true, delta: 0, ...pair } };
   return { reason: `${site.text} against ${[...F].join('/')}` };
 }
 

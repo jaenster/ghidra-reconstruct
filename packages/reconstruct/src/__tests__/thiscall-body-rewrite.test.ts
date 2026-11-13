@@ -251,7 +251,7 @@ describe('signature-driven parameter renames reach the body through the rename m
       ].join('\n'),
     }));
     assert.ok(!/->vmethod_/.test(impl), `void* has no members — got:\n${impl}`);
-    assert.ok(impl.replace(/\s+/g, '').includes('(**(code**)(char*)*(void**)(uintptr_t)pThis)(nEntry)'),
+    assert.ok(impl.replace(/\s+/g, '').includes('(**(code**)(char*)*(void**)pThis)(nEntry)'),
       `expected the faithful indirect call — got:\n${impl}`);
   });
 });

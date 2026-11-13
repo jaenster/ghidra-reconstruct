@@ -28,6 +28,7 @@ import { includePathCase, INCLUDE_PATH_CASE_CHECK_ID } from './checks/include-ca
 import { aliasReach } from './checks/alias-reach.js';
 import { doubleBitPattern, fieldSetThenMemset } from './checks/stores.js';
 import { storeSunkPastPointerRead } from './checks/sunk-stores.js';
+import { selfAssignment, SELF_ASSIGNMENT_CHECK_ID } from './checks/self-assign.js';
 
 export type { Check, Finding } from './context.js';
 export { LintContext } from './context.js';
@@ -44,6 +45,7 @@ export { aliasReach, ALIAS_REACH_CHECK_ID, spelledSize } from './checks/alias-re
 export { zeroInitializerDropsValue, nonZeroCommentValue } from './checks/initializers.js';
 export { doubleBitPattern, fieldSetThenMemset } from './checks/stores.js';
 export { storeSunkPastPointerRead } from './checks/sunk-stores.js';
+export { selfAssignment, SELF_ASSIGNMENT_CHECK_ID } from './checks/self-assign.js';
 
 /** In the order lint.py reported them. */
 export const ALL_CHECKS: Check[] = [
@@ -69,6 +71,7 @@ export const ALL_CHECKS: Check[] = [
   doubleBitPattern,
   fieldSetThenMemset,
   storeSunkPastPointerRead,
+  selfAssignment,
   rawAddressArgument,
   rawAddressArithmetic,
   ghidraArtifact,

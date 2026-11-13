@@ -52,6 +52,18 @@ export interface SerializedModule {
   ownedTypeNames: string[];
   functionNames: string[];
   globalAddresses: string[];
+  /**
+   * Every unit emitted under this module's header, when several are (the template
+   * header's member units). Each names its own functions; the module's deps, owned
+   * types and globals are shared by all of them.
+   */
+  units?: SerializedUnit[];
+}
+
+export interface SerializedUnit {
+  unitName: string;
+  implPath: string;
+  functionNames: string[];
 }
 
 export interface SerializedDep {
@@ -112,6 +124,7 @@ export const FUNCTION_HASH_FIELDS = {
   rotateSites: 'hashed',
   storeBases: 'hashed',
   callDivides: 'hashed',
+  shadowedGlobals: 'hashed',
   labelFlow: 'hashed',
   compareSites: 'hashed',
   branchLayout: 'hashed',

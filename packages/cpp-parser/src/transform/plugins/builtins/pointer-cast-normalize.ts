@@ -1,12 +1,18 @@
 /**
  * Pointer Cast Normalize Plugin
  *
- * Transforms `(int)&expr` → `(uintptr_t)&expr` for x86-32 pointer arithmetic.
+ * Transforms `(int)&expr` → `(intptr_t)&expr` and `(uint32_t)&expr` →
+ * `(uintptr_t)&expr` for x86-32 pointer arithmetic.
  *
  * Ghidra's decompiler emits `(int)ptr` for 32-bit address math because int
  * and pointer are both 32 bits on x86-32. This is technically correct for
- * the target platform but breaks portable C++ compilation. The standard
- * `uintptr_t` type conveys the same semantics without narrowing warnings.
+ * the target platform but breaks portable C++ compilation. The pointer-sized
+ * integer of the SAME signedness conveys the same semantics without narrowing
+ * warnings: `intptr_t` is `int` and `uintptr_t` is `unsigned int` on the
+ * target, so the rewrite is type-identical. Mapping a signed cast onto
+ * `uintptr_t` is not: `(int)&x < n` is a signed compare (the decompiler's
+ * INT_SLESS, MSVC's JL), and through `uintptr_t` the int side converts to
+ * unsigned and the compare becomes unsigned (JB).
  *
  * Also handles `(uint32_t)&expr` and `(int32_t)&expr` variants.
  */
@@ -28,6 +34,11 @@ const BUILTIN_INT_NAMES = new Set(['int']);
 
 // Typedef type names that represent 32-bit integers (parsed as TypedefType)
 const TYPEDEF_INT_NAMES = new Set(['int32_t', 'uint32_t']);
+
+/** The pointer-sized integer of the same signedness as the spelled 32-bit one. */
+const POINTER_WORD: Record<string, 'intptr_t' | 'uintptr_t'> = {
+  int: 'intptr_t', int32_t: 'intptr_t', uint32_t: 'uintptr_t',
+};
 
 function isAddressOfExpr(node: ASTNode): node is UnaryExpr {
   return node.kind === NodeKind.UnaryExpr && (node as UnaryExpr).operator === '&';
@@ -54,15 +65,16 @@ function createPointerCastNormalize(): Transformer {
       if (node.kind !== NodeKind.CStyleCastExpr) return undefined;
       const cast = node as CStyleCastExpr;
 
-      if (!getTypeName(cast)) return undefined;
+      const spelled = getTypeName(cast);
+      if (!spelled) return undefined;
       if (!isAddressOfExpr(cast.expression)) return undefined;
 
-      // Replace the type with uintptr_t (as a TypedefType, since uintptr_t is a typedef)
+      // Replace the type with the same-signedness pointer word (a TypedefType)
       const newType: TypedefType = {
         kind: NodeKind.TypedefType,
         name: {
           kind: NodeKind.Identifier,
-          name: 'uintptr_t',
+          name: POINTER_WORD[spelled],
           location: cast.type.location,
           leadingTrivia: [],
           trailingTrivia: [],
@@ -84,7 +96,7 @@ export const pointerCastNormalizePlugin: TransformPlugin = {
   id: 'pointer-cast-normalize',
   name: 'Pointer Cast Normalize',
   description:
-    'Convert (int)&expr → (uintptr_t)&expr for portable pointer arithmetic',
+    'Convert (int)&expr → (intptr_t)&expr and (uint32_t)&expr → (uintptr_t)&expr, keeping signedness',
   version: '1.0.0',
   defaultEnabled: true,
   priority: 16, // After type-normalize (15), before other cleanups

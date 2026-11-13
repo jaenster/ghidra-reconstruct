@@ -509,7 +509,7 @@ function parentMap(root: ASTNode): Map<ASTNode, ASTNode> {
  * Whether passing `&local` as argument `index` of `call` needs the frame around the
  * local kept: the callee reaches outside `[0, sizeof local)`, or nobody can say.
  */
-function callNeedsFrame(
+export function callNeedsFrame(
   call: CallExpr,
   index: number,
   local: string,
@@ -600,7 +600,7 @@ interface MovableLocal {
  * declaration-statement, with no storage specifier, and of a type whose size is
  * known. Anything else stays where it is — and ends any run that reaches it.
  */
-function movableLocals(
+export function movableLocals(
   body: CompoundStmt,
   aggregate?: (name: string) => TypeLayout | null,
 ): Map<string, MovableLocal> {
@@ -690,7 +690,7 @@ function destinationLocal(arg: Expression | undefined, movable: Map<string, Mova
  * largest one wins: the object has to be at least as big as the biggest write,
  * and a smaller write into the same buffer is not evidence against that.
  */
-function knownCountWrites(body: CompoundStmt, movable: Map<string, MovableLocal>): Map<string, number> {
+export function knownCountWrites(body: CompoundStmt, movable: Map<string, MovableLocal>): Map<string, number> {
   const writes = new Map<string, number>();
   for (const node of traverseAST(body)) {
     if (node.kind !== NodeKind.CallExpr) continue;
@@ -784,6 +784,12 @@ interface FrameGroup {
   /** `sizeof` the emitted struct must have on the 32-bit target. */
   expectedSize: number;
   reason: GroupReason;
+  /**
+   * The original has no /GS cookie: padding is written as single bytes, not as an array.
+   * VC8 /GS gives a function with a byte array local - also inside a struct - a cookie,
+   * and the original's frame had none (AI_Function1_SummonMaster 005e5870, `__pad8[4]`).
+   */
+  scalarPadding?: boolean;
 }
 
 function paddingMember(at: number, bytes: number, sealed = false): GroupMember {
@@ -1171,10 +1177,29 @@ function explanation(group: FrameGroup): string[] {
   ];
 }
 
+/** Padding no wider than this is written byte by byte where the original has no cookie. */
+const MAX_SCALAR_PADDING = 32;
+
 function structFor(group: FrameGroup): StructDecl {
-  const fields: FieldDecl[] = group.members.map(m =>
-    Decl.field(m.name ?? `__pad${m.at}`, m.type));
+  // A member that is itself a byte or word array is a /GS buffer anyway; the padding stays as it is.
+  const buffer = group.members.some(m => m.name !== null && m.type.kind === NodeKind.ArrayType && m.align <= 2);
+  const scalar = group.scalarPadding === true && !buffer;
+  const fields: FieldDecl[] = group.members.flatMap(m => {
+    if (m.name !== null) return [Decl.field(m.name, m.type)];
+    if (!scalar || m.size > MAX_SCALAR_PADDING) return [Decl.field(`__pad${m.at}`, m.type)];
+    // The same bytes at the same offsets: uint8_t has alignment 1 and nothing names padding.
+    return Array.from({ length: m.size }, (_, i) => Decl.field(`__pad${m.at + i}`, Type.typedef('uint8_t')));
+  });
   return Decl.struct_(group.typeName, fields);
+}
+
+/** The function seeds a /GS cookie: marked by `boilerplate-cleanup`, or the seed is still read. */
+function hasStackCookie(fn: FunctionDecl, cookies: ReadonlySet<string>): boolean {
+  if (fn.ghidraInfo?.stackCookie || cookies.size > 0) return true;
+  for (const n of traverseAST(fn.body!)) {
+    if (n.kind === NodeKind.Identifier && (n as Identifier).name === 'DEFAULT_SECURITY_COOKIE') return true;
+  }
+  return false;
 }
 
 function sizeAssert(group: FrameGroup): StaticAssertDecl {
@@ -1320,6 +1345,41 @@ function createCookieDeclRemover(): Transformer {
   });
 }
 
+/** A statement declaring a local type (a union or struct) or asserting its size. */
+function isLocalTypeDeclaration(st: Statement): boolean {
+  if (st.kind !== NodeKind.DeclStmt) return false;
+  const ds = (st as DeclStmt).declarations;
+  return ds.length > 0 && ds.every(d => d.kind === NodeKind.UnionDecl || d.kind === NodeKind.StructDecl || d.kind === NodeKind.StaticAssertDecl);
+}
+
+/**
+ * Size and alignment of each union the body declares at its top level, from its members
+ * (the widest member, rounded up to the strictest alignment). A union with a member this
+ * pass cannot size has none.
+ */
+function localUnionLayouts(body: CompoundStmt, aggregate?: (name: string) => TypeLayout | null): Map<string, TypeLayout> {
+  const out = new Map<string, TypeLayout>();
+  for (const st of body.statements) {
+    if (!isLocalTypeDeclaration(st)) break;
+    for (const d of (st as DeclStmt).declarations) {
+      if (d.kind !== NodeKind.UnionDecl) continue;
+      const u = d as unknown as { name: Identifier | null; members: ASTNode[] };
+      if (!u.name) continue;
+      let size = 0, align = 1, ok = u.members.length > 0;
+      for (const m of u.members) {
+        // A union this pass printed has field members; one parsed back, variable ones.
+        const l = m.kind === NodeKind.FieldDecl || m.kind === NodeKind.VariableDecl
+          ? frameTypeLayout((m as FieldDecl).type, aggregate) : null;
+        if (!l) { ok = false; break; }
+        size = Math.max(size, l.size);
+        align = Math.max(align, l.align);
+      }
+      if (ok) out.set(u.name.name, { size: alignUp(size, align), align });
+    }
+  }
+  return out;
+}
+
 function createFrameGroupLocalsTransformer(options: FrameGroupLocalsOptions = {}): Transformer {
   const slots = options.slots ?? [];
   if (slots.length === 0) return identity;
@@ -1328,6 +1388,11 @@ function createFrameGroupLocalsTransformer(options: FrameGroupLocalsOptions = {}
     visitFunctionDecl(node: FunctionDecl): ASTNode | undefined {
       if (!node.body) return undefined;
       const body = node.body;
+      // The unions the body declares itself (a slot whose lives split-lives made members):
+      // sized from their members, so a local of one is placed like any other.
+      const localLayouts = localUnionLayouts(body, options.aggregateLayout);
+      const aggregateLayout = localLayouts.size === 0 ? options.aggregateLayout
+        : (name: string) => localLayouts.get(name) ?? options.aggregateLayout?.(name) ?? null;
 
       const paramNames = new Set<string>();
       for (const p of node.parameters) {
@@ -1341,13 +1406,13 @@ function createFrameGroupLocalsTransformer(options: FrameGroupLocalsOptions = {}
         .filter((s, i, all) => i === 0 || all[i - 1].offset !== s.offset);
       if (locals.length === 0) return undefined;
 
-      const movable = movableLocals(body, options.aggregateLayout);
+      const movable = movableLocals(body, aggregateLayout);
       // An aggregate the type table sizes may JOIN a run, but its own escaping
       // address does not START one: `GetClientRect(h, &rc)` is the ordinary
       // whole-object out-param, and grouping its neighbours would freeze a
       // layout the original never depended on. Only the locals that were
       // movable without the table can seed an escape run.
-      const scalarMovable = options.aggregateLayout ? movableLocals(body) : movable;
+      const scalarMovable = aggregateLayout ? movableLocals(body) : movable;
       const declaredNames = new Set<string>();
       /** Declared locals whose type has no size here, as opposed to an unmovable declaration. */
       const unsized = new Set<string>();
@@ -1357,7 +1422,7 @@ function createFrameGroupLocalsTransformer(options: FrameGroupLocalsOptions = {}
         if (!name) continue;
         declaredNames.add(name);
         declTypes.set(name, (d as VariableDecl).type);
-        if (!frameTypeLayout((d as VariableDecl).type, options.aggregateLayout)) unsized.add(name);
+        if (!frameTypeLayout((d as VariableDecl).type, aggregateLayout)) unsized.add(name);
       }
       const stuck = new Set([...declaredNames].filter(n => !movable.has(n)));
       const cookies = securityCookieLocals(body);
@@ -1593,9 +1658,13 @@ function createFrameGroupLocalsTransformer(options: FrameGroupLocalsOptions = {}
       }
 
       const preamble: Statement[] = [];
-      for (const g of groups) preamble.push(...groupStatements(g));
+      const scalarPadding = !hasStackCookie(node, cookies);
+      for (const g of groups) preamble.push(...groupStatements({ ...g, scalarPadding }));
+      // After the body's own local types: a group member may be of one.
+      let at = 0;
+      while (at < rewritten.statements.length && isLocalTypeDeclaration(rewritten.statements[at])) at++;
       rewritten = updateNode(rewritten, {
-        statements: [...preamble, ...rewritten.statements],
+        statements: [...rewritten.statements.slice(0, at), ...preamble, ...rewritten.statements.slice(at)],
       } as Partial<CompoundStmt>);
 
       return updateNode(node, { body: rewritten } as Partial<FunctionDecl>);

@@ -137,11 +137,6 @@ export function parseEscapeSequence(text: string, index: number): { value: numbe
 
   const next = text[index + 1];
 
-  // Simple escape sequences
-  if (next in ESCAPE_SEQUENCES) {
-    return { value: ESCAPE_SEQUENCES[next], length: 2 };
-  }
-
   // Octal escape: \nnn
   if (/[0-7]/.test(next)) {
     let octal = '';
@@ -151,6 +146,11 @@ export function parseEscapeSequence(text: string, index: number): { value: numbe
       i++;
     }
     return { value: parseInt(octal, 8), length: 1 + octal.length };
+  }
+
+  // Check simple escapes after octal so \001 consumes all three digits.
+  if (next in ESCAPE_SEQUENCES) {
+    return { value: ESCAPE_SEQUENCES[next], length: 2 };
   }
 
   // Hex escape: \xnn

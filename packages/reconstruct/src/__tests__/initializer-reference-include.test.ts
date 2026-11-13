@@ -105,6 +105,8 @@ const HANDLER_TABLE: AnalyzedDataSymbol = {
   size: 12,
   isInitialized: true,
   xrefCount: 3,
+  // Read by address: a table no function reads is not emitted.
+  referencingFunctions: ['D2Common::Dummy::Nothing'],
   scope: 'global',
   initializedData: {
     kind: 'array',

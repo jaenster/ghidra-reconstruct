@@ -120,6 +120,8 @@ function scenario(creatorNs: string | undefined) {
     size: 4,
     isInitialized: true,
     xrefCount: 1,
+    // Read by address: a table no function reads is not emitted.
+    referencingFunctions: [`${CALLER_NS}::FORMS_CreateAnyForm`],
     scope: 'global',
     initializedData: { kind: 'array', elements: [{ kind: 'pointer', value: `${q}D2WinImageEx` }] },
   } as unknown as AnalyzedDataSymbol;

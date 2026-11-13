@@ -61,6 +61,21 @@ interface SerializedModule {
   ownedTypeNames?: string[];
   functionNames?: string[];
   globalAddresses?: string[];
+  /** Every unit emitted under this module's header, when several are (the template member units). */
+  units?: Array<{ unitName: string; implPath?: string; functionNames?: string[] }>;
+}
+
+/**
+ * The units a module stands for, each with the functions it defines. A module is keyed
+ * by its header, and the template header is shared by one unit per instantiation and
+ * module: those are listed in `units`, and `unitName`/`functionNames` describe only
+ * one of them. Deps, owned types and globals belong to the header, so to all of them.
+ */
+export function moduleUnits(m: SerializedModule): Array<{ unitName: string; implPath: string; functionNames: string[] }> {
+  if (m.units && m.units.length > 0) {
+    return m.units.map(u => ({ unitName: u.unitName, implPath: u.implPath ?? m.implPath, functionNames: u.functionNames ?? [] }));
+  }
+  return [{ unitName: m.unitName, implPath: m.implPath, functionNames: m.functionNames ?? [] }];
 }
 
 interface BuildInfoFile {
@@ -151,8 +166,11 @@ export function expandChangedTypes(
  * a renamed function is found.
  */
 export interface SymbolHashCache {
-  /** address -> {hash, name at that address} */
-  functions: Record<string, { hash: string; name: string }>;
+  /**
+   * address -> {hash, name at that address, its namespace}. The namespace decides the
+   * unit a function is emitted into; a cache written before it was recorded has none.
+   */
+  functions: Record<string, { hash: string; name: string; namespace?: string }>;
   /** type path or name -> hash */
   types: Record<string, string>;
   /**
@@ -221,7 +239,7 @@ export function computeHashCache(inputs: {
 }): SymbolHashCache {
   const cache = emptyHashCache();
   for (const f of inputs.functions) {
-    cache.functions[f.address] = { hash: hashFunction(f), name: f.name };
+    cache.functions[f.address] = { hash: hashFunction(f), name: f.name, namespace: f.namespace ?? '' };
   }
   for (const dt of inputs.dataTypes) cache.types[typePath(dt)] = hashDataType(dt);
   cache.typeOrder = typeOrder(inputs.dataTypes);
@@ -298,6 +316,24 @@ export function selectDirtyUnits(inputs: SelectInputs): DirtySelection {
   // initialisedAggregate. Matched against dependency edges only - a struct that
   // contains the type did not change shape, so containment is not followed.
   const valueTypes = new Set<string>();
+
+  // A function moved to another namespace is emitted into another unit, which no module
+  // list names it in yet: the graph only finds the unit it left. Re-emit everything
+  // (v1950: six functions left _unnamespaced, and only that unit was re-emitted, so
+  // the units they moved into were reused without them).
+  const movedNamespace = functions.filter(f => {
+    const before = previous.functions[f.address];
+    return before !== undefined && before.namespace !== undefined && before.namespace !== (f.namespace ?? '');
+  });
+  if (movedNamespace.length > 0) {
+    return {
+      units: null,
+      reason: `${movedNamespace.length} function(s) moved to another namespace ` +
+        `(e.g. ${movedNamespace.slice(0, 3).map(f => f.name).join(', ')}); re-emitting everything`,
+      changedSymbols: movedNamespace.map(f => f.name),
+      expandedTypes: [],
+    };
+  }
 
   for (const f of functions) {
     const before = previous.functions[f.address];
@@ -384,25 +420,32 @@ export function selectDirtyUnits(inputs: SelectInputs): DirtySelection {
   // which are rewritten every run, never carry a file-local definition. Without
   // this a retyped static kept its old type and initializer in the defining .cpp.
   const byId = new Map(buildInfo.modules.map(m => [m.id, m]));
+  const allUnitsDirty = (m: SerializedModule): boolean => moduleUnits(m).every(u => dirty.has(u.unitName));
+  const markAll = (m: SerializedModule): void => { for (const u of moduleUnits(m)) dirty.add(u.unitName); };
+  // A unit's own functions are matched per unit; what the header owns marks every unit
+  // emitted under it.
+  const markReaders = (m: SerializedModule, reads: (name: string) => boolean): void => {
+    for (const u of moduleUnits(m)) if (u.functionNames.some(reads)) dirty.add(u.unitName);
+  };
   for (const m of buildInfo.modules) {
-    const owns =
-      (m.functionNames ?? []).some(n => changedSet.has(n)) ||
+    markReaders(m, n => changedSet.has(n));
+    const headerOwns =
       (m.ownedTypeNames ?? []).some(n => changedSet.has(n) || orderMoved.has(n)) ||
       (m.globalAddresses ?? []).some(a => changedGlobalAddrs.has(a.toLowerCase()));
-    if (owns) dirty.add(m.unitName);
+    if (headerOwns) markAll(m);
   }
 
   // ...or DEPENDS on one. This is the edge that carries a retype outward to every
   // unit that spells the type, which is the case a body-diff trigger would miss.
   for (const m of buildInfo.modules) {
-    if (dirty.has(m.unitName)) continue;
+    if (allUnitsDirty(m)) continue;
     const deps = m.deps;
     if (deps === undefined) {
       // No dependency data for this module: it cannot be shown to be clean.
       unknown.push(m.unitName);
       continue;
     }
-    if (deps.some(d => changedSet.has(d.symbol) || valueTypes.has(d.symbol))) dirty.add(m.unitName);
+    if (deps.some(d => changedSet.has(d.symbol) || valueTypes.has(d.symbol))) markAll(m);
   }
 
   // ...or READS one by address. Several rules spell a body from a global the body
@@ -441,10 +484,7 @@ export function selectDirtyUnits(inputs: SelectInputs): DirtySelection {
           || (o.derived ?? []).some(d => inChanged(d.value))
           || (o.scalars ?? []).some(sc => inChanged(sc.value))) readers.add(f.name);
     }
-    for (const m of buildInfo.modules) {
-      if (dirty.has(m.unitName)) continue;
-      if ((m.functionNames ?? []).some(n => readers.has(n))) dirty.add(m.unitName);
-    }
+    for (const m of buildInfo.modules) markReaders(m, n => readers.has(n));
   }
 
   // `global-run-clear` clears a memset's run of globals one at a time, BY NAME, from
@@ -462,10 +502,7 @@ export function selectDirtyUnits(inputs: SelectInputs): DirtySelection {
     for (const group of frameFuncletGroups(functions)) {
       if (group.some(n => changedSet.has(n))) for (const n of group) readers.add(n);
     }
-    for (const m of buildInfo.modules) {
-      if (dirty.has(m.unitName)) continue;
-      if ((m.functionNames ?? []).some(n => readers.has(n))) dirty.add(m.unitName);
-    }
+    for (const m of buildInfo.modules) markReaders(m, n => readers.has(n));
   }
 
   // Which changed symbols would have nowhere to be emitted.
@@ -484,6 +521,7 @@ export function selectDirtyUnits(inputs: SelectInputs): DirtySelection {
   const claimedFunctions = new Set<string>();
   for (const m of buildInfo.modules) {
     for (const n of m.functionNames ?? []) claimedFunctions.add(n);
+    for (const u of moduleUnits(m)) for (const n of u.functionNames) claimedFunctions.add(n);
   }
   // A rename produces a name the graph has never seen - that IS the rename, not
   // evidence the graph is stale. The unit is found through the OLD name, which is

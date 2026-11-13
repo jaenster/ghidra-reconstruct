@@ -56,3 +56,43 @@ test('without that guarantee the callers are decompiled again too', async () => 
   await applyEvents(m, buildIndices(m), [ev], fakeClient(decompiled));
   assert.deepStrictEqual(decompiled.sort(), [CALLEE, CALLER]);
 });
+
+/**
+ * A body that takes the function's address without calling it prints the function's
+ * type too: SBig.cpp passes a constructor to `_eh_vector_constructor_iterator_`, and a
+ * convention change on that constructor left the file declaring the old one (strict red
+ * at Ghidra v2073). The operand references' `C` rows name those bodies.
+ */
+const TAKER = '00480000';
+
+function modelWithTaker(): LiveModel {
+  const m = model();
+  (m.primary.functions as unknown[]).push({
+    name: 'BuildArray', address: TAKER, decompiled: '', calledFunctions: ['_eh_vector_constructor_iterator_'],
+    operandRefs: { refs: [], derived: [], functions: [{ ins: '00480010', op: 0, to: CALLEE }] },
+  });
+  return m;
+}
+
+test('a signature change re-decompiles the bodies that take the function address', async () => {
+  const m = modelWithTaker();
+  const decompiled: string[] = [];
+  const ev = { seq: 1, kind: 'function.signature', target: 'function', key: CALLEE } as ChangeEvent;
+  await applyEvents(m, buildIndices(m), [ev], fakeClient(decompiled));
+  assert.deepStrictEqual(decompiled.sort(), [CALLEE, CALLER, TAKER]);
+});
+
+test('an edit whose call signature held leaves the address takers alone', async () => {
+  const m = modelWithTaker();
+  const decompiled: string[] = [];
+  const ev = { seq: 1, kind: 'function.changed', target: 'function', key: CALLEE, callersUnaffected: true } as ChangeEvent;
+  await applyEvents(m, buildIndices(m), [ev], fakeClient(decompiled));
+  assert.deepStrictEqual(decompiled.sort(), [CALLEE]);
+});
+
+test('the address-taker index follows the operand references', () => {
+  const m = modelWithTaker();
+  const indices = buildIndices(m);
+  assert.deepStrictEqual([...(indices.addressTakersOf.get(CALLEE) ?? [])], [TAKER]);
+  assert.strictEqual(indices.addressTakersOf.get(TAKER), undefined);
+});

@@ -185,6 +185,12 @@ export interface ExtractedFunction {
    * predates the field.
    */
   callDivides?: import('./extract/call-divides.js').CallDivideFacts;
+  /**
+   * The global references the decompile prints under the name of one of the function's own
+   * parameters or locals, per line (extract/shadowed-globals.ts). Absent when there are none
+   * or the snapshot predates the field.
+   */
+  shadowedGlobals?: import('./extract/shadowed-globals.js').ShadowedGlobalFacts;
 }
 
 /**
@@ -409,6 +415,11 @@ export interface AnalyzedDataSymbol extends ExtractedGlobal {
   homeFile?: string;
   /** A homed global hand-written source names: declared in globals.h, not the data header. */
   homeDeclaredCentrally?: boolean;
+  /**
+   * A VC8 compile proved the TU that uses it does not define it (vc8-data-linkage.ts):
+   * never a file-local, never homed in a data run; the globals units define it.
+   */
+  definedElsewhere?: boolean;
   /** Structured initialized data (arrays, structs, pointers resolved to symbols) */
   initializedData?: DataValue;
   /** If struct-colocated, the struct type that owns it (e.g., "D2GameStrc") */
@@ -417,6 +428,12 @@ export interface AnalyzedDataSymbol extends ExtractedGlobal {
   ownerStructHeader?: string;
   /** An import slot (`importSlot`) no function's decompiled body names: not program data. */
   importSlotUnnamed?: boolean;
+  /**
+   * Data the compiler or linker made, which the source never declared (compiler-data.ts):
+   * a pooled string or float literal, the /GS cookie, RTTI, the image header. Not emitted;
+   * references are spelled as the construct that makes VC8 produce it.
+   */
+  compilerOutput?: import('./codegen/compiler-data.js').CompilerDataClass;
 }
 
 /**
@@ -543,6 +560,8 @@ export interface ProgramInfo {
    * predates it or the server could not list memory blocks.
    */
   dataSections?: Array<[number, number]>;
+  /** The data blocks no instruction may write, [start, end): `.rdata`. Absent before extraction recorded it. */
+  readOnlyDataSections?: Array<[number, number]>;
 }
 
 /**
@@ -562,6 +581,8 @@ export interface ReconstructedProject {
   buildInfo?: import('./modules/buildinfo.js').BuildInfo;
   /** Ghidra WARNING comments of the emitted functions, written as warnings.tsv */
   warnings?: import('./codegen/warning-facts.js').WarningRow[];
+  /** The module-library pass's reports (module-dag.tsv, module-public-api.tsv), path -> text */
+  moduleReports?: Map<string, string>;
 }
 
 /**
@@ -575,6 +596,11 @@ export interface SourceFile {
   className?: string;
   functions: string[];
   includes: string[];
+  /**
+   * The file exists to pass other headers on (a module's public header): its includes are
+   * its content, so the include pass keeps them as written.
+   */
+  reexport?: boolean;
 }
 
 /**
@@ -603,6 +629,11 @@ export interface FunctionMapping {
   address: string;
   /** Ghidra namespace (e.g. "Storm::Source::SBig") */
   namespace?: string;
+  /**
+   * The file the body is defined in when it is not this map's own: an inline host's
+   * header (codegen/inline-hosts.ts), included by every TU that calls it.
+   */
+  definedIn?: string;
   lines: LineMapping[];
   /** Functions called by this function */
   calledFunctions?: string[];

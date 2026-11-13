@@ -325,3 +325,53 @@ describe('declScopeSinkPlugin aliasing', () => {
       `invariant read should still sink, got:\n${output}`);
   });
 });
+
+describe('declScopeSinkPlugin pinned initialising store', () => {
+  function transformCode(code: string): string {
+    return emit(declScopeSinkPlugin.createTransformer({})(parse(code)) as AnyNode).trim();
+  }
+
+  // WndProcB 00451b30 as Ghidra prints it (after decl-init-merge): bHandled is zeroed
+  // at entry, before HandleWinProcMsg, and its address goes to SMsgDispatchMessage.
+  const WNDPROC = `LRESULT f(HWND hWnd, uint32_t uMsg, WPARAM wParam, LPARAM lParam) {
+    BOOL bHandled = 0;
+    HandleWinProcMsg(uMsg, wParam, lParam);
+    BOOL nHandled = IsPlaybackActive();
+    if (!nHandled || uMsg == 0x10) {
+      nHandled = SMsgDispatchMessage(hWnd, uMsg, wParam, lParam, &bHandled, &r);
+      if (nHandled && bHandled) { return r; }
+    }
+    return DefWindowProcA(hWnd, uMsg, wParam, lParam);
+  }`;
+
+  it('keeps an address-taken initialised local ahead of the calls it preceded', () => {
+    const output = transformCode(WNDPROC);
+    assert.ok(/\{\s*BOOL bHandled = 0;\s*HandleWinProcMsg/.test(output),
+      `bHandled = 0 must stay at entry, got:\n${output}`);
+  });
+
+  it('keeps it ahead of a call in the if condition', () => {
+    const output = transformCode('void f() { int x = 0; if (g()) { h(&x); } }');
+    assert.ok(output.includes('int x = 0;\n  if (g())'), `got:\n${output}`);
+  });
+
+  it('keeps it out of a loop whose condition calls', () => {
+    const output = transformCode('void f() { int x = 0; while (next()) { h(&x); } }');
+    assert.ok(output.includes('int x = 0;\n  while'), `got:\n${output}`);
+  });
+
+  it('still sinks it when no call runs before the target', () => {
+    const output = transformCode('void f() { int x = 0; if (c) { h(&x); } }');
+    assert.ok(output.includes('if (c) {\n    int x = 0;'), `got:\n${output}`);
+  });
+
+  it('still sinks an initialised local whose address is never taken', () => {
+    const output = transformCode('void f() { int x = 0; g(); if (c) { h(x); } }');
+    assert.ok(output.includes('if (c) {\n    int x = 0;'), `got:\n${output}`);
+  });
+
+  it('still sinks an address-taken local that has no initialiser', () => {
+    const output = transformCode('void f() { int x; g(); if (c) { h(&x); } }');
+    assert.ok(output.includes('if (c) {\n    int x;'), `got:\n${output}`);
+  });
+});
