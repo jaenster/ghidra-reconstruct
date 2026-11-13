@@ -23,7 +23,10 @@
  * Shape: four consecutive statements, `if (!P) return R;`, `V = P->F;` (or its declaration),
  * `X = C ? E : <null>;` whose condition's leftmost test reads V as one operand, and
  * `if (!X) return R;` with the same R, which neither calls nor writes and reads none of P, V
- * and X. P, V and X are three different names.
+ * and X. P, V and X are three different names. The record's guard may test more after X:
+ * `if (!X || ...)` or `if (!(X && ...))` (Missiles_SrvHitFunc_SpawnSubMissileAtWallHit
+ * 005abf70, `!(pMissileTxt && pMissileTxt->HitSubMissile1 >= 0)`); with X null its first
+ * test decides it, and the rest runs only with X, and so P, not null - as before.
  *
  * Gate (`branchLayout`): the null test, the range tests and X's null test leave through one
  * exit of the original: they lie in one decompiled `if`, or every return lies in one return
@@ -98,6 +101,39 @@ function nullTested(c: Expression): string | null {
   return o.kind === NodeKind.Identifier ? (o as Identifier).name : null;
 }
 
+/**
+ * The name the guard's first test checks for null: `!X` itself, the first operand of an
+ * `||` chain led by `!X`, or `!(X && ...)`. With X null that test alone decides the guard,
+ * and the tests after it run only with X not null. Null for any other condition.
+ */
+function nullTestedFirst(c: Expression): string | null {
+  const whole = nullTested(c);
+  if (whole) return whole;
+  let u = unwrap(c);
+  if (u.kind === NodeKind.BinaryExpr && (u as BinaryExpr).operator === '||') {
+    while (u.kind === NodeKind.BinaryExpr && (u as BinaryExpr).operator === '||') u = unwrap((u as BinaryExpr).left);
+    return nullTested(u);
+  }
+  if (u.kind !== NodeKind.UnaryExpr || (u as UnaryExpr).operator !== '!') return null;
+  const inner = unwrap((u as UnaryExpr).operand);
+  if (inner.kind !== NodeKind.BinaryExpr || (inner as BinaryExpr).operator !== '&&') return null;
+  const first = leftmost(inner);
+  return first.kind === NodeKind.Identifier ? (first as Identifier).name : null;
+}
+
+/** How many tests of the guard leave for its return: the operands of its `||` chain, or of `!(&&)`. */
+function exitTests(c: Expression): number {
+  let u = unwrap(c);
+  if (u.kind === NodeKind.UnaryExpr && (u as UnaryExpr).operator === '!') {
+    const inner = unwrap((u as UnaryExpr).operand);
+    if (inner.kind === NodeKind.BinaryExpr && (inner as BinaryExpr).operator === '&&') return conjuncts(inner).length;
+    return 1;
+  }
+  let n = 1;
+  while (u.kind === NodeKind.BinaryExpr && (u as BinaryExpr).operator === '||') { n++; u = unwrap((u as BinaryExpr).left); }
+  return n;
+}
+
 /** The leftmost test of an `&&` chain. */
 function leftmost(c: Expression): Expression {
   let u = unwrap(c);
@@ -151,7 +187,7 @@ function rewriteFunction(fn: FunctionDecl, opts: RecordNullFoldOptions): Functio
       const test = (tern as ConditionalExpr).condition;
       if (!pure(test) || !pure((tern as ConditionalExpr).thenExpr) || mentions(tern, rec.name)) continue;
       const g3 = returnGuard(st[i + 3]);
-      if (!g3 || nullTested(g3.cond) !== rec.name || !sameReturn(g0.ret, g3.ret)) continue;
+      if (!g3 || nullTestedFirst(g3.cond) !== rec.name || !sameReturn(g0.ret, g3.ret)) continue;
       const rv = g0.ret.value;
       if (rv && (!pure(rv) || mentions(rv, p) || mentions(rv, def.name) || mentions(rv, rec.name))) continue;
       const lm = leftmost(test);
@@ -167,7 +203,7 @@ function rewriteFunction(fn: FunctionDecl, opts: RecordNullFoldOptions): Functio
       const tests: ASTNode[] = [g0.cond, st[i + 2], placedLine(g3.cond) === null ? st[i + 2] : g3.cond];
       const lines = [placedLine(st[i]), placedLine(st[i + 2]), placedLine(st[i + 3])];
       const oneIf = lines.every(l => l !== null) && gate.oneCondition(lines as number[]);
-      if (!oneIf && !gate.sharedExit(rets, tests, conjuncts(test).length + 2, true)) continue;
+      if (!oneIf && !gate.sharedExit(rets, tests, conjuncts(test).length + 1 + exitTests(g3.cond), true)) continue;
       if (!gate.copyAfterTests(rets, tests)) continue;
       const cond = Expr.binary(Expr.identifier(p), '&&', folded);
       const value = Expr.conditional(cond, cloneNode((tern as ConditionalExpr).thenExpr), cloneNode((tern as ConditionalExpr).elseExpr));

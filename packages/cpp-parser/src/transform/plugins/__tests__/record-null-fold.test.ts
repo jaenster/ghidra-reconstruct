@@ -69,6 +69,29 @@ describe('record-null-fold', () => {
     assert.ok(out.includes('Rec* pTxt = pUnit && (nId = pUnit->nClassId) >= 0'), out);
   });
 
+  // Missiles_SrvHitFunc_SpawnSubMissileAtWallHit 005abf70: the record's guard tests a field
+  // after the record; with pUnit null the record is null and `!pTxt` decides it alone.
+  const MORE = SITE.map(l => l === '  if (!pTxt) {' ? '  if (!pTxt || pTxt->nSub < 0) {' : l);
+  it('folds when the record guard tests more after the record, as `!X || ...`', () => {
+    const r = run(MORE, layout(MORE, [2, 9]));
+    assert.deepStrictEqual(r.sites, ['pUnit:pTxt']);
+    assert.ok(r.out.includes('int nId; Rec* pTxt = pUnit && (nId = pUnit->nClassId) >= 0 && nId < gT->nSize ? gT->pTxt + nId : nullptr; if (!pTxt || pTxt->nSub < 0) { return 1; }'), r.out);
+  });
+
+  it('folds when the record guard is `!(X && ...)`', () => {
+    const lines = SITE.map(l => l === '  if (!pTxt) {' ? '  if (!(pTxt && pTxt->nSub >= 0)) {' : l);
+    const r = run(lines, layout(lines, [2, 9]));
+    assert.deepStrictEqual(r.sites, ['pUnit:pTxt']);
+    assert.ok(r.out.includes('if (!(pTxt && pTxt->nSub >= 0)) { return 1; }'), r.out);
+  });
+
+  it('leaves the guard when the record is not its first test', () => {
+    for (const g of ['  if (gFlag || !pTxt) {', '  if (!(gFlag && pTxt)) {', '  if (!pTxt && gFlag) {']) {
+      const lines = SITE.map(l => l === '  if (!pTxt) {' ? g : l);
+      assert.deepStrictEqual(run(lines, layout(lines, [2, 9])).sites, [], g);
+    }
+  });
+
   it('changes nothing without the facts', () => {
     assert.deepStrictEqual(run(SITE, null).sites, []);
   });
