@@ -4181,6 +4181,14 @@ function transformDecompiledCode(
       } : {}),
     };
 
+    // A call result shifted at every read is shifted once where it is stored (shift-def.ts);
+    // the callee's return type says whether the value needs its local's type first.
+    perPluginOptions['shift-def'] = {
+      functionReturnTypes: context?.funcPtrArgCasts?.functionReturnTypes,
+      onSite: (e: { line: number; name: string; shift: number; reads: number }) =>
+        console.warn(`[shift-def] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.name} >> ${e.shift} (${e.reads} reads) on line ${e.line}`),
+    };
+
     // A call argument the original loaded into its own base register gets a local
     // (base-register-load.ts); independent stores go in the original's instruction order
     // (store-order.ts). Without the facts nothing changes.

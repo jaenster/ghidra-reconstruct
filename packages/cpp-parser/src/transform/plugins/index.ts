@@ -578,6 +578,12 @@ export {
 } from './builtins/copy-coalesce.js';
 
 export {
+  shiftDefPlugin,
+  createShiftDefTransformer,
+  type ShiftDefOptions,
+} from './builtins/shift-def.js';
+
+export {
   paramSlotLocalPlugin,
   createParamSlotLocalTransformer,
   type ParamSlotLocalOptions,
@@ -964,6 +970,7 @@ import { armConstantCallPlugin } from './builtins/arm-constant-call.js';
 import { fieldPointerFoldPlugin } from './builtins/field-pointer-fold.js';
 import { newResultTempPlugin } from './builtins/new-result-temp.js';
 import { loopCopySinkPlugin } from './builtins/loop-copy-sink.js';
+import { shiftDefPlugin } from './builtins/shift-def.js';
 import { paramSlotLocalPlugin } from './builtins/param-slot-local.js';
 import { joinStoreTempPlugin } from './builtins/join-store-temp.js';
 import { stormNextLinkPlugin } from './builtins/storm-next-link.js';
@@ -1208,6 +1215,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   fieldPointerFoldPlugin,     // Matching: a field-pointer temporary goes; the field updated in place or the record held (priority 62.5)
   newResultTempPlugin,        // Matching: an allocation constructed in place gets a temporary; the result assigned after (priority 62.6)
   loopCopySinkPlugin,         // Matching: a loop-carried copy placed mid-body moves to the end of the body (priority 62.7)
+  shiftDefPlugin,             // Matching: a call result every read shifts by one constant is shifted once, where it is stored (priority 62.8)
   paramSlotLocalPlugin,       // Matching: a local packed into a loaded parameter's slot gets its own variable back (priority 940)
   joinStoreTempPlugin,        // Matching: a member every arm stores into is stored once after the join, through a temporary (priority 970)
   pointeeClearMemsetPlugin,   // Matching: zero stores to every member of *P the original makes from one register become the memset (priority 975)
