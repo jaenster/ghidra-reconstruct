@@ -794,6 +794,7 @@ export { unsignedRangeComparePlugin } from './builtins/unsigned-range-compare.js
 export { rangeTestFormPlugin } from './builtins/range-test-form.js';
 export { zextSitePlugin, createZextSiteTransformer, type ZextOperatorSite, type ZextSiteOptions } from './builtins/zext-site.js';
 export { signedDivideSitePlugin, createSignedDivideSiteTransformer, type SignedDivideOperatorSite, type SignedDivideSiteOptions } from './builtins/signed-divide-site.js';
+export { truncatingRoundSitePlugin, createTruncatingRoundSiteTransformer, type TruncatingRoundSiteOptions } from './builtins/truncating-round-site.js';
 export { zeroExtendSitePlugin, zeroExtendCastPlugin, createZeroExtendSiteTransformer, createZeroExtendCastTransformer, type ZeroExtendMaskSite, type ZeroExtendSiteOptions, type ZeroExtendCastOptions } from './builtins/zero-extend-cast.js';
 export { shiftCountMaskPlugin, createShiftCountMaskTransformer, type ShiftCountMaskOptions } from './builtins/shift-count-mask.js';
 export { createFunctionRanges, type ValueRange, type FunctionRanges } from './builtins/value-range.js';
@@ -904,6 +905,7 @@ import { shiftCountMaskPlugin } from './builtins/shift-count-mask.js';
 import { zeroExtendSitePlugin, zeroExtendCastPlugin } from './builtins/zero-extend-cast.js';
 import { zextSitePlugin } from './builtins/zext-site.js';
 import { signedDivideSitePlugin } from './builtins/signed-divide-site.js';
+import { truncatingRoundSitePlugin } from './builtins/truncating-round-site.js';
 import { compareFormPlugin } from './builtins/compare-form.js';
 import { repStringFormPlugin } from './builtins/rep-string-form.js';
 import { compareSignednessPlugin } from './builtins/compare-signedness.js';
@@ -1166,6 +1168,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   zeroExtendSitePlugin,       // Matching: tag each byte/word mask a MOVZX computed (priority 3)
   zextSitePlugin,             // Correctness: tag each operation whose result the decompiler zero-extended (priority 3)
   signedDivideSitePlugin,     // Matching: tag each division of a cast dividend the original computes with IDIV (priority 3)
+  truncatingRoundSitePlugin,  // Correctness: native-proven x87 truncation under an integer cast (priority 3)
   zeroExtendCastPlugin,       // Matching: a tagged x & 0xffff -> (uint16_t)x where value and type are kept (priority 622)
   compareFormPlugin,          // Fidelity: a comparison in the form its CMP/TEST and Jcc show (priority 3)
   repStringFormPlugin,        // Fidelity: a REP STOS fill as an index loop, a REP MOVS copy as memcpy, from the instruction (priority 4)

@@ -1826,6 +1826,7 @@ export function generateFunctionImplementation(
           maskSites: override?.action === 'patch' ? undefined : func.maskSites,
           zextSites: override?.action === 'patch' ? undefined : func.zextSites,
           signedDivides: override?.action === 'patch' ? undefined : func.signedDivides,
+          truncatingRounds: override?.action === 'patch' ? undefined : func.truncatingRounds,
           // A text patch anchors on the stores as Ghidra printed them.
           registerStores: override?.action === 'patch' ? undefined : func.registerStores,
           // A text patch anchors on the shifts as Ghidra printed them.
@@ -2932,6 +2933,7 @@ function transformDecompiledCode(
     zextSites?: import('../extract/zext-sites.js').ZextSiteFacts;
     /** The `/` and `%` operators the original computes with IDIV (extract/signed-divides.ts). */
     signedDivides?: import('../extract/signed-divides.js').SignedDivideFacts;
+    truncatingRounds?: import('../extract/truncating-rounds.js').TruncatingRoundFacts;
     /** The constants the original stores from a register (extract/register-stores.ts). */
     registerStores?: import('../extract/register-stores.js').RegisterStoreFacts;
     /** The rotates by an immediate the original performs, per line (extract/rotate-sites.ts). */
@@ -3793,6 +3795,9 @@ function transformDecompiledCode(
     // Divisions the original computes with IDIV, tagged before any pass reshapes them.
     if (enclosing?.signedDivides) {
       perPluginOptions['signed-divide-site'] = { counts: enclosing.signedDivides.counts, sites: enclosing.signedDivides.sites };
+    }
+    if (enclosing?.truncatingRounds) {
+      perPluginOptions['truncating-round-site'] = enclosing.truncatingRounds;
     }
     if (enclosing?.compareForm) {
       perPluginOptions['compare-form'] = {

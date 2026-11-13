@@ -163,6 +163,8 @@ export interface ExtractedFunction {
    * Absent when there are none, the text changed since, or the snapshot predates the field.
    */
   signedDivides?: import('./extract/signed-divides.js').SignedDivideFacts;
+  /** ROUND tokens whose FISTP explicitly selects RC=truncate; exact-text gated. */
+  truncatingRounds?: import('./extract/truncating-rounds.js').TruncatingRoundFacts;
   /**
    * The constants the original stores to memory from a register, by the name the left side
    * ends in, with the immediate stores of the same function (extract/register-stores.ts).

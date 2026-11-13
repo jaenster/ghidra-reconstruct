@@ -120,6 +120,7 @@ export const FUNCTION_HASH_FIELDS = {
   maskSites: 'hashed',
   zextSites: 'hashed',
   signedDivides: 'hashed',
+  truncatingRounds: 'hashed',
   registerStores: 'hashed',
   rotateSites: 'hashed',
   storeBases: 'hashed',

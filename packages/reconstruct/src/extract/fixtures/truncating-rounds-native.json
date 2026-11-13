@@ -1,0 +1,707 @@
+{
+  "source": "Game.exe Diablo II 1.14d",
+  "sha256": "631066c1649c4ea9ffe48bf97e24c00bca1f7a6759c21150f1a79982589adaaf",
+  "note": "Native instruction windows decoded independently with Capstone 5.0.7. Manually inspected facts, not a live function-facts extraction. One PUSH-containing window deliberately fails the narrow proof.",
+  "windows": [
+    {
+      "function": "00605080",
+      "conversion": "006050b9",
+      "width": 4,
+      "expected": 4,
+      "instructions": [
+        [
+          "d97dfe",
+          "FNSTCW",
+          null,
+          false
+        ],
+        [
+          "0fb745fe",
+          "MOVZX",
+          "EAX",
+          false
+        ],
+        [
+          "d8c9",
+          "FMUL",
+          null,
+          false
+        ],
+        [
+          "0d000c0000",
+          "OR",
+          "EAX",
+          false
+        ],
+        [
+          "8945f8",
+          "MOV",
+          null,
+          false
+        ],
+        [
+          "d96df8",
+          "FLDCW",
+          null,
+          false
+        ],
+        [
+          "db5df8",
+          "FISTP",
+          null,
+          false
+        ]
+      ]
+    },
+    {
+      "function": "00605080",
+      "conversion": "0060513e",
+      "width": 4,
+      "expected": 4,
+      "instructions": [
+        [
+          "d97dfe",
+          "FNSTCW",
+          null,
+          false
+        ],
+        [
+          "0fb745fe",
+          "MOVZX",
+          "EAX",
+          false
+        ],
+        [
+          "0d000c0000",
+          "OR",
+          "EAX",
+          false
+        ],
+        [
+          "8945f8",
+          "MOV",
+          null,
+          false
+        ],
+        [
+          "d96df8",
+          "FLDCW",
+          null,
+          false
+        ],
+        [
+          "db5df8",
+          "FISTP",
+          null,
+          false
+        ]
+      ]
+    },
+    {
+      "function": "00605080",
+      "conversion": "0060517a",
+      "width": 4,
+      "expected": 4,
+      "instructions": [
+        [
+          "d97dfe",
+          "FNSTCW",
+          null,
+          false
+        ],
+        [
+          "83ec18",
+          "SUB",
+          "ESP",
+          false
+        ],
+        [
+          "0fb745fe",
+          "MOVZX",
+          "EAX",
+          false
+        ],
+        [
+          "0d000c0000",
+          "OR",
+          "EAX",
+          false
+        ],
+        [
+          "8945f8",
+          "MOV",
+          null,
+          false
+        ],
+        [
+          "d96df8",
+          "FLDCW",
+          null,
+          false
+        ],
+        [
+          "db5df8",
+          "FISTP",
+          null,
+          false
+        ]
+      ]
+    },
+    {
+      "function": "00605080",
+      "conversion": "006051bd",
+      "width": 4,
+      "expected": 4,
+      "instructions": [
+        [
+          "d97dfe",
+          "FNSTCW",
+          null,
+          false
+        ],
+        [
+          "0fb745fe",
+          "MOVZX",
+          "EAX",
+          false
+        ],
+        [
+          "dcc9",
+          "FMUL",
+          null,
+          false
+        ],
+        [
+          "0d000c0000",
+          "OR",
+          "EAX",
+          false
+        ],
+        [
+          "d9c9",
+          "FXCH",
+          null,
+          false
+        ],
+        [
+          "8945f8",
+          "MOV",
+          null,
+          false
+        ],
+        [
+          "d96df8",
+          "FLDCW",
+          null,
+          false
+        ],
+        [
+          "db5df8",
+          "FISTP",
+          null,
+          false
+        ]
+      ]
+    },
+    {
+      "function": "00605f00",
+      "conversion": "00606824",
+      "width": 4,
+      "expected": 0,
+      "instructions": [
+        [
+          "d97d0e",
+          "FNSTCW",
+          null,
+          false
+        ],
+        [
+          "0fb7450e",
+          "MOVZX",
+          "EAX",
+          false
+        ],
+        [
+          "0d000c0000",
+          "OR",
+          "EAX",
+          false
+        ],
+        [
+          "8945f8",
+          "MOV",
+          null,
+          false
+        ],
+        [
+          "8b4508",
+          "MOV",
+          "EAX",
+          false
+        ],
+        [
+          "6a00",
+          "PUSH",
+          null,
+          false
+        ],
+        [
+          "d96df8",
+          "FLDCW",
+          null,
+          false
+        ],
+        [
+          "6a00",
+          "PUSH",
+          null,
+          false
+        ],
+        [
+          "db5df8",
+          "FISTP",
+          null,
+          false
+        ]
+      ]
+    },
+    {
+      "function": "0061bce0",
+      "conversion": "0061bdbe",
+      "width": 4,
+      "expected": 4,
+      "instructions": [
+        [
+          "d97d0a",
+          "FNSTCW",
+          null,
+          false
+        ],
+        [
+          "0fb7450a",
+          "MOVZX",
+          "EAX",
+          false
+        ],
+        [
+          "deca",
+          "FMULP",
+          null,
+          false
+        ],
+        [
+          "0d000c0000",
+          "OR",
+          "EAX",
+          false
+        ],
+        [
+          "8945fc",
+          "MOV",
+          null,
+          false
+        ],
+        [
+          "dec1",
+          "FADDP",
+          null,
+          false
+        ],
+        [
+          "d96dfc",
+          "FLDCW",
+          null,
+          false
+        ],
+        [
+          "db5dfc",
+          "FISTP",
+          null,
+          false
+        ]
+      ]
+    },
+    {
+      "function": "00679190",
+      "conversion": "00679212",
+      "width": 4,
+      "expected": 4,
+      "instructions": [
+        [
+          "d97dfe",
+          "FNSTCW",
+          null,
+          false
+        ],
+        [
+          "0fb745fe",
+          "MOVZX",
+          "EAX",
+          false
+        ],
+        [
+          "0d000c0000",
+          "OR",
+          "EAX",
+          false
+        ],
+        [
+          "8945f4",
+          "MOV",
+          null,
+          false
+        ],
+        [
+          "d96df4",
+          "FLDCW",
+          null,
+          false
+        ],
+        [
+          "db5df4",
+          "FISTP",
+          null,
+          false
+        ]
+      ]
+    },
+    {
+      "function": "00679190",
+      "conversion": "0067923b",
+      "width": 4,
+      "expected": 4,
+      "instructions": [
+        [
+          "d97dfe",
+          "FNSTCW",
+          null,
+          false
+        ],
+        [
+          "5f",
+          "POP",
+          "EDI",
+          false
+        ],
+        [
+          "0fb745fe",
+          "MOVZX",
+          "EAX",
+          false
+        ],
+        [
+          "0d000c0000",
+          "OR",
+          "EAX",
+          false
+        ],
+        [
+          "8945f4",
+          "MOV",
+          null,
+          false
+        ],
+        [
+          "d96df4",
+          "FLDCW",
+          null,
+          false
+        ],
+        [
+          "db5df4",
+          "FISTP",
+          null,
+          false
+        ]
+      ]
+    },
+    {
+      "function": "00679250",
+      "conversion": "0067933b",
+      "width": 4,
+      "expected": 4,
+      "instructions": [
+        [
+          "d97dfe",
+          "FNSTCW",
+          null,
+          false
+        ],
+        [
+          "0fb745fe",
+          "MOVZX",
+          "EAX",
+          false
+        ],
+        [
+          "0d000c0000",
+          "OR",
+          "EAX",
+          false
+        ],
+        [
+          "8945f4",
+          "MOV",
+          null,
+          false
+        ],
+        [
+          "d96df4",
+          "FLDCW",
+          null,
+          false
+        ],
+        [
+          "db5df4",
+          "FISTP",
+          null,
+          false
+        ]
+      ]
+    },
+    {
+      "function": "00679250",
+      "conversion": "00679362",
+      "width": 4,
+      "expected": 4,
+      "instructions": [
+        [
+          "d97dfe",
+          "FNSTCW",
+          null,
+          false
+        ],
+        [
+          "0fb745fe",
+          "MOVZX",
+          "EAX",
+          false
+        ],
+        [
+          "0d000c0000",
+          "OR",
+          "EAX",
+          false
+        ],
+        [
+          "8945f4",
+          "MOV",
+          null,
+          false
+        ],
+        [
+          "d96df4",
+          "FLDCW",
+          null,
+          false
+        ],
+        [
+          "db5df4",
+          "FISTP",
+          null,
+          false
+        ]
+      ]
+    },
+    {
+      "function": "0067a140",
+      "conversion": "0067a1ac",
+      "width": 8,
+      "expected": 8,
+      "instructions": [
+        [
+          "d97dfe",
+          "FNSTCW",
+          null,
+          false
+        ],
+        [
+          "0fb745fe",
+          "MOVZX",
+          "EAX",
+          false
+        ],
+        [
+          "0d000c0000",
+          "OR",
+          "EAX",
+          false
+        ],
+        [
+          "8945e4",
+          "MOV",
+          null,
+          false
+        ],
+        [
+          "d96de4",
+          "FLDCW",
+          null,
+          false
+        ],
+        [
+          "df7de0",
+          "FISTP",
+          null,
+          false
+        ]
+      ]
+    },
+    {
+      "function": "0067a140",
+      "conversion": "0067a1dd",
+      "width": 8,
+      "expected": 8,
+      "instructions": [
+        [
+          "d97dfe",
+          "FNSTCW",
+          null,
+          false
+        ],
+        [
+          "0fb745fe",
+          "MOVZX",
+          "EAX",
+          false
+        ],
+        [
+          "0d000c0000",
+          "OR",
+          "EAX",
+          false
+        ],
+        [
+          "8945e4",
+          "MOV",
+          null,
+          false
+        ],
+        [
+          "8bce",
+          "MOV",
+          "ECX",
+          false
+        ],
+        [
+          "c1e910",
+          "SHR",
+          "ECX",
+          false
+        ],
+        [
+          "d96de4",
+          "FLDCW",
+          null,
+          false
+        ],
+        [
+          "c1ea10",
+          "SHR",
+          "EDX",
+          false
+        ],
+        [
+          "df7de0",
+          "FISTP",
+          null,
+          false
+        ]
+      ]
+    },
+    {
+      "function": "0047cc90",
+      "conversion": "0047ccf1",
+      "width": 8,
+      "expected": 8,
+      "instructions": [
+        [
+          "d97d0a",
+          "FNSTCW",
+          null,
+          false
+        ],
+        [
+          "0fb7450a",
+          "MOVZX",
+          "EAX",
+          false
+        ],
+        [
+          "0d000c0000",
+          "OR",
+          "EAX",
+          false
+        ],
+        [
+          "8945fc",
+          "MOV",
+          null,
+          false
+        ],
+        [
+          "d96dfc",
+          "FLDCW",
+          null,
+          false
+        ],
+        [
+          "df7df8",
+          "FISTP",
+          null,
+          false
+        ]
+      ]
+    },
+    {
+      "function": "0047cd00",
+      "conversion": "0047cd6f",
+      "width": 8,
+      "expected": 8,
+      "instructions": [
+        [
+          "d97dfe",
+          "FNSTCW",
+          null,
+          true
+        ],
+        [
+          "0fb745fe",
+          "MOVZX",
+          "EAX",
+          false
+        ],
+        [
+          "dec1",
+          "FADDP",
+          null,
+          false
+        ],
+        [
+          "0d000c0000",
+          "OR",
+          "EAX",
+          false
+        ],
+        [
+          "8945f8",
+          "MOV",
+          null,
+          false
+        ],
+        [
+          "d96df8",
+          "FLDCW",
+          null,
+          false
+        ],
+        [
+          "df7df4",
+          "FISTP",
+          null,
+          false
+        ]
+      ]
+    }
+  ]
+}
