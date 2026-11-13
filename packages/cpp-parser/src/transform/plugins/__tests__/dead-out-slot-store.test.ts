@@ -95,6 +95,18 @@ describe('dead-out-slot-store', () => {
     assert.match(run(`void f(D2GameStrc *pGame) { int n; n = (int)pGame; g(pGame); GetFrames(h(), 0, &n); }`), /n = \(int\)pGame;/);
     assert.match(run(`void f(D2GameStrc *pGame) { int n; int *p; n = (int)pGame; p = &n; GetFrames(pGame, 0, &n); }`), /n = \(int\)pGame;/);
   });
+  // UI_SLIDER_InitContrast 0047d2f0: PUSH ECX, the slot then given its default by a store.
+  it('drops the store when a later plain store overwrites x before anything names it', () => {
+    const out = run(`void f(D2GameStrc *pGame) { int n; int m; n = (int)pGame; m = Mode(); n = m != 1 ? 100 : 0; Load(&n); Use(pGame, n); }`);
+    assert.doesNotMatch(out, /n = \(int\)pGame/);
+    assert.match(out, /int n; int m; m = Mode\(\); n = m != 1 \? 100 : 0; Load\(&n\);/);
+  });
+  it('keeps the store when x is named before the overwrite, the overwrite reads x, or a label lies between', () => {
+    assert.match(run(`void f(D2GameStrc *pGame) { int n; n = (int)pGame; Use(n); n = 0; Load(&n); }`), /n = \(int\)pGame;/);
+    assert.match(run(`void f(D2GameStrc *pGame) { int n; n = (int)pGame; Mode(); n = n + 1; Load(&n); }`), /n = \(int\)pGame;/);
+    assert.match(run(`void f(D2GameStrc *pGame) { int n; n = (int)pGame; L: Mode(); n = 0; Load(&n); if (pGame) goto L; }`), /n = \(int\)pGame;/);
+    assert.match(run(`void f(D2GameStrc *pGame) { int n; if (pGame) { n = (int)pGame; Mode(); n = 0; Load(&n); } }`), /n = \(int\)pGame;/);
+  });
   it('the call may be the value of an assignment or an initializer', () => {
     const out = run(`void f(D2UnitStrc *pUnit, D2GameStrc *pGame) { int n; int r; n = (int)pGame; r = GetFrames(pUnit, 0, &n); use(n, r); }`);
     assert.doesNotMatch(out, /n = \(int\)pGame/);
