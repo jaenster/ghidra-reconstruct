@@ -1104,3 +1104,219 @@ describe('vc8-form: swmerge', () => {
     assert.match(sites[0].why!, /too wide|more than 64/);
   });
 });
+
+describe('vc8-form: opas', () => {
+  const PLUS = [
+    'void dummy(Access* pGatewayAccess) {',
+    '  int32_t nSelectedLine = GetSelectedLine();',
+    '  if (nSelectedLine != -1) {',
+    '    char* pszRealmName;',
+    '    SetCurGateway(pGatewayAccess, nSelectedLine + 1);',
+    '    pszRealmName = Realm(pGatewayAccess, nSelectedLine + 1);',
+    '    Save(pszRealmName);',
+    '  }',
+    '}',
+  ];
+  const BYTE = [
+    'void dummy(MonStats* pMonStatLine, Unit* pUnit) {',
+    '  uint8_t byMinGrp = pMonStatLine->MinGrp;',
+    '  uint8_t byMaxGrp = pMonStatLine->MaxGrp;',
+    '  if (byMinGrp && byMaxGrp && byMaxGrp >= byMinGrp) {',
+    '    if (!pUnit) { return; }',
+    '    nMinionCount = RNG((uint32_t)(uint8_t)(byMinGrp - 1));',
+    '    for (nMinionIdx = nMinionCount + (uint8_t)(byMinGrp - 1); nMinionIdx > 0; nMinionIdx--) { Spawn(); }',
+    '  }',
+    '}',
+  ];
+  const PAIR = [
+    'void dummy(Path* pDynamicPath, int32_t nX, int32_t nY) {',
+    '  DRLG_WorldToScreenNoShift(&nX, &nY);',
+    '  pDynamicPath->nTargetX = (short int)(nX >> 0xb);',
+    '  pDynamicPath->nTargetY = (short int)(nY >> 0xb);',
+    '}',
+  ];
+  it('parses only named, literal, nonduplicated updates', () => {
+    assert.deepStrictEqual(parseVc8Form('opas(nSelectedLine,+,1)'), { op: 'opas', updates: [{ name: 'nSelectedLine', operator: '+', constant: '1' }] });
+    assert.deepStrictEqual(parseVc8Form('opas(nX,>>,0xb)'), { op: 'opas', updates: [{ name: 'nX', operator: '>>', constant: '0xb' }] });
+    assert.strictEqual(parseVc8Form('opas(nX,>>,0xb,nY,>>,0xb)'), undefined);
+    assert.strictEqual(parseVc8Form('opas(nX,>>,f())'), undefined);
+    assert.strictEqual(parseVc8Form('opas(nX,>>,0xb,@site)'), undefined);
+  });
+  it('updates a guarded int32 local once before two calls', () => {
+    const plain = run(PLUS);
+    const { out, sites } = run(PLUS, 'opas(nSelectedLine,+,1)');
+    assert.ok(sites[0].applied, sites[0].why);
+    assert.notStrictEqual(out, plain.out);
+    assert.match(out, /if \(nSelectedLine != -1\) \{ char\* pszRealmName; nSelectedLine \+= 1; SetCurGateway\(pGatewayAccess, nSelectedLine\); pszRealmName = Realm\(pGatewayAccess, nSelectedLine\);/);
+  });
+  it('narrows a guarded byte update before both uses', () => {
+    const { out, sites } = run(BYTE, 'opas(byMinGrp,-,1)');
+    assert.ok(sites[0].applied, sites[0].why);
+    assert.match(out, /byMinGrp -= 1; nMinionCount = RNG\(\(uint32_t\)\(uint8_t\)byMinGrp\); for \(nMinionIdx = nMinionCount \+ \(uint8_t\)byMinGrp;/);
+  });
+  const FLAT_BYTE = [
+    'void dummy(MonStats* pMonStatLine, Unit* pUnit) {',
+    '  uint8_t byMinGrp = pMonStatLine->MinGrp;',
+    '  uint8_t byMaxGrp = pMonStatLine->MaxGrp;',
+    '  if (!(byMinGrp && byMaxGrp && byMinGrp <= byMaxGrp)) return;',
+    '  if (!pUnit) return;',
+    '  uint32_t nMinionCount = RNG((uint8_t)(byMinGrp - 1));',
+    '  for (nMinionIdx = nMinionCount + (uint8_t)(byMinGrp - 1); nMinionIdx > 0; nMinionIdx--) { Spawn(); }',
+    '}',
+  ];
+  it('accepts a flattened early-return byte guard and initialized first use', () => {
+    const { out, sites } = run(FLAT_BYTE, 'opas(byMinGrp,-,1)');
+    assert.ok(sites[0].applied, sites[0].why);
+    assert.match(out, /if \(!\(byMinGrp && byMaxGrp && byMinGrp <= byMaxGrp\)\) return; if \(!pUnit\) return; byMinGrp -= 1; uint32_t nMinionCount = RNG\(\(uint8_t\)byMinGrp\);/);
+  });
+  it('refuses a missing or changed flattened byte guard, mutation, escape, and bypass jump', () => {
+    const variants = [
+      FLAT_BYTE.filter(s => !s.includes('if (!(byMinGrp')),
+      FLAT_BYTE.map(s => s.replace('if (!(byMinGrp && byMaxGrp && byMinGrp <= byMaxGrp))', 'if (!byMaxGrp)')),
+      FLAT_BYTE.flatMap(s => s.includes('if (!pUnit)') ? ['  byMinGrp = byMaxGrp;', s] : [s]),
+      FLAT_BYTE.flatMap(s => s.includes('if (!pUnit)') ? ['  Leak(&byMinGrp);', s] : [s]),
+      FLAT_BYTE.flatMap(s => s.includes('if (!(byMinGrp') ? ['  if (pUnit) goto L;', s, 'L: ;'] : [s]),
+      FLAT_BYTE.flatMap(s => s.includes('if (!(byMinGrp') ? ['  CaptureRef(byMinGrp);', s] : [s]),
+      FLAT_BYTE.map(s => s.replace('if (!(byMinGrp && byMaxGrp && byMinGrp <= byMaxGrp))',
+        'if (!(byMinGrp && CaptureRef(byMinGrp) && byMinGrp <= byMaxGrp))')),
+      // A class-typed operand can dispatch overloaded logical/comparison operators.
+      FLAT_BYTE.map(s => s.replace('uint8_t byMaxGrp', 'Guard byMaxGrp')),
+      FLAT_BYTE.map(s => s.replace('byMinGrp <= byMaxGrp', 'byMaxGrp >= byMinGrp')),
+      ['extern uint8_t byMinGrp;', FLAT_BYTE[0], '  if (!byMinGrp) return;',
+        FLAT_BYTE[1], FLAT_BYTE[2], ...FLAT_BYTE.slice(4)],
+    ];
+    for (const source of variants) {
+      const plain = run(source);
+      const tagged = run(source, 'opas(byMinGrp,-,1)');
+      assert.strictEqual(tagged.sites[0].applied, false, source.join('\n'));
+      assert.strictEqual(tagged.out, plain.out, source.join('\n'));
+    }
+  });
+  it('writes each tagged shift after the address call, in tag order', () => {
+    const both = run(PAIR, 'opas(nX,>>,0xb)', 'opas(nY,>>,0xb)');
+    assert.ok(both.sites.every(s => s.applied), both.sites.map(s => s.why).join('; '));
+    assert.match(both.out, /DRLG_WorldToScreenNoShift\(&nX, &nY\); nX >>= 0xb; nY >>= 0xb; pDynamicPath->nTargetX = \(short int\)nX; pDynamicPath->nTargetY = \(short int\)nY;/);
+    const one = run(PAIR, 'opas(nY,>>,0xb)');
+    assert.ok(one.sites[0].applied, one.sites[0].why);
+    assert.match(one.out, /DRLG_WorldToScreenNoShift\(&nX, &nY\); nY >>= 0xb; pDynamicPath->nTargetX = \(short int\)\(nX >> 0xb\); pDynamicPath->nTargetY = \(short int\)nY;/);
+  });
+  it('shifts any unstored 32-bit variable, not one callee or field', () => {
+    const local = run([
+      'void dummy(S* p) {',
+      '  uint32_t v = Get();',
+      '  Use(1);',
+      '  p->a = v >> 4;',
+      '  if (p->b) p->c = v >> 4;',
+      '}',
+    ], 'opas(v,>>,4)');
+    assert.ok(local.sites[0].applied, local.sites[0].why);
+    assert.match(local.out, /uint32_t v = Get\(\); v >>= 4; Use\(1\); p->a = v; if \(p->b\) p->c = v;/);
+    const param = run(['void dummy(S* p, int n) { Other(&n); p->a = (short int)(n >> 3); }'], 'opas(n,>>,3)');
+    assert.ok(param.sites[0].applied, param.sites[0].why);
+    assert.match(param.out, /Other\(&n\); n >>= 3; p->a = \(short int\)n;/);
+  });
+  it('keeps untagged source and stale tagged source unchanged', () => {
+    const untagged = run(PLUS);
+    assert.deepStrictEqual(untagged.sites, []);
+    const staleInput = PLUS.map(l => l.replace('pszRealmName = Realm(pGatewayAccess, nSelectedLine + 1);',
+      'pszRealmName = Realm(pGatewayAccess, nSelectedLine + 2);'));
+    const stalePlain = run(staleInput);
+    const staleTagged = run(staleInput, 'opas(nSelectedLine,+,1)');
+    assert.strictEqual(staleTagged.sites[0].applied, false);
+    assert.strictEqual(staleTagged.out, stalePlain.out);
+    const shiftInput = PAIR.map(l => l.replace('nX >> 0xb', 'nX >> 0xc'));
+    const shiftPlain = run(shiftInput);
+    const shiftStale = run(shiftInput, 'opas(nX,>>,0xb)');
+    assert.strictEqual(shiftStale.sites[0].applied, false);
+    assert.strictEqual(shiftStale.out, shiftPlain.out);
+  });
+  it('refuses shadowed bindings, stale reads, impure operands and crossing a call', () => {
+    const shadow = run(PLUS.map(l => l.replace('char* pszRealmName;', 'int32_t nSelectedLine = 0; char* pszRealmName;')), 'opas(nSelectedLine,+,1)');
+    assert.match(shadow.sites[0].why!, /shadowed/);
+    const stale = run(PLUS.map(l => l.replace('Save(pszRealmName);', 'Save(pszRealmName); Use(nSelectedLine);')), 'opas(nSelectedLine,+,1)');
+    assert.match(stale.sites[0].why!, /read after/);
+    const impure = run(PLUS.map(l => l.replace(/nSelectedLine \+ 1/g, 'nSelectedLine + Next()')), 'opas(nSelectedLine,+,1)');
+    assert.match(impure.sites[0].why!, /0 adjacent/);
+    const unsignedLiteral = run(PLUS.map(l => l.replace(/nSelectedLine \+ 1/g, 'nSelectedLine + 1U')), 'opas(nSelectedLine,+,1)');
+    assert.match(unsignedLiteral.sites[0].why!, /0 adjacent/);
+    const crossed = run(PLUS.map(l => l.replace('pszRealmName = Realm', 'Touch(); pszRealmName = Realm')), 'opas(nSelectedLine,+,1)');
+    assert.match(crossed.sites[0].why!, /0 adjacent/);
+    const siblingCall = run([
+      'void dummy() {',
+      '  int32_t v = Get();',
+      '  if (v != -1) {',
+      '    Use(Explode(), v + 1);',
+      '    Use(v + 1);',
+      '  }',
+      '}',
+    ], 'opas(v,+,1)');
+    assert.match(siblingCall.sites[0].why!, /another effect/);
+    const innerDeclaration = run([
+      'void dummy() {',
+      '  if (nSelectedLine != -1) {',
+      '    int32_t nSelectedLine = GetSelectedLine();',
+      '    SetCurGateway(nSelectedLine + 1);',
+      '    Realm(nSelectedLine + 1);',
+      '  }',
+      '}',
+    ], 'opas(nSelectedLine,+,1)');
+    assert.match(innerDeclaration.sites[0].why!, /declared before its guard/);
+    const conditionalUses = run([
+      'void dummy(int c, int d) {',
+      '  int32_t v = Get();',
+      '  if (v != -1) {',
+      '    if (c) Use(v + 1);',
+      '    if (d) Use(v + 1);',
+      '  }',
+      '}',
+    ], 'opas(v,+,1)');
+    assert.match(conditionalUses.sites[0].why!, /not evaluated when their statements begin/);
+  });
+  it('refuses byte width, changed narrowing and an unproven guard', () => {
+    const wide = run(BYTE.map(l => l.replace('uint8_t byMinGrp', 'uint16_t byMinGrp')), 'opas(byMinGrp,-,1)');
+    assert.match(wide.sites[0].why!, /not an initialized uint8_t/);
+    const cast = run(BYTE.map(l => l.replace(/\(uint8_t\)\(byMinGrp - 1\)/g, '(uint16_t)(byMinGrp - 1)')), 'opas(byMinGrp,-,1)');
+    assert.match(cast.sites[0].why!, /0 adjacent/);
+    const guard = run(BYTE.map(l => l.replace('if (byMinGrp && byMaxGrp && byMaxGrp >= byMinGrp)', 'if (byMaxGrp >= byMinGrp)')), 'opas(byMinGrp,-,1)');
+    assert.match(guard.sites[0].why!, /nonzero guard/);
+  });
+  it('refuses a backward or bypassing jump around a guarded update', () => {
+    const variants = [
+      ['void dummy() {', '  int32_t v = Get();', 'again:', '  m();', '  if (v != -1) {', '    g(v + 1);', '    h(v + 1);', '  }', '  if (k()) goto again;', '}'],
+      ['void dummy() {', '  int32_t v = Get();', '  if (k()) goto in;', '  if (v != -1) {', '    g(v + 1);', 'in:', '    h(v + 1);', '  }', '}'],
+      BYTE.flatMap(s => s.includes('if (!pUnit)') ? ['  again: ;', s] : s.includes('for (nMinionIdx') ? [s, '    if (Retry()) goto again;'] : [s]),
+    ];
+    for (const source of variants) {
+      const form = source === variants[2] ? 'opas(byMinGrp,-,1)' : 'opas(v,+,1)';
+      const plain = run(source);
+      const tagged = run(source, form);
+      assert.strictEqual(tagged.sites[0].applied, false, source.join('\n'));
+      assert.match(tagged.sites[0].why!, /jump/);
+      assert.strictEqual(tagged.out, plain.out, source.join('\n'));
+    }
+  });
+  it('refuses a shift that is stored, read otherwise, escapes, loops, jumps or is out of range', () => {
+    const cases: Array<[string[], string, RegExp]> = [
+      [PAIR.map(l => l.replace('pDynamicPath->nTargetY', 'Use(nX); pDynamicPath->nTargetY')), 'opas(nX,>>,0xb)', /read after/],
+      [PAIR.map(l => l.replace('DRLG_WorldToScreenNoShift(&nX, &nY);', 'DRLG_WorldToScreenNoShift(&nX, &nY); nX = 1;')), 'opas(nX,>>,0xb)', /already assigned/],
+      [PAIR.map(l => l.replace('DRLG_WorldToScreenNoShift(&nX, &nY);', 'DRLG_WorldToScreenNoShift(&nX, &nY); nX++;')), 'opas(nX,>>,0xb)', /stepped/],
+      [[...PAIR.slice(0, -1), '  Flush();', '}'], 'opas(nX,>>,0xb)', /call after the update/],
+      [PAIR.map(l => l.replace('pDynamicPath->nTargetY', 'g_pPath->nTargetY')), 'opas(nX,>>,0xb)', /memory after the update/],
+      [PAIR.map(l => l.replace('void dummy(Path* pDynamicPath,', 'void dummy(Path* pDynamicPath, Path* q,').replace('DRLG_WorldToScreenNoShift(&nX, &nY);', 'DRLG_WorldToScreenNoShift(&nX, &nY); q = q + 1;')
+        .replace('pDynamicPath->nTargetY', 'q->nTargetY')), 'opas(nX,>>,0xb)', /memory after the update/],
+      [['void dummy(S* p, int32_t v) {', '  for (int i = 0; i < 4; i++) { p->a[i] = v >> 3; }', '}'], 'opas(v,>>,3)', /loop/],
+      [['void dummy(S* p, int32_t v) {', 'again:', '  p->a = v >> 3;', '  if (k()) goto again;', '}'], 'opas(v,>>,3)', /jump/],
+      [['void dummy(S* p, int32_t v) {', '  p->a = v >> 32;', '}'], 'opas(v,>>,32)', /1\.\.31/],
+      [['void dummy(S* p, int16_t v) {', '  p->a = v >> 3;', '}'], 'opas(v,>>,3)', /32-bit/],
+      [['void dummy(S* p, int32_t v) {', '  if (p) { int32_t v = 2; p->a = v >> 3; }', '}'], 'opas(v,>>,3)', /shadowed/],
+      [PAIR, 'opas(nX,>>,0xc)', /no nX >> 0xc read/],
+    ];
+    for (const [source, form, why] of cases) {
+      const plain = run(source);
+      const tagged = run(source, form);
+      assert.strictEqual(tagged.sites[0].applied, false, source.join('\n'));
+      assert.match(tagged.sites[0].why!, why, source.join('\n'));
+      assert.strictEqual(tagged.out, plain.out, source.join('\n'));
+    }
+  });
+});

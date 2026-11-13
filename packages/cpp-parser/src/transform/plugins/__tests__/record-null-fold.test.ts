@@ -56,6 +56,19 @@ describe('record-null-fold', () => {
     assert.deepStrictEqual(run(lines, layout(lines, [2])).sites, []);
   });
 
+  // MISSILE_CltHitFn54_VinesTrail 004d0ff0: record-getter-guard writes the record's test
+  // new, with no line; it is the getter's last test, placed by the store's line.
+  it('places a record test written with no line by the getter\'s store', () => {
+    const tu = parse(SITE.join('\n')) as unknown as { declarations: Array<{ body: { statements: Array<{ kind: string; condition?: { location?: unknown } }> } }> };
+    const ifs = tu.declarations[0].body.statements.filter(x => x.condition);
+    delete ifs[1].condition!.location;
+    const sites: string[] = [];
+    const t = recordNullFoldPlugin.createTransformer({ branchLayout: layout(SITE, [2, 9]), onSite: e => sites.push(`${e.pointer}:${e.record}`) });
+    const out = flat(emit(t(tu as never) as AnyNode));
+    assert.deepStrictEqual(sites, ['pUnit:pTxt']);
+    assert.ok(out.includes('Rec* pTxt = pUnit && (nId = pUnit->nClassId) >= 0'), out);
+  });
+
   it('changes nothing without the facts', () => {
     assert.deepStrictEqual(run(SITE, null).sites, []);
   });

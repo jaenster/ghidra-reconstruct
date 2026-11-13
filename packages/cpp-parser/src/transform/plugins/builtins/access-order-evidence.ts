@@ -2,7 +2,7 @@
  * The original's memory accesses per line of the parsed text, as the reconstruct side
  * extracts them (reconstruct extract/access-order.ts) and keys them by line of the
  * wrapper the body is parsed in (codegen/access-order-spec.ts). Read by
- * `base-register-load` and `store-order`.
+ * `base-register-load`, `store-order`, `array-fill-collapse` and `scalar-piece-arithmetic`.
  */
 
 import { NodeKind } from '../../../ast/kinds.js';
@@ -30,6 +30,8 @@ export interface StoreFact {
   size: number;
   /** 8-byte store: which half the original wrote first. */
   half: 'h' | 'l' | null;
+  /** Bytes the instruction behind the `=` writes (its destination's width); 0 or absent: unknown. */
+  width?: number;
 }
 
 export interface AccessOrderEvidence {
