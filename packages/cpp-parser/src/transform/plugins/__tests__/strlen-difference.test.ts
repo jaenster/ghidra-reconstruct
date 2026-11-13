@@ -103,12 +103,20 @@ describe('strlen-difference proof boundaries', () => {
   it('keeps class conversions and overloaded operators out of the purity proof', () => {
     const source = 'struct Unknown { operator int(); }; Unknown x; ' + scan('return x + ((intptr_t)p - (intptr_t)(s + 1));');
     assert.deepStrictEqual(run(source).sites, []);
+    assert.deepStrictEqual(run(source.replace(/Unknown/g, 'BOOL')).sites, []);
     const convert = 'struct Convert { Convert(int); }; void Consume(Convert, int); ' + scan('Consume(0, (intptr_t)p - (intptr_t)(s + 1));');
     assert.deepStrictEqual(run(convert).sites, []);
   });
   it('does not trust a shadowed function name or duplicate local name', () => {
     assert.deepStrictEqual(run(scan('Show((intptr_t)p - (intptr_t)(s + 1));').replace('char *p = s;', 'int Show; char *p = s;')).sites, []);
     assert.deepStrictEqual(run(scan('return (intptr_t)p - (intptr_t)(s + 1);').replace('char *p = s;', 'int p; { char *p; } char *p = s;')).sites, []);
+  });
+  it('does not borrow aliases or call declarations from another function', () => {
+    const source = scan('return (intptr_t)p - (intptr_t)(s + 1);').replace('f(char *s)', 'f(String s)');
+    assert.deepStrictEqual(run('void other() { typedef char *String; } ' + source, [], { typedefTargets: { String: 'char *volatile' } }).sites, []);
+    assert.deepStrictEqual(run('void other() { void Consume(int, int); } ' + scan('Consume(0, (intptr_t)p - (intptr_t)(s + 1));'), [], {
+      functionParamTypes: { Consume: ['Convert', 'int'] },
+    }).sites, []);
   });
   it('keeps the Boolean-cast and volatile-pointer scans through the full pipeline', () => {
     for (const code of [scan('return (bool)p - (bool)(s + 1);'), scan('return (intptr_t)p - (intptr_t)(s + 1);', 'char *volatile p = s;')]) {
@@ -165,6 +173,13 @@ describe('strlen-difference char-array members', () => {
     assert.deepStrictEqual(run(member('entry.name', 'struct Entry { char name[8]; };', 'Entry *entry')).sites, []);
     assert.deepStrictEqual(run(member('entry->name', 'struct Entry { char name[8]; };', 'volatile Entry *entry')).sites, []);
     assert.deepStrictEqual(run(member('entry->name', 'struct Entry { char name[8]; char other[8]; };', 'Entry *entry').replace('(entry->name + 1)', '(entry->other + 1)')).sites, []);
+  });
+  it('does not borrow another function\'s local aggregate or fall back past an ambiguous local owner', () => {
+    const source = member('entry->name', 'void other() { struct Entry { char name[8]; }; }', 'Entry *entry');
+    assert.deepStrictEqual(run(source, [], { structFields: { Entry: { name: 'volatile char[8]' } } }).sites, []);
+    const duplicate = member('entry->name', '', 'Entry *entry').replace('char *p = entry->name;',
+      '{ struct Entry { char name[8]; }; } { struct Entry { volatile char name[8]; }; } char *p = entry->name;');
+    assert.deepStrictEqual(run(duplicate, [], { structFields: { Entry: { name: 'char[8]' } } }).sites, []);
   });
 });
 

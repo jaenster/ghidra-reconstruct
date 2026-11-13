@@ -25,18 +25,22 @@ const unwrap = (expr: Expression): Expression => {
 };
 type DeclaredType = TypeNode | string;
 const spelling = (t: DeclaredType): string => typeof t === 'string' ? t : emit(t as AnyNode);
-const scalar = (s: TypeShape | null): s is TypeShape => !!s && (s.stars > 0 || SCALAR_BASES.has(s.base) && s.base !== 'void');
 
 export function createStrlenProof(ast: ASTNode, fn: FunctionDecl, opts: StrlenProofOptions) {
   const aliases: Record<string, string> = {};
   const ambiguous = new Set<string>();
   const aliasNames = new Set<string>();
-  for (const d of [...findNodesByKind(ast, NodeKind.TypedefDecl), ...findNodesByKind(ast, NodeKind.TypeAliasDecl)] as TypedefDecl[]) {
+  const top = ast.kind === NodeKind.TranslationUnit ? (ast as unknown as { declarations: ASTNode[] }).declarations : [];
+  for (const d of top.filter(d => d.kind === NodeKind.TypedefDecl || d.kind === NodeKind.TypeAliasDecl) as TypedefDecl[]) {
     const name = d.name.name;
     if (aliasNames.has(name)) ambiguous.add(name);
     aliasNames.add(name);
     aliases[name] = spelling(d.type);
   }
+  // A body-local alias may shadow a declaration only within an inner scope. We
+  // do not have lexical bindings here, so decline it rather than export its
+  // meaning to the rest of the body (or borrow one from another function).
+  if (fn.body) for (const d of [...findNodesByKind(fn.body, NodeKind.TypedefDecl), ...findNodesByKind(fn.body, NodeKind.TypeAliasDecl)] as TypedefDecl[]) ambiguous.add(d.name.name);
   // Expand BEFORE canonicalising: canonicalBase otherwise erases volatile and may
   // replace a familiar alias such as BOOL before its actual declaration is read.
   function expand(s: string, seen = new Set<string>()): string | null {
@@ -61,7 +65,12 @@ export function createStrlenProof(ast: ASTNode, fn: FunctionDecl, opts: StrlenPr
   function shape(t: DeclaredType | undefined): TypeShape | null {
     const s = resolved(t);
     if (s === null || /\bvolatile\b/.test(s)) return null;
-    return shapeOfSpelling(s.replace(/\b(const|restrict)\b/g, ' '));
+    const clean = s.replace(/\b(const|restrict)\b/g, ' ').trim();
+    const aggregate = /^(?:(?:struct|class|union)\s+)?(\w+)\s*(\**)$/.exec(clean);
+    if (aggregate && (declaredAggregates.has(aggregate[1]) || opts.structFields?.[aggregate[1]])) {
+      return { base: aggregate[1], stars: aggregate[2].length, isConst: /\bconst\b/.test(s) };
+    }
+    return shapeOfSpelling(clean);
   }
 
   const locals = new Map<string, TypeNode>();
@@ -74,19 +83,30 @@ export function createStrlenProof(ast: ASTNode, fn: FunctionDecl, opts: StrlenPr
   if (fn.body) for (const v of findNodesByKind(fn.body, NodeKind.VariableDecl) as VariableDecl[]) addLocal(v.name.name, v.type);
   const globals: Record<string, DeclaredType> = {};
   if (ast.kind === NodeKind.TranslationUnit) {
-    for (const d of (ast as unknown as { declarations: ASTNode[] }).declarations) {
+    for (const d of top) {
       if (d.kind === NodeKind.VariableDecl) globals[(d as VariableDecl).name.name] = (d as VariableDecl).type;
     }
   }
   const namedType = (name: string): DeclaredType | undefined => duplicates.has(name) ? undefined
     : locals.get(name) ?? opts.enclosingVarTypes?.[name] ?? globals[name] ?? opts.globalTypes?.[name];
-  const structs = collectLocalStructs(ast);
+  const aggregateKinds = [NodeKind.StructDecl, NodeKind.UnionDecl];
+  const aggregates = top.filter(d => aggregateKinds.includes(d.kind));
+  if (fn.body) for (const kind of aggregateKinds) aggregates.push(...findNodesByKind(fn.body, kind));
+  const aggregateRoot = { ...ast, kind: NodeKind.TranslationUnit, declarations: aggregates } as ASTNode;
+  const structs = collectLocalStructs(aggregateRoot);
+  const declaredAggregates = new Set<string>();
+  for (const kind of aggregateKinds) for (const d of findNodesByKind(aggregateRoot, kind)) {
+    const s = d as unknown as { name?: Identifier; isForwardDeclaration?: boolean };
+    if (s.name?.kind === NodeKind.Identifier && !s.isForwardDeclaration) declaredAggregates.add(s.name.name);
+  }
+  const scalar = (s: TypeShape | null): s is TypeShape => !!s && (s.stars > 0 || SCALAR_BASES.has(s.base)
+    && s.base !== 'void' && !declaredAggregates.has(s.base) && !opts.structFields?.[s.base]);
   function memberType(e: MemberExpr): DeclaredType | undefined {
     const root = unwrap(e.object);
     if (root.kind !== NodeKind.Identifier || e.member.kind !== NodeKind.Identifier) return undefined;
     const obj = shape(namedType((root as Identifier).name));
     if (!obj || obj.stars !== (e.isArrow ? 1 : 0)) return undefined;
-    return structs.has(obj.base) ? structs.get(obj.base)?.get(e.member.name) : opts.structFields?.[obj.base]?.[e.member.name];
+    return declaredAggregates.has(obj.base) ? structs.get(obj.base)?.get(e.member.name) : opts.structFields?.[obj.base]?.[e.member.name];
   }
   const charPointer = (s: TypeShape | null): boolean => !!s && s.stars === 1 && s.base === 'char';
   function baseKey(expr: Expression): string | null {
@@ -146,9 +166,11 @@ export function createStrlenProof(ast: ASTNode, fn: FunctionDecl, opts: StrlenPr
     return null;
   }
   const functions = new Map<string, { params: DeclaredType[]; variadic: boolean }>();
-  const declarations = ast.kind === NodeKind.FunctionDecl ? [ast as FunctionDecl] : [];
-  declarations.push(...findNodesByKind(ast, NodeKind.FunctionDecl) as FunctionDecl[]);
+  const declarations = ast.kind === NodeKind.FunctionDecl ? [ast as FunctionDecl] : top.filter(d => d.kind === NodeKind.FunctionDecl) as FunctionDecl[];
   const overloaded = new Set<string>();
+  if (fn.body) for (const d of findNodesByKind(fn.body, NodeKind.FunctionDecl) as FunctionDecl[]) {
+    const name = calleeName(d.name as Expression); if (name) overloaded.add(name);
+  }
   for (const d of declarations) {
     const name = calleeName(d.name as Expression);
     if (!name) continue;
@@ -181,7 +203,7 @@ export function createStrlenProof(ast: ASTNode, fn: FunctionDecl, opts: StrlenPr
     const l = unwrap(left), r = unwrap(right);
     if (l.kind !== NodeKind.CStyleCastExpr || r.kind !== NodeKind.CStyleCastExpr) return null;
     const a = shape((l as CStyleCastExpr).type), b = shape((r as CStyleCastExpr).type);
-    return a && b && isWordIntegerShape(a) && isWordIntegerShape(b) && a.base === b.base
+    return scalar(a) && scalar(b) && isWordIntegerShape(a) && isWordIntegerShape(b) && a.base === b.base
       ? (l as CStyleCastExpr).type : null;
   }
   return {
