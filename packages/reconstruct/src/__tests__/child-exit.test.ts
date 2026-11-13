@@ -12,6 +12,8 @@ describe('childExit', () => {
   it('passes a child\'s own status through, silently', () => {
     assert.deepStrictEqual(childExit({ status: 3, signal: null }), { code: 3 });
     assert.deepStrictEqual(childExit({ status: 0, signal: null }), { code: 0 });
+    // Windows' real killed-child result carries no signal; do not invent one.
+    assert.deepStrictEqual(childExit({ status: 1, signal: null }), { code: 1 });
   });
 
   it('names a reported SIGKILL and exits 128 + its number', () => {
