@@ -159,6 +159,26 @@ describe('aggregateZeroInitPlugin', () => {
     assert.match(run('void f() { D2Pair s; s.a = 0; s.b = 0; g(&s); }', { convertingAggregates: ['D2Pair'] }), /D2Pair s;/);
   });
 
+  // NET_D2GS_SERVER_Send_0xA5_FORCESTOPSKILL 0053c190: the original zeroes the eight-byte
+  // packet with two dword stores, then stores every member; the decompile prints none of
+  // the zero stores. The packet converts from uint64_t, so no `{0}`: a memset clears it.
+  it('clears a converting type with memset where every member is stored over its zeroes', () => {
+    const out = run('void f(int x, int y) { D2Pkt6 s; s.a = x; s.q = 1; s.id = 0xa5; s.fl = 2; s.b = y; g(&s); }',
+      { convertingAggregates: ['D2Pkt6'] });
+    assert.match(out, /D2Pkt6 s; memset\(&s, 0, sizeof\(s\)\); s\.a = x; s\.q = 1; s\.id = 0xa5; s\.fl = 2; s\.b = y; g\(&s\);/);
+  });
+
+  it('clears the whole object with memset where the first member is stored after a call', () => {
+    const out = run('void f(int x) { D2Pkt6 s; s.a = 1; s.fl = 2; put(&s.q, x); s.id = 0x6a; s.b = 3; g(&s); }');
+    assert.match(out, /D2Pkt6 s; memset\(&s, 0, sizeof\(s\)\); s\.a = 1; s\.fl = 2; put\(&s\.q, x\); s\.id = 0x6a;/);
+  });
+
+  it('leaves a converting type whose first member the code never stores over', () => {
+    const out = run('void f(int x) { D2Pkt6 s; s.q = 1; s.fl = 2; s.a = x; s.b = 3; g(&s); }',
+      { convertingAggregates: ['D2Pkt6'] });
+    assert.match(out, /D2Pkt6 s; s\.q = 1;/);
+  });
+
   it('leaves pointers, arrays and unknown types alone', () => {
     assert.match(run('void f() { D2Pair *p; p->a = 0; p->b = 0; g(p); }'), /D2Pair ?\* ?p;/);
     assert.match(run('void f() { D2Unknown s; s.a = 0; s.b = 0; g(&s); }'), /D2Unknown s;/);

@@ -44,7 +44,10 @@
  * to every member byte (`zeroStores`).
  *
  * The zero run is replaced by the initialised declaration; every later store is
- * kept, so each member holds the same value at its first read as before.
+ * kept, so each member holds the same value at its first read as before. A packet
+ * type with a converting constructor (`D2GSPacketSrv0xA5(uint64_t)`) is no aggregate
+ * to `{0}`; it is cleared with the memset form only (NET_D2GS_SERVER_Send_0xA5_FORCESTOPSKILL
+ * 0053c190).
  */
 
 import { NodeKind } from '../../../ast/kinds.js';
@@ -178,8 +181,8 @@ function createAggregateZeroInitTransformer(options: AggregateZeroInitOptions = 
    * layout holds something the coverage cannot reason about (a bitfield) or the
    * aggregate is not a plain aggregate to an initialiser list.
    */
-  const requiredBytes = (agg: string, base: number, out: Array<[number, number]>, depth = 0): boolean => {
-    if (depth > 16 || converting.has(agg)) return false;
+  const requiredBytes = (agg: string, base: number, out: Array<[number, number]>, depth = 0, cleared = false): boolean => {
+    if (depth > 16 || (converting.has(agg) && !cleared)) return false;
     for (const f of layouts[agg] ?? []) {
       if (f.bitSize !== undefined || f.size <= 0) return false;
       const inner = arraySpelling(f.type) ? undefined : aggregateOf(f.type);
@@ -384,8 +387,11 @@ function createAggregateZeroInitTransformer(options: AggregateZeroInitOptions = 
     }
     const drop = new Set<number>();
 
+    // A type with a converting constructor takes no initialiser list, but a memset clears
+    // it as it clears any other: such a local is rewritten only to the memset.
+    const listable = !converting.has(agg);
     const required: Array<[number, number]> = [];
-    if (!requiredBytes(agg, 0, required) || required.length === 0) return null;
+    if (!requiredBytes(agg, 0, required, 0, !listable) || required.length === 0) return null;
     const bytes = new Set<number>();
     for (const [lo, hi] of covered) for (let b = lo; b < hi; b++) bytes.add(b);
     const coveredAll = required.every(([lo, hi]) => { for (let b = lo; b < hi; b++) if (!bytes.has(b)) return false; return true; });
@@ -443,8 +449,19 @@ function createAggregateZeroInitTransformer(options: AggregateZeroInitOptions = 
       for (let b = head[0]; b < head[1]; b++) if (!facts0.zero.some(([x, e]) => b >= x && b < e)) return false;
       return true;
     })();
-    const headOverwritten = !!head && stretch.some(st => st.index >= runEnd && !drop.has(st.index) && st.from <= head[0] && st.to >= head[1]);
+    // Also past the stretch: a call that is handed a member's address ends it, and the
+    // opcode is often stored after that (NET_D2GS_SERVER_Send_0x6A_UNITCHANGE_MONSTERIDNOPATH
+    // 0053b9f0 stores three bytes of the GUID through `d2_store24` first). Either spelling
+    // zeroes every byte; which one VC8 is given only decides how it stores the zeros.
+    const coversHead = (st: Statement): boolean => {
+      const a = assignOf(st);
+      const p = a ? placeOf(a.left, name, agg) : null;
+      return !!head && !!p && p.offset <= head[0] && p.offset + p.size >= head[1];
+    };
+    const headOverwritten = !!head && (stretch.some(st => st.index >= runEnd && !drop.has(st.index) && st.from <= head[0] && st.to >= head[1])
+      || block.statements.some((st, i) => i >= Math.max(runEnd, k) && coversHead(st)));
     const whole = headZeroed && headOverwritten;
+    if (!whole && !listable) return null;
 
     // Rebuild: the declaration moves to the run, initialised; the run goes.
     const decl = declStmt.declarations[0] as VariableDecl;
