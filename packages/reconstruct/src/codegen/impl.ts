@@ -4392,6 +4392,7 @@ function transformDecompiledCode(
         selectTables: {
           ...(perPluginOptions['select-argument'] as SelectArgumentOptions | undefined),
           accessors: context?.accessorTwins,
+          structLayouts: context?.funcPtrArgCasts?.structLayouts,
         },
         onSite: s => {
           if (s.applied) for (const d of s.prefix ?? []) if (!vc8Prefix.includes(d)) vc8Prefix.push(d);
