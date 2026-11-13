@@ -420,6 +420,8 @@ export class LiveLoop {
         sendCommand: (cmd, params) => this.connection.sendCommand(cmd, params),
         since: state.seq,
         intervalMs: Number(process.env.D2_LIVE_POLL_MS ?? '2000'),
+        // Minutes without a completed poll before the watchdog restarts the loop.
+        stallMs: Number(process.env.D2_LIVE_POLL_STALL_MIN ?? '15') * 60_000,
         onBatch: batch => this.onBatch(batch),
         onTruncated: info => this.onTruncated(info),
         log: m => this.log(m),
@@ -1109,6 +1111,7 @@ export class LiveLoop {
       phase: this.phase,
       paused: this.stream.isPaused,
       streamConnected: this.stream.isConnected,
+      ...(this.stream instanceof PollingChangeStream ? { poller: this.stream.health } : {}),
       queuedEvents: this.stream.queuedCount,
       needsFullResync: this.needsFullResync,
       queue: this.queue.status(),

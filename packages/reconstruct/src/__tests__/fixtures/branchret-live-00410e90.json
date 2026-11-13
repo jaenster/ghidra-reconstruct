@@ -1,0 +1,3 @@
+{
+  "decompiled": "\n/* @function GetNextPositon\n   @address Game.exe.ram:00410e90\n   @date 2026.06.06\n   @calling __stdcall\n   @description Diablo 2 1.14d reverse team\n   https://blizzhackers.dev */\n\nint32_t Fog::BitBuffer::GetNextPositon(D2BitBufferStrc *pBitBuffer)\n\n{\n  size_t nNextPos;\n  \n  nNextPos = pBitBuffer->nCurrentPos;\n  if (pBitBuffer->nBitsAtPos != 0) {\n    nNextPos = nNextPos + 1;\n  }\n  return nNextPos;\n}"
+}

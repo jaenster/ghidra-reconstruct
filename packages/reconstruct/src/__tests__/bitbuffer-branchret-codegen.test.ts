@@ -1,22 +1,13 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync, writeFileSync } from 'node:fs';
 
 import { generateProject } from '../codegen/index.js';
 import { vc8formBodyHash, vc8FormSpec } from '../codegen/vc8form-spec.js';
-import type { ExtractedFunction, ExtractedNamespace, ProgramInfo, ReconstructOptions } from '../types.js';
+import type { ExtractedFunction, ExtractedNamespace, ExtractedStruct, ProgramInfo, ReconstructOptions } from '../types.js';
 
 // Fog::BitBuffer::GetNextPositon, Windows Game.exe 00410e90, as Ghidra currently decompiles it.
-const decompiled = `int32_t Fog::BitBuffer::GetNextPositon(D2BitBufferStrc *pBitBuffer)
-
-{
-  size_t nNextPos;
-
-  nNextPos = pBitBuffer->nCurrentPos;
-  if (pBitBuffer->nBitsAtPos != 0) {
-    nNextPos = nNextPos + 1;
-  }
-  return nNextPos;
-}`;
+const { decompiled } = JSON.parse(readFileSync(new URL('./fixtures/branchret-live-00410e90.json', import.meta.url), 'utf8')) as { decompiled: string };
 
 const options: ReconstructOptions = {
   outputDir: './out', format: 'cpp', organization: 'namespace',
@@ -34,14 +25,15 @@ const namespaces: ExtractedNamespace[] = [
 
 function func(tag: 'current' | 'stale' | 'none'): ExtractedFunction {
   const dh = tag === 'stale' ? '00000000' : vc8formBodyHash(decompiled);
+  // Evidence and byte seals below are fixture placeholders, not live proposal data.
   const seal = `;ev=0123456789;bh=22-00000000;dh=${dh}`;
   return {
     name: 'GetNextPositon', address: '00410e90', namespace: 'Fog::BitBuffer', size: 22,
     signature: 'int32_t GetNextPositon(D2BitBufferStrc * pBitBuffer)', returnType: 'int32_t',
     parameters: [{ name: 'pBitBuffer', dataType: 'D2BitBufferStrc *', size: 4,
       ordinal: 0, storage: 'Stack[0x4]:4' }],
-    localVariables: [{ name: 'nNextPos', dataType: 'size_t',
-      size: 4, storage: 'EAX:4' }],
+    localVariables: [{ name: 'nNextPos', dataType: 'undefined4', resolvedType: 'size_t',
+      size: 4, storage: 'EAX:4' } as never],
     callingConvention: '__stdcall', isThunk: false, isExternal: false, hasVarArgs: false,
     decompiled, calledFunctions: [],
     tags: [
@@ -52,11 +44,18 @@ function func(tag: 'current' | 'stale' | 'none'): ExtractedFunction {
 }
 
 export function implementation(tag: 'current' | 'stale' | 'none'): string {
-  const project = generateProject('bitbuffer-retval-fold', [func(tag)], [], [], [],
+  const types: ExtractedStruct[] = [{ kind: 'STRUCTURE', name: 'D2BitBufferStrc', category: '/', size: 20, alignment: 1, packed: true,
+    fields: [{ name: 'pBuffer', dataType: 'byte *', offset: 0, size: 4 },
+      { name: 'nBitsInBuffer', dataType: 'size_t', offset: 4, size: 4 },
+      { name: 'nCurrentPos', dataType: 'size_t', offset: 8, size: 4 },
+      { name: 'nBitsAtPos', dataType: 'size_t', offset: 12, size: 4 },
+      { name: 'bEnd', dataType: 'BOOL', offset: 16, size: 4 }] }];
+  const project = generateProject('bitbuffer-retval-fold', [func(tag)], [], types, [],
     namespaces, options, programInfo);
   const file = [...project.files.values()].find(f =>
     f.type === 'implementation' && f.content.includes('GetNextPositon('));
   assert.ok(file, 'GetNextPositon implementation');
+  if (process.env.BRANCHRET_EMIT_PATH && tag === 'current') writeFileSync(process.env.BRANCHRET_EMIT_PATH, file.content);
   return file.content;
 }
 
@@ -69,8 +68,8 @@ describe('Fog BitBuffer branch-return codegen', () => {
   it('emits branch returns from the live Ghidra local/assignment shape', () => {
     const out = implementation('current');
     assert.match(out, /if \(pBitBuffer->nBitsAtPos\)/);
-    assert.match(out, /return pBitBuffer->nCurrentPos \+ 1;/);
-    assert.match(out, /return pBitBuffer->nCurrentPos;/);
+    assert.match(out, /return \(size_t\)\(\(size_t\)pBitBuffer->nCurrentPos \+ 1\);/);
+    assert.match(out, /return \(size_t\)pBitBuffer->nCurrentPos;/);
     assert.doesNotMatch(out, /nNextPos/);
   });
 

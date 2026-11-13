@@ -1,0 +1,298 @@
+[
+ {
+  "id": 1379,
+  "author": {
+   "githubId": 53121653,
+   "login": "eejitgames"
+  },
+  "ops": [
+   {
+    "op": "set_prototype",
+    "program": "mac",
+    "address": "0x002b83b6",
+    "expect": {
+     "signature": "undefined FUN_002b83b6(int wszDest, char * szSrc, int nMaxChars)",
+     "callingConvention": "__cdecl"
+    },
+    "signature": "WCHAR * FUN_002b83b6(WCHAR * wszDest, char * szSrc, int nMaxChars)",
+    "callingConvention": "__cdecl"
+   },
+   {
+    "op": "rename_function",
+    "program": "mac",
+    "address": "0x002b83b6",
+    "expect": {
+     "name": "FUN_002b83b6"
+    },
+    "name": "UTF8_ConvertToWideChar"
+   },
+   {
+    "op": "set_prototype",
+    "program": "win",
+    "address": "0x00526320",
+    "expect": {
+     "signature": "undefined2 * UTF8_ConvertToWideChar(WCHAR * wszText, char * szText, int32_t nMaxWideChars)",
+     "callingConvention": "__fastcall"
+    },
+    "signature": "WCHAR * UTF8_ConvertToWideChar(WCHAR * wszText, char * szText, int32_t nMaxWideChars)",
+    "callingConvention": "__fastcall"
+   }
+  ]
+ },
+ {
+  "id": 1389,
+  "author": {
+   "githubId": 112085691,
+   "login": "Nugwa628"
+  },
+  "ops": [
+   {
+    "op": "set_global_type",
+    "program": "win",
+    "address": "0x007bcc06",
+    "expect": {
+     "type": "undefined1",
+     "size": 1
+    },
+    "type": "bool"
+   }
+  ]
+ },
+ {
+  "id": 1398,
+  "author": {
+   "githubId": 53121653,
+   "login": "eejitgames"
+  },
+  "ops": [
+   {
+    "op": "struct_field",
+    "program": "win",
+    "typePath": "/D2BinFieldExcelStrc",
+    "offset": 0,
+    "expect": {
+     "name": "pD2Archive",
+     "type": "D2ArchiveStrc *",
+     "defHash": "c92e0fa8853ab1ab"
+    },
+    "type": "char *"
+   },
+   {
+    "op": "struct_field",
+    "program": "mac",
+    "typePath": "/D2BinFieldExcelStrc",
+    "offset": 0,
+    "expect": {
+     "name": "pD2Archive",
+     "type": "D2ArchiveStrc *",
+     "defHash": "c92e0fa8853ab1ab"
+    },
+    "type": "char *"
+   },
+   {
+    "op": "retype_local",
+    "program": "win",
+    "function": "0x006bd640",
+    "storage": "Stack[0x4]",
+    "expect": {
+     "type": "D2ArchiveStrc *"
+    },
+    "type": "char *"
+   },
+   {
+    "op": "retype_local",
+    "program": "mac",
+    "function": "0x002f11d0",
+    "storage": "Stack[0x4]",
+    "expect": {
+     "type": "D2ArchiveStrc *"
+    },
+    "type": "char *"
+   },
+   {
+    "op": "retype_local",
+    "program": "mac",
+    "function": "0x002f11d0",
+    "storage": "EBX",
+    "expect": {
+     "type": "D2ArchiveStrc *"
+    },
+    "type": "char *"
+   },
+   {
+    "op": "retype_local",
+    "program": "mac",
+    "function": "0x002f11d0",
+    "storage": "ESI",
+    "expect": {
+     "type": "D2ArchiveStrc *"
+    },
+    "type": "char *"
+   },
+   {
+    "op": "retype_local",
+    "program": "mac",
+    "function": "0x002f11d0",
+    "storage": "EDI",
+    "expect": {
+     "type": "D2ArchiveStrc *"
+    },
+    "type": "char *"
+   }
+  ]
+ },
+ {
+  "id": 1387,
+  "author": {
+   "githubId": 53121653,
+   "login": "eejitgames"
+  },
+  "ops": [
+   {
+    "op": "retype_local",
+    "program": "mac",
+    "function": "0x002b661f",
+    "storage": "Stack[-0x118]",
+    "expect": {
+     "type": "undefined"
+    },
+    "type": "char[260]"
+   },
+   {
+    "op": "rename_local",
+    "program": "mac",
+    "function": "0x002b661f",
+    "storage": "Stack[-0x118]",
+    "expect": {
+     "name": "local_118"
+    },
+    "name": "szFileName"
+   }
+  ]
+ },
+ {
+  "id": 1399,
+  "author": {
+   "githubId": 53121653,
+   "login": "eejitgames"
+  },
+  "ops": [
+   {
+    "op": "rename_global",
+    "program": "mac",
+    "address": "0x003d0704",
+    "expect": {
+     "name": "PTR_s_Filename_003d0704"
+    },
+    "name": "gaSoundsFields"
+   },
+   {
+    "op": "set_global_type",
+    "program": "mac",
+    "address": "0x003d0704",
+    "expect": {
+     "type": "pointer",
+     "size": 4
+    },
+    "type": "D2BinFieldInputStrc[24]"
+   },
+   {
+    "op": "rename_global",
+    "program": "mac",
+    "address": "0x003d08e4",
+    "expect": {
+     "name": "PTR_s_Song_003d08e4"
+    },
+    "name": "gaSoundEnvironFields"
+   },
+   {
+    "op": "set_global_type",
+    "program": "mac",
+    "address": "0x003d08e4",
+    "expect": {
+     "type": "pointer",
+     "size": 4
+    },
+    "type": "D2BinFieldInputStrc[23]"
+   },
+   {
+    "op": "retype_local",
+    "program": "mac",
+    "function": "0x00094e23",
+    "storage": "Stack[-0x2fc]",
+    "expect": {
+     "type": "undefined"
+    },
+    "type": "D2BinFieldInputStrc[24]"
+   },
+   {
+    "op": "rename_local",
+    "program": "mac",
+    "function": "0x00094e23",
+    "storage": "Stack[-0x2fc]",
+    "expect": {
+     "name": "local_2fc"
+    },
+    "name": "aSoundsFields"
+   },
+   {
+    "op": "retype_local",
+    "program": "mac",
+    "function": "0x00094e23",
+    "storage": "Stack[-0x4cc]",
+    "expect": {
+     "type": "undefined"
+    },
+    "type": "D2BinFieldInputStrc[23]"
+   },
+   {
+    "op": "rename_local",
+    "program": "mac",
+    "function": "0x00094e23",
+    "storage": "Stack[-0x4cc]",
+    "expect": {
+     "name": "local_4cc"
+    },
+    "name": "aSoundEnvironFields"
+   }
+  ]
+ },
+ {
+  "id": 999001,
+  "author": {
+   "githubId": 1,
+   "login": "ünï"
+  },
+  "ops": [
+   {
+    "op": "rename_local",
+    "program": "win",
+    "function": "0x00401000",
+    "storage": "Stack[0x4]",
+    "expect": {
+     "name": "param_1"
+    },
+    "name": "pÄ"
+   },
+   {
+    "op": "set_global_type",
+    "program": "win",
+    "address": "0x007a0000",
+    "expect": {
+     "type": "char[4] \"q\" \\  \t",
+     "size": 4
+    },
+    "type": "char[4]"
+   },
+   {
+    "op": "rename_function",
+    "program": "mac",
+    "address": "0x00100000",
+    "expect": {
+     "name": "FUN_00100000 😀"
+    },
+    "name": "X_Y"
+   }
+  ]
+ }
+]
