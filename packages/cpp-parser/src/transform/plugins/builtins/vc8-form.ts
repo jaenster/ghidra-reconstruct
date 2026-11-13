@@ -4218,7 +4218,8 @@ function doOpas(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'opas' }>): void {
  * only as `V >> K` from some statement of a block on. `V >>= K;` goes right after the last
  * statement of that block that names V before those reads (after any updates already
  * written there, so two tags keep their order), or before the first read when none does.
- * When V's address is taken, nothing from the update on may call or reach memory other
+ * References/captures are not modeled. When V's address is taken or an earlier call
+ * may bind it by reference, nothing from the update on may call or reach memory other
  * than through an unmodified parameter, since that memory could be V.
  */
 function opasShift(fn: FunctionDecl, u: OpasUpdate, matches: (e: Expression, u: OpasUpdate) => boolean,
@@ -4274,7 +4275,21 @@ function opasShift(fn: FunctionDecl, u: OpasUpdate, matches: (e: Expression, u: 
 
   const converted = new Set<ASTNode>(hits.flatMap(h => [...walk(h.node)].filter(x => isId(x.node, u.name)).map(x => x.node)));
   stale([u.name], first, converted);
-  if (addressTaken(fn, u.name)) {
+  // C++ can bind a reference without spelling `&V`. A local reference or a
+  // capture may later observe V through another name; these aliases are not
+  // represented by the direct-read check above.
+  for (const { node } of walk(fn.body!)) {
+    if (node.kind === NodeKind.LambdaExpr) refuse('opas shift does not model lambda captures');
+    if (node.kind !== NodeKind.VariableDecl) continue;
+    if ([...walk((node as VariableDecl).type)].some(x =>
+      x.node.kind === NodeKind.ReferenceType || x.node.kind === NodeKind.RValueReferenceType))
+      refuse('opas shift does not model local reference aliases');
+  }
+  // An unconverted V argument may bind to a reference parameter and escape.
+  // Shifted rvalues themselves cannot alias V and need no such restriction.
+  const callEscape = [...walk(fn.body!)].some(x => x.node.kind === NodeKind.CallExpr
+    && [...walk(x.node)].some(y => isId(y.node, u.name) && !converted.has(y.node)));
+  if (addressTaken(fn, u.name) || callEscape) {
     const steady = (e: Expression): boolean => {
       let x = unparen(e);
       while (x.kind === NodeKind.CStyleCastExpr) x = unparen((x as CStyleCastExpr).expression);
