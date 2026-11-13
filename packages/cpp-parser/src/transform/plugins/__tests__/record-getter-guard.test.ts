@@ -294,6 +294,87 @@ describe('record-getter-guard', () => {
     assert.deepStrictEqual(r.sites, []);
   });
 
+  // The state-list loop of SUNITMSG (SUnitMsg.cpp): the failure, then an else-if arm
+  // that reads the record.
+  it('routes the reads of the else branch of a failure-stated guard', () => {
+    const r = run([
+      'int f(int n) {',
+      `  if (${FAIL}) {`,
+      '    return -1;',
+      '  } else if (sgptDataTable->pTxtItemTypes[n].beltable & 1) {',
+      '    return 0;',
+      '  } else {',
+      '    return sgptDataTable->pTxtItemTypes[n].throwable;',
+      '  }',
+      '}',
+    ]);
+    assert.deepStrictEqual(r.sites, ['pItemTypesTxt:2!']);
+    assert.ok(r.out.includes('if (!pItemTypesTxt) { return -1; } else if (pItemTypesTxt->beltable & 1) { return 0; } else { return pItemTypesTxt->throwable; }'), r.out);
+  });
+
+  it('routes the else branch of a `!` guard in an else-if arm, not what follows', () => {
+    const r = run([
+      'int f(int *p, int n) {',
+      '  if (p) {',
+      '    return 1;',
+      `  } else if (!(${GUARD})) {`,
+      '    return 0;',
+      '  } else {',
+      '    Use(sgptDataTable->pTxtItemTypes[n].throwable);',
+      '  }',
+      '  return sgptDataTable->pTxtItemTypes[n].beltable;',
+      '}',
+    ]);
+    assert.deepStrictEqual(r.sites, ['pItemTypesTxt:1!']);
+    assert.ok(r.out.includes('Use(pItemTypesTxt->throwable);'), r.out);
+    assert.ok(r.out.includes('return sgptDataTable->pTxtItemTypes[n].beltable;'), r.out);
+  });
+
+  it('leaves the else branch of a `!` guard that holds a label', () => {
+    const r = run([
+      'int f(int n) {',
+      '  if (n > 7) goto L;',
+      `  if (!(${GUARD})) {`,
+      '    return 0;',
+      '  } else {',
+      '  L:',
+      '    return sgptDataTable->pTxtItemTypes[n].throwable;',
+      '  }',
+      '}',
+    ]);
+    assert.deepStrictEqual(r.sites, []);
+  });
+
+  it('computes what a failure-stated guard with an else computed', { skip: !hasNativeGpp() }, () => {
+    const body = [
+      'int f(int *p, int n) {',
+      `  if (!p || ${FAIL}) {`,
+      '    return -1;',
+      '  } else if (sgptDataTable->pTxtItemTypes[n].beltable == 0) {',
+      '    return Use(n);',
+      '  } else {',
+      '    return sgptDataTable->pTxtItemTypes[n].throwable * 10 + n;',
+      '  }',
+      '}',
+    ];
+    const r = run(body);
+    // The else-if's own branches call: only its condition routes.
+    assert.deepStrictEqual(r.sites, ['pItemTypesTxt:1!']);
+    const prelude = (fn: string) => [PRELUDE, 'DataTable *sgptDataTable;', 'int Use(int v) { return v; }', fn].join('\n');
+    const main = [
+      'static ItemTypesTxt rows[3] = {{{0},1,0},{{0},2,1},{{0},3,1}};',
+      'static DataTable t = {0, rows, 3};',
+      'sgptDataTable = &t;',
+      'int x = 1;',
+      'printf("%d ", f(0, 1));',
+      'for (int n = -2; n <= 4; n++) printf("%d ", f(&x, n));',
+    ].join('\n');
+    const before = compileAndRun(prelude(body.join('\n')), main);
+    const after = compileAndRun(prelude(r.out), main);
+    assert.ok(before.length > 0);
+    assert.strictEqual(after, before);
+  });
+
   it('leaves a chain whose body holds a label', () => {
     const r = run([
       'int f(int *p, int n) {',

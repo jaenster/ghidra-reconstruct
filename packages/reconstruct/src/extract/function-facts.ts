@@ -46,7 +46,7 @@ import { ACCESS_ORDER_TOKEN_JAVA, parseAccessOrderRow, printsAccess } from './ac
 import { printsHaltOrProbe, parseHaltLines, HALT_NAME, IP_NAME, PROBE_NAMES } from './halt-lines.js';
 import { STRING_OPS_JAVA, printsRepLoop, parseStringOpRow } from './string-ops.js';
 import { JUMP_TABLES_JAVA, printsSwitch, parseJumpTableRow } from './jump-tables.js';
-import { ZERO_STORES_JAVA, printsMemberZeroStore, parseZeroStoreRow } from './zero-stores.js';
+import { ZERO_STORES_JAVA, printsMemberStore, parseZeroStoreRow } from './zero-stores.js';
 import { MASK_SITES_JAVA, printsByteWordMask, parseMaskSiteRow } from './mask-sites.js';
 import { ZEXT_SITES_JAVA, printsZextCast, parseZextSiteRow } from './zext-sites.js';
 import { SIGNED_DIVIDES_JAVA, printsCastDividend, parseSignedDivideRow } from './signed-divides.js';
@@ -509,7 +509,7 @@ println(sb.toString());
  */
 export const FACT_SCRIPT_VERSION = createHash('sha1')
   .update(FUNCTION_FACTS_SCRIPT).update(LABEL_FLOW_SCRIPT).update(functionStampsScript([], []))
-  .update('facts-15')
+  .update('facts-16')
   .digest('hex').slice(0, 16);
 
 export function functionFactsScript(batch: string[], threads = 8, timeout = 60): string {
@@ -678,7 +678,7 @@ export function selectFacts(text: string, entry: string, row: FunctionFactRow, c
     const t = parseJumpTableRow(row.jumpRow);
     if (t.length > 0) facts.jumpTables = t;
   }
-  if (printsMemberZeroStore(text) && row.zeroRow) {
+  if (printsMemberStore(text) && row.zeroRow) {
     const z = parseZeroStoreRow(row.zeroRow);
     if (z.length > 0) facts.zeroStores = z;
   }
@@ -778,7 +778,7 @@ export async function extractFunctionFacts(
     if (!f.decompiled || f.isThunk || f.isExternal) continue;
     if (!(printsComparison(f.decompiled) || printsBranch(f.decompiled) || printsCallTemporary(f.decompiled)
         || printsAccess(f.decompiled) || printsHaltOrProbe(f.decompiled) || printsRepLoop(f.decompiled)
-        || printsSwitch(f.decompiled) || printsMemberZeroStore(f.decompiled) || printsByteWordMask(f.decompiled) || printsZextCast(f.decompiled)
+        || printsSwitch(f.decompiled) || printsMemberStore(f.decompiled) || printsByteWordMask(f.decompiled) || printsZextCast(f.decompiled)
         || printsConstantStore(f.decompiled) || printsShiftPair(f.decompiled) || printsMemberAddress(f.decompiled) || printsHalvedValue(f.decompiled) || printsCastDividend(f.decompiled)
         || labelsOf(f.decompiled).length > 0)) continue;
     byEntry.set(normalizeEntry(f.address), f);

@@ -2,7 +2,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert';
 import { parseFunctionFacts, selectFacts, functionFactsScript } from './function-facts.js';
 import { parseJumpTableRow, printsSwitch } from './jump-tables.js';
-import { parseZeroStoreRow, printsMemberZeroStore } from './zero-stores.js';
+import { parseZeroStoreRow, printsMemberStore } from './zero-stores.js';
 
 // Rows as the facts script prints them for three functions, from the instructions the
 // public Ghidra database shows (get_switch_table, get_disassembly):
@@ -55,13 +55,27 @@ describe('function facts - jump tables and zero stores', () => {
     assert.deepStrictEqual(parseZeroStoreRow('s,8,8\t0\t'), [{ name: 's', offset: 8, size: 8, zero: [], other: [] }]);
   });
 
-  it('reads the functions the decompile shows a switch or a member zero store for', () => {
+  it('reads the functions the decompile shows a switch or a member store for', () => {
     assert.ok(printsSwitch('  switch(n) {'));
     assert.ok(!printsSwitch('  nSwitch = 1;'));
-    assert.ok(printsMemberZeroStore('  sMsg.uLParam.nLParam = 0;'));
-    assert.ok(printsMemberZeroStore('  r.p = (void *)0x0;'));
-    assert.ok(!printsMemberZeroStore('  p->n = 0;'));
-    assert.ok(!printsMemberZeroStore('  s.n = 1;'));
+    assert.ok(printsMemberStore('  sMsg.uLParam.nLParam = 0;'));
+    assert.ok(printsMemberStore('  r.p = (void *)0x0;'));
+    assert.ok(!printsMemberStore('  p->n = 0;'));
+    // Every zero store dead: only the member stores are left (0053c190).
+    assert.ok(printsMemberStore('  aPacket.dwUnitGUID = dwUnitGUID;'));
+    assert.ok(printsMemberStore('  s.a[2] = 1;'));
+    assert.ok(!printsMemberStore('  if (s.n == 1) return;'));
+  });
+
+  it('reads the zero stores of a local whose every zero store the decompile dropped', () => {
+    // NET_D2GS_SERVER_Send_0xA5_FORCESTOPSKILL 0053c190: xor eax, eax; mov [ebp-8], eax;
+    // mov [ebp-4], eax; then the GUID, unit type, opcode and skill over all eight bytes.
+    const row = 'aPacket,-c,8\t1\t6,-,XOR,r:EAX,r:EAX,EAX,-,-,-,-;8,-,MOV,m,r:EAX,-,-c:w,-8,4:r:EAX,-;'
+      + 'b,-,MOV,m,r:EAX,-,-8:w,-4,4:r:EAX,-;e,-,MOV,r:EAX,m,EAX,4:r,8,-,-;12,-,MOV,m,r:EAX,-,-a:w,-6,4:r:EAX,-;'
+      + '15,-,MOV,m,r:DL,-,-b:w,-7,1:r:DL,-;1e,-,LEA,r:EAX,m,EAX,-c:a,-8,-,-';
+    const parsed = parseFunctionFacts(`P\tGame.exe:2095\nF\t0053c190\tself\t-\t0\t1\nZ\t0053c190\t${row}\nD\t`);
+    const facts = selectFacts('void f(void) {\n  aPacket.dwUnitGUID = dwUnitGUID;\n}', '0053c190', parsed.rows.get('0053c190')!, false);
+    assert.deepStrictEqual(facts.zeroStores, [{ name: 'aPacket', offset: -0xc, size: 8, zero: [[0, 8]], other: [] }]);
   });
 
   it('prints the J and Z rows from the script', () => {

@@ -5,6 +5,9 @@
  * `T s = {0};` compiles to a zero store per member; the decompiler prints those stores and
  * drops the ones a later assignment overwrites, so a decompile cannot tell `T s = {0};` from
  * members cleared one by one. The instructions keep every zero store the compiler emitted.
+ * The decompiler drops a zero store a later store overwrites, so a decompile that prints no
+ * zero store at all can still have one in the original; the fact is read wherever the
+ * decompile stores to a member of a local (`printsMemberStore`).
  * The `aggregate-zero-init` pass only writes the initialiser where this fact shows the
  * original zeroing every member byte:
  *
@@ -194,11 +197,16 @@ export const ZERO_STORES_JAVA = `
           } catch (Exception ze) { zrow.setLength(0); }
 `;
 
-/** A member store of a constant zero: the decompiles whose struct locals are read. */
-const MEMBER_ZERO_STORE = /[A-Za-z_]\w*\.[A-Za-z_][\w.]*\s*=\s*(?:\([^()]*\)\s*)?(?:0|0x0|'\\0'|NULL)\s*;/;
+/**
+ * A store to a member of a local: the decompiles whose struct locals are read. Any value, not
+ * only zero: where every member is stored after the opening zero stores, the decompiler drops
+ * them all as dead and prints no zero store at all (NET_D2GS_SERVER_Send_0xA5_FORCESTOPSKILL
+ * 0053c190: `xor eax, eax` and two dword stores clear the packet, then each member is stored).
+ */
+const MEMBER_STORE = /[A-Za-z_]\w*\.[A-Za-z_][\w.]*(?:\[[^\]\n]*\])*\s*=(?!=)/;
 
-export function printsMemberZeroStore(decompiled: string): boolean {
-  return MEMBER_ZERO_STORE.test(decompiled);
+export function printsMemberStore(decompiled: string): boolean {
+  return MEMBER_STORE.test(decompiled);
 }
 
 const signedHex = (s: string): number | null => {

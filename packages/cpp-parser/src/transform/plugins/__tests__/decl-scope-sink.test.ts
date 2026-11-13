@@ -318,11 +318,20 @@ describe('declScopeSinkPlugin aliasing', () => {
       `initializer must stay outside the loop, got:\n${output}`);
   });
 
-  it('should still sink a pointer read into a loop that stores nothing through a pointer', () => {
+  it('should still sink a pointer read into a loop that neither calls nor stores through a pointer', () => {
     const output = transformCode(
-      'void f() { Vtx* v2 = third->pNext; do { n = n + 1; use(v2); } while (1); }');
+      'void f() { Vtx* v2 = third->pNext; do { n = n + v2->nX; } while (1); }');
     assert.ok(output.includes('do {\n    Vtx* v2 = third->pNext;'),
       `invariant read should still sink, got:\n${output}`);
+  });
+
+  // DRLGOUTROOM_PlaceAct5SpecialPresets 0067da70: the original reads pDrlgLevelData once,
+  // before the loop; each iteration calls a function that is handed pLevel.
+  it('should not sink a pointer read into a loop that calls', () => {
+    const output = transformCode(
+      'void f(Lvl* pLevel) { Wild* pWild = pLevel->pData; do { n = n + pWild->nW; Spawn(pLevel, n); } while (n < 9); }');
+    assert.ok(/Wild\* pWild = pLevel->pData;\s*do \{/.test(output),
+      `initializer must stay outside the loop, got:\n${output}`);
   });
 });
 
