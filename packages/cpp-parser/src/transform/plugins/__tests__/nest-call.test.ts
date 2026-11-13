@@ -678,6 +678,79 @@ describe('nestCallPlugin', () => {
     });
   });
 
+  // MAINMENU_OnPressSubmitEmailAddress, 00437620: CreateMessageBox(GetLocaleString(0x2b5c),
+  // GetLocaleString(0x2b5d), ...) with the first two in registers: six pushes, call, call,
+  // mov edx, esi / mov ecx, eax, call. The second inner call has no push before it.
+  describe('two calls into register arguments', () => {
+    const box = (firstPushes: number) => [
+      'int f(int a) {',
+      '  int x;',
+      '  int y;',
+      `[F@0x10<,${firstPushes},-] x = F();`,
+      '[G@0x18<0x10,0,-] y = G();',
+      '[H@0x20<0x18,0,0.0.1.1] H(y, x, a, 2);',
+      '  return 1;',
+      '}',
+    ];
+    const opts = { functionReturnTypes: { F: 'int', G: 'int' }, writeEffects: { F: { reads: {} }, G: { reads: {} } } };
+
+    it('nests both when the first was called after the pushes', () => {
+      const { out, sites } = run(box(2), opts);
+      assert.deepStrictEqual(sites, [2]);
+      assert.ok(out.includes('H(G(), F(), a, 2);'), out);
+    });
+
+    it('leaves both when the first was called before the pushes', () => {
+      const { out, sites } = run(box(0), opts);
+      assert.deepStrictEqual(sites, []);
+      assert.ok(out.includes('x = F(); y = G(); H(y, x, a, 2);'), out);
+    });
+  });
+
+  // INV_DrawNpcButtonTooltip, 004886c0: push 0; mov esi, [NPCButtonArray + ..]; push 0; lea eax,
+  // [gnPanelOffsetY + ScreenSizeY - 0x64]; push eax; add esi, gnPanelOffsetX; call
+  // GetLocaleString; mov edx, esi; mov ecx, eax; call TEXT_TooltipSetAttributes.
+  describe('a global array element and a negated constant', () => {
+    const tooltip = (index: string) => [
+      'void f(int nButtonIdx) {',
+      '  int nColor;',
+      '  int nType;',
+      '  int nY;',
+      '  int nX;',
+      '  unsigned short *pwsz;',
+      '  nColor = 0;',
+      '  nType = 0;',
+      '  nY = gnPanelOffsetY + -100 + ScreenSizeY;',
+      `  nX = NPCButtonArray[${index}] + gnPanelOffsetX;`,
+      '[GetLocaleString@0x10<,3,0] pwsz = GetLocaleString(nButtonIdx);',
+      '[TEXT@0x20<0x10,0,0.0.1.1.1] TEXT(pwsz, nX, nY, nType, nColor);',
+      '}',
+    ];
+    const opts = {
+      functionReturnTypes: { GetLocaleString: 'unsigned short *' },
+      globalTypes: { gnPanelOffsetY: 'int', ScreenSizeY: 'int', gnPanelOffsetX: 'int', gnSel: 'int', NPCButtonArray: 'int[16]', gpTable: 'int *' },
+      writeEffects: { GetLocaleString: { reads: {} } },
+    };
+
+    it('nests the element read and the arithmetic with the call', () => {
+      const { out, sites } = run(tooltip('nButtonIdx + gnSel * 4'), opts);
+      assert.deepStrictEqual(sites, [5]);
+      assert.ok(out.includes('TEXT(GetLocaleString(nButtonIdx), NPCButtonArray[nButtonIdx + gnSel * 4] + gnPanelOffsetX, gnPanelOffsetY + -100 + ScreenSizeY, 0, 0);'), out);
+    });
+
+    it('reads a global spelled with its namespace like a bare one', () => {
+      const lines = tooltip('nButtonIdx + Inv::gnSel * 4').map(l => l.replace('+ gnPanelOffsetX;', '+ Inv::gnPanelOffsetX;'));
+      const { out, sites } = run(lines, opts);
+      assert.deepStrictEqual(sites, [5]);
+      assert.ok(out.includes('NPCButtonArray[nButtonIdx + Inv::gnSel * 4] + Inv::gnPanelOffsetX,'), out);
+    });
+
+    it('leaves an element read whose index calls something', () => {
+      const { sites } = run(tooltip('Index()'), { ...opts, functionReturnTypes: { ...opts.functionReturnTypes, Index: 'int' } });
+      assert.deepStrictEqual(sites, [1]);
+    });
+  });
+
   it('nests the later of two calls when the earlier is the rightmost argument', () => {
     // H(7, G(), F(a)): push a; call F; push eax; call G; push eax; push 7; call H.
     const { out, sites } = run([
