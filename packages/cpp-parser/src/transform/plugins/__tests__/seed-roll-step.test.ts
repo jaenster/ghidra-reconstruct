@@ -114,6 +114,33 @@ describe('seedRollStepPlugin', () => {
     }`).sites, 0);
   });
 
+  it('a frame seed stepped in place as D2_SEED_NEXT_VAL becomes the call', () => {
+    const { out, sites } = run(`void f(int n) {
+      D2SeedStrc sSeed;
+      InitSeed(&sSeed, n);
+      sSeed = D2_SEED_NEXT_VAL(sSeed);
+      g(sSeed.nSeedLow % 100);
+    }`);
+    assert.strictEqual(sites, 1);
+    assert.match(out, /D2_SeedRoll\(&sSeed\); g\(sSeed\.nSeedLow % 100\);/, out);
+  });
+
+  it('a D2_SEED_NEXT_VAL self-step of a seed in registers, or of another seed, keeps its form', () => {
+    assert.strictEqual(run(`void f(D2UnitStrc* pUnit) {
+      D2SeedStrc s;
+      s = pUnit->sSeed;
+      s = D2_SEED_NEXT_VAL(s);
+      pUnit->sSeed = s;
+    }`).sites, 0);
+    assert.strictEqual(run(`void f(int n) {
+      D2SeedStrc a;
+      D2SeedStrc b;
+      InitSeed(&a, n);
+      b = D2_SEED_NEXT_VAL(a);
+      g(b.nSeedLow);
+    }`).sites, 0);
+  });
+
   it('a temporary whose address is taken keeps the form', () => {
     assert.strictEqual(run(`void f(D2SeedStrc* a) {
       D2SeedStrc s = D2_SEED_NEXT(*a);
@@ -161,6 +188,14 @@ describe('Golden: seed steps in Game.exe decompiles', () => {
     const out = full('005b6710');
     assert.strictEqual(out.match(/sSeedNext = D2_SeedRoll\(pSeed\); nRngMod = \(int\)\(\(uint64_t\)sSeedNext \* 0x24924925 >> 0x20\);/g)?.length, 2, out);
     assert.doesNotMatch(out, /D2_SEED_NEXT|\*pSeed = sSeedNext/, out);
+  });
+
+  // A frame seed (InitSeed is handed its address) stepped in place: VC8 keeps the printed step's
+  // words in a 4-byte frame temporary the original does not have; the call form drops it.
+  it('MISSILE_CalculatePierceCount 004cd420: the pierce roll of a frame seed', () => {
+    const out = full('004cd420');
+    assert.match(out, /D2_SeedRoll\(&sSeed\)/, out);
+    assert.doesNotMatch(out, /D2_SEED_NEXT/, out);
   });
 
   // The second step reuses the first one's registers (no reload): the chain stays.

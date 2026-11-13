@@ -32,6 +32,14 @@
  * seed in registers from one step to the next (CLIENT_SendMonsterMoveToRandomNearbyPosMessage
  * 0046c960 matches its two steps as printed, and loses them as two calls, which reload it).
  *
+ * A seed that lives in the frame - a local D2SeedStrc whose address the function hands out
+ * (`InitSeed(&sSeed, n)`) - stepped in place is printed `sSeed = D2_SEED_NEXT_VAL(sSeed);`.
+ * On a D2SeedStrc that is the same step (`(uint32_t)` of it is the low word, `>> 32` of its
+ * `uint64_t` the high word), and it becomes `D2_SeedRoll(&sSeed);` as well: compiled as printed,
+ * VC8 keeps the step's two words in a frame temporary of their own (MISSILE_CalculatePierceCount
+ * 004cd420 and CalculatePierce 0059f940 carry 4 bytes the original does not). A local whose
+ * address is never taken stays as printed: that is the register chain above.
+ *
  * Value-preserving: the step computes the same 64-bit value from the same two words and
  * stores both halves into the same seed; the plain statements moved after the store neither
  * read nor write the seed, and read the low word from X either way.
@@ -52,6 +60,7 @@ import { sameExpr } from './rotated-for-loop.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
 
 const NEXT = 'D2_SEED_NEXT';
+const NEXT_VAL = 'D2_SEED_NEXT_VAL';
 const ROLL = 'D2_SeedRoll';
 const SEED_TYPE = 'D2SeedStrc';
 /** The longest run of plain statements a write-back may sit behind. */
@@ -104,6 +113,20 @@ function isPlainLvalue(e: Expression): boolean {
     default:
       return false;
   }
+}
+
+/**
+ * `E = D2_SEED_NEXT_VAL(E)` with E a name in `frameSeeds` (a local D2SeedStrc whose address is
+ * taken): E, else null.
+ */
+function frameSelfStep(a: AssignExpr, frameSeeds: ReadonlySet<string>): Expression | null {
+  const r = unwrap(a.right);
+  if (r.kind !== NodeKind.CallExpr) return null;
+  const c = r as CallExpr;
+  if (!isName(c.callee, NEXT_VAL) || c.arguments.length !== 1) return null;
+  const arg = c.arguments[0];
+  if (!isName(arg) || !isName(a.left, (unwrap(arg) as Identifier).name)) return null;
+  return frameSeeds.has((unwrap(arg) as Identifier).name) ? arg : null;
 }
 
 /** The address of seed E: `p` for `*p`, `&E` otherwise. */
@@ -247,7 +270,8 @@ function writebackAt(list: Statement[], j: number, x: string, seed: Expression):
   return [j, j + 1];
 }
 
-function findSites(list: Statement[], locals: ReadonlySet<string>, addressed: ReadonlySet<string>): Site[] {
+function findSites(list: Statement[], locals: ReadonlySet<string>, addressed: ReadonlySet<string>,
+  frameSeeds: ReadonlySet<string>): Site[] {
   const sites: Site[] = [];
   for (let i = 0; i < list.length; i++) {
     const s = innermost(list[i]);
@@ -256,6 +280,11 @@ function findSites(list: Statement[], locals: ReadonlySet<string>, addressed: Re
     let declares = false;
     const a = assignOf(s);
     if (a && a.operator === '=') {
+      const own = frameSelfStep(a, frameSeeds);
+      if (own) {
+        sites.push({ list, head: i, writeback: [], seed: own, x: null, declares: false });
+        continue;
+      }
       seed = nextArg(a.right);
       if (!seed) continue;
       if (!isPlainLvalue(seed)) continue;
@@ -346,7 +375,7 @@ function createSeedRollStepTransformer(options: SeedRollStepOptions = {}): Trans
         if (n.kind === NodeKind.UnaryExpr && (n as UnaryExpr).operator === '&') {
           for (const name of namesIn((n as UnaryExpr).operand)) addressed.add(name);
         }
-        if (n.kind === NodeKind.CallExpr && isName((n as CallExpr).callee, NEXT)) anyStep = true;
+        if (n.kind === NodeKind.CallExpr && (isName((n as CallExpr).callee, NEXT) || isName((n as CallExpr).callee, NEXT_VAL))) anyStep = true;
         for (const k of getChildren(n)) scan(k, null);
       };
       scan(body, null);
@@ -355,7 +384,11 @@ function createSeedRollStepTransformer(options: SeedRollStepOptions = {}): Trans
       const params = new Set((fn.parameters as ParameterDecl[]).map(p => p.name?.name).filter((n): n is string => !!n));
       const locals = new Set([...decls.keys()].filter(n => !params.has(n)));
 
-      const sites = lists.flatMap(l => findSites(l, locals, addressed));
+      // Seeds in the frame: one local D2SeedStrc declaration, its address taken.
+      const frameSeeds = new Set([...locals].filter(n => addressed.has(n) && decls.get(n)!.length === 1 &&
+        isSeedType(decls.get(n)![0]) && !decls.get(n)![0].specifiers.includes('static') &&
+        !decls.get(n)![0].specifiers.includes('extern')));
+      const sites = lists.flatMap(l => findSites(l, locals, addressed, frameSeeds));
       if (sites.length === 0) return undefined;
 
       // A temporary qualifies when it is one plain local D2SeedStrc and every use of it is a
