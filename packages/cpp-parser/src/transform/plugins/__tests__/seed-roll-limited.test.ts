@@ -241,6 +241,277 @@ describe('seedRollLimitedPlugin', () => {
     assert.deepStrictEqual(sites, ['r=pSeed,n']);
   });
 
+  describe('a limit defined above the guard', () => {
+    it('Objects_InitFn01_Shrine 0054f9d0: `n = k - 1` in the loop, the test `n & k - 2U`', () => {
+      const { out, sites } = run(`void __fastcall Objects_InitFn01_Shrine(D2ObjInitFnStrc * pInitArg) {
+    uint32_t nRandIdx;
+    uint32_t seedRolled;
+    D2SeedStrc* pRandSeed;
+    int32_t nShrinesCount;
+    int nShrineTypeArg = 8;
+    do {
+      nShrinesCount = GetShrinesSize();
+      pRandSeed = pInitArg->pSeed;
+      nRandIdx = nShrinesCount - 1;
+      if ((int)nRandIdx <= 0) {
+        nRandIdx = 0;
+      } else if (nRandIdx & nShrinesCount - 2U) {
+        seedRolled = D2_SeedRoll(pRandSeed);
+        nRandIdx = (uint32_t)(seedRolled % nRandIdx);
+      } else {
+        seedRolled = D2_SeedRoll(pRandSeed);
+        nRandIdx = nShrinesCount - 2U & seedRolled;
+      }
+
+      nShrineId = nRandIdx + 1;
+    } while (Test(nShrineId) && (nShrineTypeArg-- , nShrineTypeArg > 0));
+}`);
+      assert.deepStrictEqual(sites, ['nRandIdx=pRandSeed,nRandIdx']);
+      assert.match(out, /nRandIdx = nShrinesCount - 1; nRandIdx = D2_SeedRollLimited\(pRandSeed, nRandIdx\); nShrineId = nRandIdx \+ 1;/);
+      assert.doesNotMatch(out, /seedRolled/);
+    });
+
+    it('MISSILE_CreateRandomSubInRadius 004cea00: a chain of definitions, the test against the limit less one by name', () => {
+      const { sites } = run(`void __fastcall MISSILE_CreateRandomSubInRadius(D2UnitStrc * pUnit, D2UnitStrc * pUnit2, int32_t nRadius) {
+    uint32_t nRandX;
+    uint32_t nRandY;
+    uint32_t sSeedTmp;
+    uint32_t nDiameter;
+    int iOffsetX;
+    int nRetryCount = 0;
+    do {
+      nRetryCount++;
+      nDiameter = nRadius * 2;
+      nRandY = nDiameter + 1;
+      if ((int)nRandY <= 0) {
+        nRandX = 0;
+      } else {
+        nRandX = pUnit2->sSeed.nSeedLow;
+        if (nRandY & nDiameter) {
+          sSeedTmp = D2_SeedRoll(&pUnit2->sSeed);
+          nRandX = (uint32_t)(sSeedTmp % nRandY);
+        } else {
+          sSeedTmp = D2_SeedRoll(&pUnit2->sSeed);
+          nRandX = nDiameter & sSeedTmp;
+        }
+      }
+
+      iOffsetX = nRandX - nRadius;
+      if ((int)nRandY <= 0) {
+        nRandY = 0;
+      } else {
+        nRandX = pUnit2->sSeed.nSeedLow;
+        if (nRandY & nDiameter) {
+          sSeedTmp = D2_SeedRoll(&pUnit2->sSeed);
+          nRandY = (uint32_t)(sSeedTmp % (uint32_t)(nRadius * 2 + 1));
+        } else {
+          sSeedTmp = D2_SeedRoll(&pUnit2->sSeed);
+          nRandY = nRadius * 2 & sSeedTmp;
+        }
+      }
+
+      g(iOffsetX, nRandY - nRadius);
+    } while (nRetryCount < 10);
+}`);
+      assert.deepStrictEqual(sites, ['nRandX=&pUnit2->sSeed,nRandY', 'nRandY=&pUnit2->sSeed,nRandY']);
+    });
+
+    it('MISSILE_CreateFlyingRockDebris 004d0b90: the limit defined before the loop the draws are in', () => {
+      const { sites } = run(`void __fastcall MISSILE_CreateFlyingRockDebris(D2UnitStrc * pMissileUnit, int32_t nSplashCount) {
+    uint32_t nSplashX4;
+    uint32_t nRangeP1;
+    uint32_t nRandVal;
+    int64_t lSeedCalc;
+    D2SeedStrc sNewSeed;
+    int nTargetX;
+    if (nSplashCount > 0) {
+      nSplashX4 = nSplashCount * 4;
+      nRangeP1 = nSplashX4 + 1;
+      do {
+        if ((int)nRangeP1 <= 0) {
+          nRandVal = 0;
+        } else {
+          lSeedCalc = (uint64_t)pMissileUnit->sSeed.nSeedLow * 0x6ac690c5;
+          nRandVal = pMissileUnit->sSeed.nSeedHigh;
+          if (nRangeP1 & nSplashX4) {
+            sNewSeed = (D2SeedStrc)(lSeedCalc + (uint64_t)nRandVal);
+            pMissileUnit->sSeed.nSeedHigh = sNewSeed.nSeedHigh;
+            pMissileUnit->sSeed.nSeedLow = sNewSeed.nSeedLow;
+            nRandVal = (uint32_t)(sNewSeed.nSeedLow % nRangeP1);
+          } else {
+            sNewSeed = (D2SeedStrc)(lSeedCalc + (uint64_t)nRandVal);
+            pMissileUnit->sSeed.nSeedHigh = sNewSeed.nSeedHigh;
+            pMissileUnit->sSeed.nSeedLow = sNewSeed.nSeedLow;
+            nRandVal = nSplashX4 & sNewSeed.nSeedLow;
+          }
+        }
+
+        nTargetX = nRandVal + nSplashCount * -2;
+        if ((int)nRangeP1 <= 0) {
+          nRandVal = 0;
+        } else {
+          nRandVal = pMissileUnit->sSeed.nSeedLow;
+          if (nRangeP1 & nSplashX4) {
+            sNewSeed = D2_SEED_NEXT(pMissileUnit->sSeed);
+            pMissileUnit->sSeed.nSeedHigh = sNewSeed.nSeedHigh;
+            pMissileUnit->sSeed.nSeedLow = sNewSeed.nSeedLow;
+            nRandVal = (uint32_t)(sNewSeed.nSeedLow % nRangeP1);
+          } else {
+            sNewSeed = D2_SEED_NEXT(pMissileUnit->sSeed);
+            pMissileUnit->sSeed.nSeedHigh = sNewSeed.nSeedHigh;
+            pMissileUnit->sSeed.nSeedLow = sNewSeed.nSeedLow;
+            nRandVal = nSplashX4 & sNewSeed.nSeedLow;
+          }
+        }
+
+        MakeMissile(nTargetX, nRandVal);
+        nSplashCount--;
+      } while (nSplashCount);
+    }
+}`);
+      assert.deepStrictEqual(sites, ['nRandVal=&pMissileUnit->sSeed,nRangeP1', 'nRandVal=&pMissileUnit->sSeed,nRangeP1']);
+    });
+
+    it('Objects_InitFn46 005506d0: the limit from a member of a local struct, right above the guard', () => {
+      const { sites } = run(`void __fastcall Objects_InitFn46(D2ObjInitFnStrc * pInitArg) {
+    uint32_t dwTmp;
+    D2SeedStrc sSeedRoll;
+    D2DrlgRoomCoordsStrc sRoomCoords;
+    int nCurX;
+    DRLGROOM_GetRoomCoordinates(pInitArg->pRoom, &sRoomCoords);
+    D2SeedStrc* pObjCtrlSeed;
+    pObjCtrlSeed = GetObjectControlSeed(pInitArg->pGame, pInitArg->pRoom);
+    dwTmp = sRoomCoords.dwXSize - 4;
+    if ((int)dwTmp <= 0) {
+      dwTmp = 0;
+    } else if (dwTmp & sRoomCoords.dwXSize - 5U) {
+      sSeedRoll = D2_SEED_NEXT(*pObjCtrlSeed);
+      pObjCtrlSeed->nSeedHigh = sSeedRoll.nSeedHigh;
+      pObjCtrlSeed->nSeedLow = sSeedRoll.nSeedLow;
+      dwTmp = (uint32_t)(sSeedRoll.nSeedLow % dwTmp);
+    } else {
+      sSeedRoll = D2_SEED_NEXT(*pObjCtrlSeed);
+      pObjCtrlSeed->nSeedHigh = sSeedRoll.nSeedHigh;
+      pObjCtrlSeed->nSeedLow = sSeedRoll.nSeedLow;
+      dwTmp = sRoomCoords.dwXSize - 5U & sSeedRoll.nSeedLow;
+    }
+
+    nCurX = dwTmp + sRoomCoords.dwXStart;
+    g(nCurX);
+}`);
+      assert.deepStrictEqual(sites, ['dwTmp=pObjCtrlSeed,dwTmp']);
+    });
+
+    it('MISSILE_CreateRandomOffset 004ce530: a seed pointer set once names the member it points at', () => {
+      const { out, sites } = run(`D2UnitStrc * __stdcall MISSILE_CreateRandomOffset(D2UnitStrc * pUnit, int32_t nRadius, D2UnitStrc * pUnit2) {
+    uint32_t nRandX;
+    uint32_t sSeedTmp;
+    uint32_t uSeedHighWord;
+    uint32_t nRandY = nRadius * 2;
+    uint32_t nDiameter = nRandY + 1;
+    D2SeedStrc* pSeed = &pUnit2->sSeed;
+    if ((int)nDiameter <= 0) {
+      nRandX = 0;
+    } else {
+      uSeedHighWord = pUnit2->sSeed.nSeedHigh;
+      if (nDiameter & nRandY) {
+        sSeedTmp = D2_SeedRoll(pSeed);
+        nRandX = (uint32_t)(sSeedTmp % nDiameter);
+      } else {
+        sSeedTmp = D2_SeedRoll(pSeed);
+        nRandX = nRandY & sSeedTmp;
+      }
+    }
+
+    return g(nRandX, pSeed);
+}`);
+      // The call keeps the spelling of the block's first seed access.
+      assert.deepStrictEqual(sites, ['nRandX=&pUnit2->sSeed,nDiameter']);
+      assert.doesNotMatch(out, /uSeedHighWord|sSeedTmp/);
+    });
+
+    describe('left alone', () => {
+      const shrine = (between: string, before = '', loop = '') => `void f(D2SeedStrc* pSeed, int k) {
+    uint32_t n; uint32_t x; uint32_t r;
+    ${before}
+    do {
+      n = k - 1;
+      ${between}
+      if ((int)n <= 0) {
+        r = 0;
+      } else if (n & k - 2U) {
+        x = D2_SeedRoll(pSeed);
+        r = (uint32_t)(x % n);
+      } else {
+        x = D2_SeedRoll(pSeed);
+        r = k - 2U & x;
+      }
+      g(r);
+      ${loop}
+    } while (r);
+}`;
+      it('the shape that is rewritten', () => {
+        assert.strictEqual(run(shrine('')).sites.length, 1);
+      });
+      it('the operand written between the definition and the guard', () => {
+        assert.strictEqual(run(shrine('k = h();')).sites.length, 0);
+        assert.strictEqual(run(shrine('k++;')).sites.length, 0);
+        assert.strictEqual(run(shrine('if (r) { k = 3; }')).sites.length, 0);
+      });
+      it('a label between the definition and the guard', () => {
+        assert.strictEqual(run(shrine('again: h();', '', 'if (r == 2) goto again;')).sites.length, 0);
+      });
+      it('the definition above a loop that writes its operand', () => {
+        const code = `void f(D2SeedStrc* pSeed, int k) {
+    uint32_t n; uint32_t x; uint32_t r;
+    n = k - 1;
+    do {
+      if ((int)n <= 0) { r = 0; }
+      else if (n & k - 2U) { x = D2_SeedRoll(pSeed); r = (uint32_t)(x % n); }
+      else { x = D2_SeedRoll(pSeed); r = k - 2U & x; }
+      k = g(r);
+    } while (k);
+}`;
+        assert.strictEqual(run(code).sites.length, 0);
+        assert.strictEqual(run(code.replace('k = g(r);', 'g(r);')).sites.length, 1);
+      });
+      it('a member read above a call that may write the struct', () => {
+        const code = `void f(D2SeedStrc* pSeed) {
+    uint32_t n; uint32_t x; uint32_t r;
+    D2DrlgRoomCoordsStrc s;
+    GetCoords(&s);
+    n = s.dwXSize - 4;
+    BETWEEN
+    if ((int)n <= 0) { r = 0; }
+    else if (n & s.dwXSize - 5U) { x = D2_SeedRoll(pSeed); r = (uint32_t)(x % n); }
+    else { x = D2_SeedRoll(pSeed); r = s.dwXSize - 5U & x; }
+    g(r);
+}`;
+        assert.strictEqual(run(code.replace('BETWEEN', '')).sites.length, 1);
+        assert.strictEqual(run(code.replace('BETWEEN', 'GetCoords(&s);')).sites.length, 0);
+        assert.strictEqual(run(code.replace('BETWEEN', 's.dwXSize = 7;')).sites.length, 0);
+      });
+      it('a seed pointer set to another seed, or its base written', () => {
+        const code = `void f(D2UnitStrc* pUnit, D2UnitStrc* pOther, int n) {
+    uint32_t r; uint32_t x; uint32_t h;
+    D2SeedStrc* pSeed = &pUnit->sSeed;
+    BETWEEN
+    if (n <= 0) { r = 0; }
+    else { h = pUnit->sSeed.nSeedHigh;
+      if (n & n - 1) { x = D2_SeedRoll(pSeed); r = x % (uint32_t)n; }
+      else { x = D2_SeedRoll(pSeed); r = n - 1U & x; } }
+    g(r);
+}`;
+        assert.strictEqual(run(code.replace('BETWEEN', '')).sites.length, 1);
+        assert.strictEqual(run(code.replace('BETWEEN', 'pSeed = &pOther->sSeed;')).sites.length, 0);
+        assert.strictEqual(run(code.replace('BETWEEN', 'pUnit = pOther;')).sites.length, 0);
+      });
+      it('a limit that is not the definition plus one: `n = k - 1` against `k - 3U`', () => {
+        assert.strictEqual(run(shrine('').replace(/k - 2U/g, 'k - 3U')).sites.length, 0);
+      });
+    });
+  });
+
   describe('left alone', () => {
     const shape = (guard: string, arms: [string, string], after = 'g(r);', decls = 'uint32_t r; uint32_t x;') => `void f(D2SeedStrc* pSeed, uint32_t u, int n) {
     ${decls}

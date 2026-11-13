@@ -46,7 +46,9 @@
  *     exactly one if/else testing `N & (N - 1)` (or its negation); no other call, store or
  *     control flow. Locals and parameters are read as their values at the block's entry (a
  *     local whose address was taken is a stack object no seed word lies in); any other memory
- *     is read only before the seed is first stored;
+ *     is read only before the seed is first stored. What the statements before the guard
+ *     establish holds there too (factsAt): a limit defined as `k - 1` is tested as
+ *     `n & k - 2U`, and a pointer set to `&pUnit->sSeed` names that seed;
  *   - on both paths the seed ends as one step of its entry value (high word, low word), and r
  *     ends as the step's low word `%` N (unsigned) on the true arm and `& (N - 1)` on the false
  *     arm - the helper's two results, bit for bit;
@@ -59,7 +61,7 @@
 import { NodeKind } from '../../../ast/kinds.js';
 import type {
   ASTNode, AnyNode, AssignExpr, BinaryExpr, CallExpr, CompoundStmt, CStyleCastExpr, DeclStmt, ExprStmt,
-  Expression, FunctionDecl, Identifier, IfStmt, IntegerLiteralExpr, MemberExpr, ParameterDecl, ParenExpr,
+  Expression, ForStmt, FunctionDecl, Identifier, IfStmt, IntegerLiteralExpr, MemberExpr, ParameterDecl, ParenExpr,
   Statement, TypeNode, UnaryExpr, VariableDecl,
 } from '../../../ast/nodes.js';
 import { Expr } from '../../../ast/factory.js';
@@ -190,6 +192,20 @@ function convert(n: Num, kind: IntKind): Num {
 
 const COMMUTATIVE = new Set(['+', '*', '&', '|', '^']);
 
+/** A value as base + constant: `a(B#cK)` is B + K, anything else is itself + 0. */
+function affine(n: Num): { base: string; off: bigint } {
+  const m = /^a\((.*)#c([0-9a-f]+)\)$/.exec(n.k);
+  return m ? { base: m[1], off: BigInt('0x' + m[2]) } : { base: n.k, off: 0n };
+}
+
+/** n + k in w bits: one key per value whatever order the constants came in. */
+function offset(n: Num, k: bigint, w: 32 | 64, s: boolean): Num {
+  const m = w === 32 ? MASK32 : MASK64;
+  const a = affine(n);
+  const off = (a.off + k) & m;
+  return { t: 'num', k: off === 0n ? a.base : `a(${a.base}#c${off.toString(16)})`, w, s };
+}
+
 function binary(op: string, a: Num, b: Num): Num {
   // The usual arithmetic conversions on 32- and 64-bit operands.
   let w: 32 | 64 = a.w === 64 || b.w === 64 ? 64 : 32;
@@ -216,9 +232,10 @@ function binary(op: string, a: Num, b: Num): Num {
       default: break;
     }
   }
-  if (op === '+' && cb === 0n) return { ...a, w, s };
-  if (op === '+' && ca === 0n) return { ...b, w, s };
-  if (op === '-' && cb === 0n) return { ...a, w, s };
+  // A constant added or taken away folds into one offset, modulo 2^w: `(n - 1) - 1` is `n - 2`.
+  if (op === '+' && cb !== null) return offset(a, cb, w, s);
+  if (op === '+' && ca !== null) return offset(b, ca, w, s);
+  if (op === '-' && cb !== null) return offset(a, -cb, w, s);
   if (op === '>>' && cb === 32n && w === 64) {
     if (s) return no('signed 64-bit shift');
     return widen(high(a), false);
@@ -325,8 +342,10 @@ interface Ctx {
 
 interface State {
   env: Map<string, Val>;
-  /** The seed's address, once a seed access fixed it. */
+  /** The seed's address, once a seed access fixed it: through a pointer fact, what it holds. */
   seed: Expression | null;
+  /** The seed's address as the first access spelled it. */
+  spelled?: Expression;
   lo: Num | null;
   hi: Num | null;
   /** The seed was stored to on this path. */
@@ -345,15 +364,25 @@ function isSeedShape(ctx: Ctx, e: Expression): boolean {
 }
 
 class Runner {
-  constructor(private ctx: Ctx, private nKey: string) {}
+  /** A fact's run (`fact`) reads only integer locals and members of local structs, and sets
+   *  `readsMember` when it reads a member. */
+  readsMember = false;
+
+  constructor(private ctx: Ctx, private nKey: string, private ptrs: ReadonlyMap<string, Expression> = new Map(),
+    private mode: 'block' | 'fact' = 'block') {}
 
   /** Fix or check the seed a seed lvalue names. */
   private seedAt(st: State, lvalue: Expression): void {
+    if (this.mode === 'fact') no('seed in a fact');
     if (!isPlainLvalue(lvalue)) no('seed lvalue with a side effect');
-    const addr = addressOf(lvalue);
+    const spelled = addressOf(lvalue);
+    // A pointer local that holds `&E` at the block's entry names E's seed.
+    const p = nameOf(spelled);
+    const addr = p !== null && this.ptrs.has(p) ? this.ptrs.get(p)! : spelled;
     if (!st.seed) {
       for (const n of namesIn(addr)) if (this.ctx.kinds.get(n) === 'seed') no('seed is a local');
       st.seed = addr;
+      st.spelled = spelled;
       return;
     }
     if (!sameExpr(st.seed as ASTNode, addr as ASTNode)) no('two seeds');
@@ -396,6 +425,7 @@ class Runner {
 
   /** A read of memory other than the seed: allowed only before the seed is stored. */
   private memoryAtom(st: State, e: Expression): Num {
+    if (this.mode === 'fact') no('memory in a fact');
     if (st.stored) no('memory read after a seed store');
     const k = this.kindOf(e) ?? no('memory read of unknown type');
     if (k.w === 64) no('64-bit memory read');
@@ -433,6 +463,7 @@ class Runner {
         // whose address is taken is still a stack object no seed word can be.
         if (this.ctx.locals.has(n) || this.ctx.params.has(n)) {
           if (!kind) return no('local of unknown type');
+          if (this.mode === 'fact' && this.ctx.addressed.has(n)) no('addressed local in a fact');
           if (kind.w === 64) return { t: 'num', k: 'v:' + n, w: 64, s: kind.s };
           return { t: 'num', k: 'v:' + n, w: 32, s: kind.w < 32 ? true : kind.s };
         }
@@ -458,6 +489,7 @@ class Runner {
         if (!m.isArrow && root && (this.ctx.locals.has(root) || this.ctx.params.has(root)) && this.ctx.kinds.get(root) !== 'seed') {
           if (st.written.has(root)) no('member of a written local');
           const k = this.kindOf(e) ?? no('member of unknown type');
+          this.readsMember = true;
           if (k.w === 64) no('64-bit member');
           return { t: 'num', k: 'v:' + emit(e as AnyNode).replace(/\s+/g, ''), w: 32, s: k.w < 32 ? true : k.s };
         }
@@ -492,6 +524,7 @@ class Runner {
       case NodeKind.CallExpr: {
         const c = e as CallExpr;
         const name = calleeName(c);
+        if (this.mode === 'fact') no('call in a fact');
         if (name === ROLL && c.arguments.length === 1) {
           this.seedAt(st, lvalueOfAddress(c.arguments[0]));
           const w = this.seedWords(st);
@@ -723,6 +756,213 @@ function guardOf(i: IfStmt, ctx: Ctx): Guard | null {
 }
 
 // ---------------------------------------------------------------------------
+// What holds at a guard's entry
+
+/**
+ * The values locals hold when a guard is reached, from the statements that run before it on
+ * every path: the guard is often written against a definition just above it (`n = k - 1;`
+ * then the test `n & k - 2U`, or `d = r * 2; n = d + 1;` then `n & d`), and a seed pointer
+ * set once (`pSeed = &pUnit->sSeed`) names the same seed as the member it points at.
+ *
+ * The walk follows the chain of statements from the function's body down to the guard. In
+ * each list it runs the statements before the one that leads on, in order: `L = E` gives L
+ * E's value when E reads only integer locals and parameters whose address is never taken,
+ * constants and members of local structs; anything else gives every local it writes a fresh
+ * value nothing else equals. Entering a loop gives the same fresh value to every local the
+ * loop writes anywhere (a later iteration reaches the guard too), entering an if to every
+ * local its condition writes. A value read from a member of a local struct is dropped at the
+ * first call or store that is not to a local, which could write the struct through an
+ * address it gave away. A label, case or switch on the way, or a label inside a statement
+ * before the guard, starts the walk again after it: control can arrive there without the
+ * statements above.
+ */
+interface Facts {
+  env: Map<string, Val>;
+  ptrs: Map<string, Expression>;
+}
+
+function findPath(root: ASTNode, target: ASTNode, path: ASTNode[] = []): ASTNode[] | null {
+  path.push(root);
+  if (root === target) return path;
+  for (const c of getChildren(root)) {
+    if (findPath(c, target, path)) return path;
+  }
+  path.pop();
+  return null;
+}
+
+function containsLabel(n: ASTNode): boolean {
+  if (n.kind === NodeKind.LabelStmt || n.kind === NodeKind.CaseStmt || n.kind === NodeKind.DefaultStmt) return true;
+  return getChildren(n).some(containsLabel);
+}
+
+/** Every name a node may write: assignment targets, ++/--, declarations; and whether it calls
+ *  or stores anywhere other than a whole local. */
+function effectsOf(n: ASTNode, out = { names: new Set<string>(), memory: false }): { names: Set<string>; memory: boolean } {
+  const target = (e: Expression) => {
+    const name = nameOf(e);
+    if (name !== null) out.names.add(name);
+    else {
+      out.memory = true;
+      // A member of a local struct written whole or in part.
+      let r = unwrap(e);
+      while (r.kind === NodeKind.MemberExpr && !(r as MemberExpr).isArrow) r = unwrap((r as MemberExpr).object);
+      const root = nameOf(r);
+      if (root !== null) out.names.add(root);
+    }
+  };
+  switch (n.kind) {
+    case NodeKind.AssignExpr: target((n as AssignExpr).left); break;
+    case NodeKind.UnaryExpr:
+      if (['++', '--'].includes((n as UnaryExpr).operator)) target((n as UnaryExpr).operand);
+      break;
+    case NodeKind.PostfixExpr: target((n as unknown as { operand: Expression }).operand); break;
+    case NodeKind.VariableDecl: out.names.add((n as VariableDecl).name.name); break;
+    case NodeKind.CallExpr: out.memory = true; break;
+    default: break;
+  }
+  for (const c of getChildren(n)) effectsOf(c, out);
+  return out;
+}
+
+class FactWalk {
+  private env = new Map<string, Val>();
+  private ptrs = new Map<string, Expression>();
+  /** Locals whose value was read from a member of a local struct. */
+  private fromMember = new Set<string>();
+  private serial = 0;
+
+  /** ownAddressed: names whose own storage has its address taken (`&x`, `&x.f`; not `&x->f`). */
+  constructor(private ctx: Ctx, private ptrLocals: ReadonlySet<string>, private ownAddressed: ReadonlySet<string>) {}
+
+  facts(): Facts {
+    return { env: new Map(this.env), ptrs: new Map(this.ptrs) };
+  }
+
+  private reset(): void {
+    this.env.clear(); this.ptrs.clear(); this.fromMember.clear();
+  }
+
+  /** L holds a value no other value equals. */
+  private fresh(name: string): void {
+    const kind = this.ctx.kinds.get(name);
+    if (kind && kind !== 'seed' && !this.ctx.addressed.has(name)) {
+      this.env.set(name, { t: 'num', k: `v:${name}@${++this.serial}`, w: kind.w === 64 ? 64 : 32, s: kind.w < 32 ? true : kind.s });
+    } else {
+      this.env.delete(name);
+    }
+    this.fromMember.delete(name);
+    this.ptrs.delete(name);
+    for (const [p, e] of [...this.ptrs]) if (namesIn(e).has(name)) this.ptrs.delete(p);
+  }
+
+  private effects(n: ASTNode): void {
+    const e = effectsOf(n);
+    for (const name of e.names) this.fresh(name);
+    if (e.memory) for (const name of [...this.fromMember]) this.fresh(name);
+  }
+
+  /** `L = E` or `T L = E`, where L is a local. */
+  private define(name: string, rhs: Expression, whole: ASTNode): void {
+    const rhsEffects = effectsOf(rhs);
+    if (rhsEffects.names.size > 0 || rhsEffects.memory) { this.effects(whole); return; }
+    const tracked = (this.ctx.locals.has(name) || this.ctx.params.has(name)) && !this.ctx.addressed.has(name);
+    // A seed pointer: `p = &E` with E a plain lvalue of unwritten names.
+    const r = unwrap(rhs);
+    if ((this.ctx.locals.has(name) || this.ctx.params.has(name)) && !this.ownAddressed.has(name) &&
+        this.ptrLocals.has(name) && r.kind === NodeKind.UnaryExpr && (r as UnaryExpr).operator === '&' &&
+        isPlainLvalue((r as UnaryExpr).operand) &&
+        [...namesIn(r)].every(n => n !== name && (this.ctx.locals.has(n) || this.ctx.params.has(n)) && !this.ownAddressed.has(n))) {
+      this.fresh(name);
+      this.ptrs.set(name, r);
+      return;
+    }
+    const kind = this.ctx.kinds.get(name);
+    if (!tracked || !kind || kind === 'seed') { this.fresh(name); return; }
+    try {
+      const run = new Runner(this.ctx, '', new Map(), 'fact');
+      const st: State = { env: this.env, seed: null, lo: null, hi: null, stored: false, arm: null, written: new Set() };
+      const v = convert(run.num(st, rhs), kind);
+      this.fresh(name);
+      this.env.set(name, v);
+      if (run.readsMember) this.fromMember.add(name);
+    } catch (e) {
+      if (!(e instanceof Reject)) throw e;
+      this.fresh(name);
+    }
+  }
+
+  /** One statement that runs before the guard. */
+  step(s: Statement): void {
+    if (containsLabel(s)) { this.reset(); return; }
+    if (s.kind === NodeKind.ExprStmt) {
+      const e = unwrap((s as ExprStmt).expression);
+      if (e.kind === NodeKind.AssignExpr && (e as AssignExpr).operator === '=') {
+        const name = nameOf((e as AssignExpr).left);
+        if (name !== null) { this.define(name, (e as AssignExpr).right, e); return; }
+      }
+    }
+    if (s.kind === NodeKind.DeclStmt) {
+      for (const d of (s as DeclStmt).declarations) {
+        if (d.kind !== NodeKind.VariableDecl) { this.effects(d); continue; }
+        const v = d as VariableDecl;
+        if (v.initializer && v.initializer.kind !== NodeKind.InitListExpr && !v.directInit && !v.copyListInit) {
+          this.define(v.name.name, v.initializer as Expression, v);
+        } else {
+          this.effects(v);
+        }
+      }
+      return;
+    }
+    this.effects(s);
+  }
+
+  /** Go from `parent` into its child `child`, on the way to the guard. */
+  enter(parent: ASTNode, child: ASTNode): void {
+    switch (parent.kind) {
+      case NodeKind.CompoundStmt: {
+        for (const s of (parent as CompoundStmt).statements) {
+          if (s === child) return;
+          this.step(s);
+        }
+        return;
+      }
+      case NodeKind.IfStmt: {
+        const i = parent as IfStmt;
+        if (i.init) this.step(i.init);
+        if (child !== i.condition) this.effects(i.condition);
+        return;
+      }
+      case NodeKind.ForStmt: {
+        const f = parent as ForStmt;
+        if (f.init && child !== f.init) this.step(f.init);
+        this.effects(f);
+        return;
+      }
+      case NodeKind.WhileStmt:
+      case NodeKind.DoWhileStmt:
+        this.effects(parent);
+        return;
+      case NodeKind.FunctionDecl:
+        return;
+      default:
+        // Labels, cases, switches and anything else: start again from here.
+        this.reset();
+        return;
+    }
+  }
+}
+
+/** The facts at `guard`, a statement of the body `root`. */
+function factsAt(root: CompoundStmt, guard: IfStmt, ctx: Ctx, ptrLocals: ReadonlySet<string>, ownAddressed: ReadonlySet<string>): Facts {
+  const path = findPath(root, guard);
+  const walk = new FactWalk(ctx, ptrLocals, ownAddressed);
+  if (!path) return walk.facts();
+  for (let i = 0; i + 1 < path.length; i++) walk.enter(path[i], path[i + 1]);
+  return walk.facts();
+}
+
+// ---------------------------------------------------------------------------
 // The pass
 
 interface Found {
@@ -756,15 +996,26 @@ function createSeedRollLimitedTransformer(options: SeedRollLimitedOptions = {}):
         if (p.name) { localTypes.set(p.name.name, p.type); params.add(p.name.name); }
       }
       const addressed = new Set<string>();
+      // The names whose own storage an `&` reaches: the root of `&x`, `&x.f`, `&x[i]`; through
+      // `->` or `*` the storage is somewhere else.
+      const ownAddressed = new Set<string>();
       const scan = (n: ASTNode): void => {
         if (n.kind === NodeKind.VariableDecl) {
           const v = n as VariableDecl;
           declCount.set(v.name.name, (declCount.get(v.name.name) ?? 0) + 1);
           if (!localTypes.has(v.name.name)) localTypes.set(v.name.name, v.type);
-          if (v.type.kind === NodeKind.ArrayType) addressed.add(v.name.name);
+          if (v.type.kind === NodeKind.ArrayType) { addressed.add(v.name.name); ownAddressed.add(v.name.name); }
         }
         if (n.kind === NodeKind.UnaryExpr && (n as UnaryExpr).operator === '&') {
           for (const name of namesIn((n as UnaryExpr).operand)) addressed.add(name);
+          let r = unwrap((n as UnaryExpr).operand);
+          for (;;) {
+            if (r.kind === NodeKind.MemberExpr && !(r as MemberExpr).isArrow) r = unwrap((r as MemberExpr).object);
+            else if (r.kind === NodeKind.SubscriptExpr) r = unwrap((r as unknown as { array: Expression }).array);
+            else break;
+          }
+          const root = nameOf(r);
+          if (root !== null) ownAddressed.add(root);
         }
         if (n.kind === NodeKind.Identifier && ['0x6ac690c5', ROLL, NEXT, NEXT_VAL].includes((n as Identifier).name)) anySeed = true;
         if (n.kind === NodeKind.IntegerLiteral && (n as IntegerLiteralExpr).value === MULTIPLIER) anySeed = true;
@@ -776,12 +1027,14 @@ function createSeedRollLimitedTransformer(options: SeedRollLimitedOptions = {}):
       const locals = new Set<string>();
       const kinds = new Map<string, IntKind | 'seed'>();
       const readOnly = new Set<string>();
+      const seedPointers = new Set<string>();
       for (const [name, t] of localTypes) {
         // A name declared twice (two scopes) is not tracked.
         if ((declCount.get(name) ?? 0) + (params.has(name) ? 1 : 0) !== 1) continue;
         if (params.has(name)) readOnly.add(name);
         else locals.add(name);
         const s = shapeOfNode(t, 0, resolve);
+        if (s && s.stars === 1 && s.base === SEED_TYPE) seedPointers.add(name);
         if (!s || s.stars !== 0) continue;
         if (s.base === SEED_TYPE) kinds.set(name, 'seed');
         else {
@@ -806,12 +1059,13 @@ function createSeedRollLimitedTransformer(options: SeedRollLimitedOptions = {}):
         const guard = guardOf(s as IfStmt, ctx);
         if (!guard) continue;
         try {
-          const entry: State = { env: new Map(), seed: null, lo: null, hi: null, stored: false, arm: null, written: new Set() };
-          const nKey = new Runner(ctx, '').num(entry, guard.limit).k;
+          const facts = factsAt(work, s as IfStmt, ctx, seedPointers, ownAddressed);
+          const entry: State = { env: new Map(facts.env), seed: null, lo: null, hi: null, stored: false, arm: null, written: new Set() };
+          const nKey = new Runner(ctx, '', facts.ptrs).num(entry, guard.limit).k;
           const ends: State[] = [];
           for (const take of [true, false]) {
-            const st: State = { env: new Map(), seed: null, lo: null, hi: null, stored: false, arm: null, written: new Set() };
-            new Runner(ctx, nKey).run(st, listOf(guard.body), take);
+            const st: State = { env: new Map(facts.env), seed: null, lo: null, hi: null, stored: false, arm: null, written: new Set() };
+            new Runner(ctx, nKey, facts.ptrs).run(st, listOf(guard.body), take);
             if (st.arm === null || !st.seed) no('no test');
             ends.push(st);
           }
@@ -829,8 +1083,8 @@ function createSeedRollLimitedTransformer(options: SeedRollLimitedOptions = {}):
           });
           // The seed's address names nothing the block writes.
           const written = new Set([...ends[0].written, ...ends[1].written]);
-          for (const name of namesIn(ends[0].seed!)) if (written.has(name)) no('seed address written');
-          found.push({ stmt: s as IfStmt, guard, seed: ends[0].seed!, written });
+          for (const name of [...namesIn(ends[0].seed!), ...namesIn(ends[0].spelled!)]) if (written.has(name)) no('seed address written');
+          found.push({ stmt: s as IfStmt, guard, seed: ends[0].spelled!, written });
         } catch (e) {
           // Anything the model does not cover leaves the block as it is.
           if (!(e instanceof Reject) && options.strict) throw e;
