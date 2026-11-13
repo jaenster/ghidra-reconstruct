@@ -3685,6 +3685,7 @@ function transformDecompiledCode(
         fieldTypes: context.funcPtrArgCasts.fieldTypes,
         structFields: context.funcPtrArgCasts.structFields,
         convertingAggregates: context.funcPtrArgCasts.convertingAggregates,
+        aggregateSizes: context.funcPtrArgCasts.aggregateSizes,
         typedefTargets: context.funcPtrArgCasts.typedefTargets,
         functionReturnTypes: context.funcPtrArgCasts.functionReturnTypes,
         enclosingVarTypes,
@@ -3738,6 +3739,11 @@ function transformDecompiledCode(
 
     // Comparisons in the form their instructions show. A tie that falls back from the
     // position zip, or leaves decisions untied, is reported.
+    // A low-piece store the original wrote whole is a whole store; one it wrote as just
+    // the piece stays one (scalar-piece-arithmetic.ts).
+    if (accessOrder) {
+      perPluginOptions['scalar-piece-arithmetic'] = { accessOrder, enumTypes: context?.funcPtrArgCasts?.enumTypes };
+    }
     if (context?.funcPtrArgCasts?.globalElementSizes || accessOrder) {
       perPluginOptions['array-fill-collapse'] = { globalElementSizes: context?.funcPtrArgCasts?.globalElementSizes, accessOrder };
     }

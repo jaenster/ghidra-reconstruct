@@ -141,8 +141,10 @@ export function dataRuns(
   implOf: ReadonlyMap<string, string>,
 ): DataRun[] {
   const names = new Set(globals.map(g => g.suggestedName || g.name));
+  // A global a compile proved some other object defines is no TU's data here
+  // (vc8-data-linkage.ts): the run closes over it.
   const storage = globals
-    .filter(g => isEmittableGlobal(g) && !isUnreferenceableArtifact(g, names) && Number.isFinite(addressOf(g)))
+    .filter(g => !g.definedElsewhere && isEmittableGlobal(g) && !isUnreferenceableArtifact(g, names) && Number.isFinite(addressOf(g)))
     .sort((a, b) => addressOf(a) - addressOf(b));
   // The TU every user of a symbol is in, or undefined.
   const homeOf = (g: AnalyzedDataSymbol): string | undefined => {
@@ -288,7 +290,10 @@ export function assignDataHomes(
   implOf: ReadonlyMap<string, string>,
   inputs: DataHomeInputs,
 ): { homed: number; centrallyDeclared: number } {
-  for (const g of globals) { g.homeFile = undefined; g.homeDeclaredCentrally = undefined; homeVeto.delete(g); }
+  for (const g of globals) {
+    g.homeFile = undefined; g.homeDeclaredCentrally = undefined; homeVeto.delete(g);
+    if (g.definedElsewhere) homeVeto.set(g, 'vc8datalinkage-extern');
+  }
   // One emitted name, one symbol: the bare sanitized spelling, because that is the
   // token a body names it by and the key user TUs find their include by. A
   // function-local static is no such name: it is declared inside its function and
