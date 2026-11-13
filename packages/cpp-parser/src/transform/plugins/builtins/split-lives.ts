@@ -546,7 +546,7 @@ function namesIn(body: ASTNode): Set<string> {
  * touches it. With the members, why each seed whose reach is unknown is so: the escape
  * that left it unbounded, for the run's report.
  */
-export function frameReach(body: CompoundStmt, slots: readonly StackSlot[], o: SplitLivesOptions): { members: Map<string, string>; why: Map<string, string> } {
+function frameReach(body: CompoundStmt, slots: readonly StackSlot[], o: SplitLivesOptions): { members: Map<string, string>; why: Map<string, string> } {
   const offsetOf = new Map<string, StackSlot>();
   for (const s of slots) if (!s.isParameter) offsetOf.set(s.name, s);
   /** Seed -> the bytes its escapes are known to reach from its start, or null when unknown. */

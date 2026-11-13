@@ -3844,8 +3844,6 @@ function transformDecompiledCode(
         ...(paramReach ? {
           argReach: (callee: string, index: number, argCount: number) => paramReach.argReach(callee, index, argCount),
           computedArgReach: (callee: Expression, index: number, argCount: number) => paramReach.argReachThrough(callee, index, argCount),
-          bodyReach: (body: ASTNode, name: string, type: string, opts: { include: (use: ASTNode) => boolean }) =>
-            paramReach.bodyReach(body, name, type, opts),
         } : {}),
       };
     }

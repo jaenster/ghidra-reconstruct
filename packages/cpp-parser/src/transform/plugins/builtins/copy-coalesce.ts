@@ -46,7 +46,7 @@
 
 import { NodeKind } from '../../../ast/kinds.js';
 import type {
-  ASTNode, AnyNode, AssignExpr, BinaryExpr, CommaExpr, CompoundStmt, DeclStmt, ExprStmt, Expression, ForStmt, FunctionDecl,
+  ASTNode, AnyNode, AssignExpr, CallExpr, BinaryExpr, CommaExpr, CompoundStmt, DeclStmt, ExprStmt, Expression, ForStmt, FunctionDecl,
   Identifier, ParameterDecl, Statement, TypeNode, UnaryExpr, VariableDecl,
 } from '../../../ast/nodes.js';
 import { traverseAST } from '../../../ast/visitor.js';
@@ -55,7 +55,7 @@ import { createTransformer, updateNode, type Transformer } from '../../transform
 import type { TransformPlugin, PluginOptions } from '../types.js';
 import { buildFunctionFlow, ENTRY_DEF, type FunctionFlow } from '../../cfg/index.js';
 import type { StackSlot } from './stack-frame-address.js';
-import { frameReach, type SplitLivesOptions } from './split-lives.js';
+import { callNeedsFrame } from './frame-group-locals.js';
 import type { Reach } from '../../cfg/index.js';
 
 export interface CopyCoalesceOptions extends PluginOptions {
@@ -67,7 +67,6 @@ export interface CopyCoalesceOptions extends PluginOptions {
   /** Each callee's reach through a pointer parameter, as frame-group-locals is given it. */
   argReach?: (callee: string, index: number, argCount: number) => Reach;
   computedArgReach?: (callee: Expression, index: number, argCount: number) => Reach;
-  bodyReach?: (body: ASTNode, name: string, type: string, opts: { include: (use: ASTNode) => boolean }) => Reach;
 }
 
 /** frame-group-locals' widest hole inside one frame object. */
@@ -178,18 +177,25 @@ function writesAny(e: ASTNode, names: ReadonlySet<string>): boolean {
 }
 
 /**
- * The frame locals a callee may reach through an address that leaves the frame - which
- * frame-group-locals may make members of a frame object: split-lives' `frameReach` (from
- * each escaping address, the bytes a known callee reach covers, else every following
- * local with a hole of at most MAX_GAP bytes), and from every array local, which a
- * callee is handed without `&`, the widest run. Null when the frame cannot be judged: a
- * frame position named by offset, or no frame and an escape.
+ * The frame locals frame-group-locals may make members of a frame object, by its own rule:
+ * a run starts at a local whose address is stored, used as an initialiser, or handed to a
+ * call that reaches past it or whose reach nobody knows (its `callNeedsFrame`), and at
+ * every array local; it extends through each following local with a hole of at most
+ * MAX_GAP bytes, whatever the reach. Every local whose address is taken is refused too.
+ * Null when the frame cannot be judged: a frame position named by offset, or no frame
+ * and an escape.
  */
 function frameMembers(fn: FunctionDecl, options: CopyCoalesceOptions): Set<string> | null {
   const slots = options.slots;
   const seeds = new Set<string>();
   const escapes = new Set<string>();
   let named = false;
+  const slotSize = (name: string) => slots?.find(x => x.name === name && !x.isParameter)?.size;
+  const unwrapCasts = (e: Expression): Expression => {
+    let x = e;
+    while (x.kind === NodeKind.ParenExpr || x.kind === NodeKind.CStyleCastExpr) x = (x as unknown as { expression: Expression }).expression;
+    return x;
+  };
   const walk = (n: ASTNode, parent: ASTNode | null): void => {
     if (n.kind === NodeKind.Identifier && /stack0x/i.test((n as Identifier).name)) named = true;
     if (n.kind === NodeKind.UnaryExpr && (n as UnaryExpr).operator === '&') {
@@ -197,13 +203,25 @@ function frameMembers(fn: FunctionDecl, options: CopyCoalesceOptions): Set<strin
       while (t.kind === NodeKind.MemberExpr && !(t as unknown as { isArrow: boolean }).isArrow) t = unwrap((t as unknown as { object: Expression }).object);
       while (t.kind === NodeKind.SubscriptExpr) t = unwrap((t as unknown as { array: Expression }).array);
       const deref = parent?.kind === NodeKind.UnaryExpr && (parent as UnaryExpr).operator === '*';
-      if (t.kind === NodeKind.Identifier && !deref) escapes.add((t as Identifier).name);
+      if (t.kind === NodeKind.Identifier && !deref) {
+        const name = (t as Identifier).name;
+        escapes.add(name);
+        // frame-group-locals' own test: a call argument starts a run when the callee
+        // reaches past the local or nobody can say; a stored address always does.
+        if (parent?.kind !== NodeKind.CallExpr) seeds.add(name);
+        else {
+          const call = parent as CallExpr;
+          const index = call.arguments.findIndex(a => a === n || unwrapCasts(a) === n);
+          if (index < 0 || callNeedsFrame(call, index, name, options.argReach, () => slotSize(name), undefined, options.computedArgReach)) seeds.add(name);
+        }
+      }
     }
     if (n.kind === NodeKind.VariableDecl) {
       const t = (n as VariableDecl).type as unknown as { kind: NodeKind };
       if (t && t.kind === NodeKind.ArrayType) seeds.add((n as VariableDecl).name.name);
     }
-    for (const [, c] of childNodes(n)) walk(c, n.kind === NodeKind.ParenExpr ? parent : n);
+    const through = n.kind === NodeKind.ParenExpr || n.kind === NodeKind.CStyleCastExpr;
+    for (const [, c] of childNodes(n)) walk(c, through ? parent : n);
   };
   walk(fn.body!, null);
   if (named) return null;
@@ -214,10 +232,7 @@ function frameMembers(fn: FunctionDecl, options: CopyCoalesceOptions): Set<strin
     return new Set();
   }
   const frame = slots.filter(s => !s.isParameter && s.offset < 0 && s.size > 0).sort((x, y) => x.offset - y.offset);
-  const reach = frameReach(fn.body!, slots, {
-    slots, argReach: options.argReach, computedArgReach: options.computedArgReach, bodyReach: options.bodyReach,
-  } as SplitLivesOptions);
-  const out = new Set<string>(reach.members.keys());
+  const out = new Set<string>();
   // A local whose address escapes is never folded, whether or not it has a slot.
   for (const name of escapes) out.add(name);
   for (const name of seeds) {

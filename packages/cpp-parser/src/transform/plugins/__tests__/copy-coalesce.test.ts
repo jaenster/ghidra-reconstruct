@@ -155,6 +155,13 @@ describe('copy-coalesce', () => {
     same(BNFTP);
   });
 
+  it('Monsters.cpp 005a4f50: a run started by a callee reaching past its local extends to every neighbour', () => {
+    const src = `void f(Unit* pUnit) { int nMin; int nMax; Unit* pUnitSaved; pUnitSaved = pUnit; Calc(pUnit, &nMin); g(pUnitSaved, nMin + nMax); }`;
+    const slots = [{ name: 'nMin', offset: -12, size: 4 }, { name: 'nMax', offset: -8, size: 4 }, { name: 'pUnitSaved', offset: -4, size: 4 }];
+    // Calc writes nMin and nMax: the run is the whole frame, though the callee stops at 8.
+    same(src, { slots, argReach: () => ({ lo: 0, hi: 8 }) });
+  });
+
   it('a neighbour handed to a callee that reaches only its own word does not hold the fold', () => {
     const src = `int f(int* p) { int n; int* q; q = p; Get(&n); return *q + n; }`;
     const slots = [{ name: 'n', offset: -8, size: 4 }, { name: 'q', offset: -4, size: 4 }];
@@ -162,6 +169,12 @@ describe('copy-coalesce', () => {
     same(src, { slots });
     // Get stores one word through its pointer.
     assert.strictEqual(run(src, { slots, argReach: () => ({ lo: 0, hi: 4 }) }), 'int f(int* p) { int n; Get(&n); return *p + n; }');
+  });
+
+  it('ItemMode.cpp 00563350: a slot after an address stored in a pointer stays, whatever the pointer reaches', () => {
+    const src = `int f(Game* pGame, Unit* pUnit) { int32_t nPutItemResult; Unit* pUnitAsPool; int32_t* pResultOut; pUnitAsPool = pUnit; pResultOut = &nPutItemResult; return Put(pGame, pUnitAsPool, pResultOut); }`;
+    const slots = [{ name: 'nPutItemResult', offset: -12, size: 4 }, { name: 'pUnitAsPool', offset: -8, size: 4 }];
+    same(src, { slots, argReach: () => ({ lo: 0, hi: 4 }) });
   });
 
   it('refuses a source written between the copy and a read', () => {
