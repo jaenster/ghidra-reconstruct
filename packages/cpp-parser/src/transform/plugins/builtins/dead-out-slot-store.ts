@@ -153,7 +153,9 @@ function createDeadOutSlotStoreTransformer(options: DeadOutSlotStoreOptions): Tr
         const v = d as VariableDecl;
         if (params.has(v.name.name)) continue;
         const spelled = emit(v.type as never).replace(/\s+/g, ' ').trim();
-        localSize.set(v.name.name, localSize.has(v.name.name) ? null : typeSize(spelled));
+        // A volatile store is observable even when no later value read uses it.
+        localSize.set(v.name.name, localSize.has(v.name.name) || /\bvolatile\b/.test(spelled)
+          ? null : typeSize(spelled));
       }
       const addressTaken = new Map<string, number>();
       for (const u of findNodesByKind(fn.body, NodeKind.UnaryExpr)) {

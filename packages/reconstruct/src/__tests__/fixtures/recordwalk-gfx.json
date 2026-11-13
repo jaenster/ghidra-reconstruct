@@ -1,0 +1,267 @@
+{
+  "provenance": "Windows 1.14d live MCP function and type reads, Ghidra v2092. One name-length compareSites row is manually attested from CMP/JNC; remaining rows have no facts. Not an owning snapshot export/extractor run. Synthetic local recordwalk tag is added only by the test.",
+  "function": {
+    "name": "GFX_LoadAndHashCofArchive",
+    "address": "0046ddf0",
+    "signature": "void GFX_LoadAndHashCofArchive(char * szPath, D2CofCacheStrc * pCache)",
+    "returnType": "void",
+    "callingConvention": "__stdcall",
+    "size": 252,
+    "isThunk": false,
+    "isExternal": false,
+    "hasVarArgs": false,
+    "namespace": "D2Client::Engine::Gfx",
+    "parameters": [
+      {
+        "name": "szPath",
+        "dataType": "char *",
+        "size": 4,
+        "ordinal": 0,
+        "storage": "Stack[0x4]:4",
+        "stackOffset": 4,
+        "resolvedType": null
+      },
+      {
+        "name": "pCache",
+        "dataType": "D2CofCacheStrc *",
+        "size": 4,
+        "ordinal": 1,
+        "storage": "EBX:4",
+        "stackOffset": null,
+        "resolvedType": null
+      }
+    ],
+    "localVariables": [
+      {
+        "name": "pMPQ",
+        "dataType": "undefined4",
+        "size": 4,
+        "storage": "EAX:4",
+        "stackOffset": null,
+        "resolvedType": "D2PoolManagerStrc *"
+      },
+      {
+        "name": "pEntry",
+        "dataType": "undefined4",
+        "size": 4,
+        "storage": "EAX:4",
+        "stackOffset": null,
+        "resolvedType": "D2CofTextureCacheEntryStrc *"
+      },
+      {
+        "name": "nAddress",
+        "dataType": "undefined4",
+        "size": 4,
+        "storage": "EAX:4",
+        "stackOffset": null,
+        "resolvedType": "void *"
+      },
+      {
+        "name": "pNameEnd",
+        "dataType": "undefined4",
+        "size": 4,
+        "storage": "EAX:4",
+        "stackOffset": null,
+        "resolvedType": "char *"
+      },
+      {
+        "name": "nHash",
+        "dataType": "undefined4",
+        "size": 4,
+        "storage": "EAX:4",
+        "stackOffset": null,
+        "resolvedType": "uint32_t"
+      },
+      {
+        "name": "nBucket",
+        "dataType": "undefined4",
+        "size": 4,
+        "storage": "ECX:4",
+        "stackOffset": null,
+        "resolvedType": "uint"
+      },
+      {
+        "name": "local_8",
+        "dataType": "undefined4",
+        "size": 4,
+        "storage": "Stack[-0x8]:4",
+        "stackOffset": -8,
+        "resolvedType": null
+      },
+      {
+        "name": "nSrcLine",
+        "dataType": "int32_t",
+        "size": 4,
+        "storage": "HASH:3f3a0b0b20:4",
+        "stackOffset": null,
+        "resolvedType": null
+      },
+      {
+        "name": "pcSrcFile",
+        "dataType": "undefined4",
+        "size": 4,
+        "storage": "HASH:3feb2a408b:4",
+        "stackOffset": null,
+        "resolvedType": null
+      },
+      {
+        "name": "pSize",
+        "dataType": "undefined4",
+        "size": 4,
+        "storage": "HASH:7bf67eed7e8:4",
+        "stackOffset": null,
+        "resolvedType": "int32_t *"
+      },
+      {
+        "name": "nLine",
+        "dataType": "undefined4",
+        "size": 4,
+        "storage": "HASH:3fec272e9e:4",
+        "stackOffset": null,
+        "resolvedType": "int32_t"
+      },
+      {
+        "name": "nRemaining",
+        "dataType": "undefined4",
+        "size": 4,
+        "storage": "HASH:5f2419b827:4",
+        "stackOffset": null,
+        "resolvedType": "int"
+      },
+      {
+        "name": "DVar1",
+        "dataType": "undefined1",
+        "size": 1,
+        "storage": "HASH:5f8685ef10:1",
+        "stackOffset": null,
+        "resolvedType": "char"
+      },
+      {
+        "name": "nChar",
+        "dataType": "undefined4",
+        "size": 4,
+        "storage": "HASH:5ff8d5b277:4",
+        "stackOffset": null,
+        "resolvedType": null
+      },
+      {
+        "name": "ppNameChar",
+        "dataType": "undefined4",
+        "size": 4,
+        "storage": "HASH:27f054006ee:4",
+        "stackOffset": null,
+        "resolvedType": null
+      }
+    ],
+    "tags": [
+      {
+        "type": "llm-named"
+      },
+      {
+        "type": "llm-artifact-fix"
+      },
+      {
+        "type": "halt-returns"
+      },
+      {
+        "type": "x64-typing"
+      }
+    ],
+    "decompiled": "\n/* @function GFX_LoadAndHashCofArchive\n   @address Game.exe.ram:0046ddf0\n   @date 2026.06.13\n   @params\n     szPath: Stack[0x4]:4 (char *)\n     pCache: EBX:4 (int *)\n   @description Diablo 2 1.14d reverse team\n   https://blizzhackers.dev\n   \n   Function uses custom registers for function arguments!\n   [char * szPath@Stack[0x4]:4]\n   [int * pCache@EBX:4]\n   @sourcefile .\\ENGINE\\Gfx.cpp\n   @sourcefile-basis Blizzard __FILE__ literal referenced from inside this function's body (1 site:\n   0046de04). First-party 1.14d evidence, not inferred and not from D2R. */\n\nvoid D2Client::Engine::Gfx::GFX_LoadAndHashCofArchive(char *szPath,D2CofCacheStrc *pCache)\n\n{\n  uint32_t *puVar1;\n  D2PoolManagerStrc *pMPQ;\n  D2CofTextureCacheEntryStrc *pEntry;\n  void *nAddress;\n  char *pNameEnd;\n  uint32_t nHash;\n  uint nBucket;\n  int32_t nSrcLine;\n  char DVar1;\n  int32_t nLine;\n  int nRemaining;\n  int32_t *pSize;\n  \n  if (pCache->nFrameCount == 0) {\n    nSrcLine = 0x10b;\n    pNameEnd = \".\\\\ENGINE\\\\Gfx.cpp\";\n    pSize = &pCache->nCacheEntryCount;\n    pMPQ = D2Win::Src::D2WinArchive::ReturnZero();\n    pEntry = D2Hell::D2FILE_AllocAndLoadD2File(pMPQ,szPath,(uint32_t *)pSize,pNameEnd,nSrcLine);\n    pCache->pCacheMemory = pEntry;\n    if (pEntry == (D2CofTextureCacheEntryStrc *)0x0) {\n      nLine = 0x10c;\nLAB_0046de28:\n      nAddress = Fog::Src::ErrorManager::GetInstructionPointer();\n      Fog::Src::ErrorManager::ERROR_UnrecoverableInternalError_Halt(\"\",nAddress,nLine);\n                    /* WARNING: Subroutine does not return */\n      compiler::exit(-1);\n    }\n    nRemaining = pCache->nCacheEntryCount;\n    gbCofCacheLRUEnabled = gbCofCacheLRUEnabled + nRemaining;\n    for (; nRemaining != 0; nRemaining = nRemaining + (-0x18 - *puVar1)) {\n      if (pEntry->dwFlags != 0) {\n        pEntry->dwFlags = 0;\n      }\n      if (0x40 < (byte)pEntry->field_0x1a) {\n        nLine = 0x126;\n        goto LAB_0046de28;\n      }\n      pEntry->pFileData = &pEntry->field_0x18;\n      pNameEnd = pEntry->szName;\n      do {\n        DVar1 = *pNameEnd;\n        pNameEnd = pNameEnd + 1;\n      } while (DVar1 != '\\0');\n      if (7 < (uint)((int)pNameEnd - (int)(pEntry->szName + 1))) {\n        nLine = 0x79;\n        goto LAB_0046de28;\n      }\n      nHash = Storm::Source::SSTR::SStrHash(pEntry->szName,1,0);\n      nBucket = (((nHash >> 8 ^ nHash) >> 8 ^ nHash) >> 8 ^ nHash) & 0x1ff;\n      pEntry->pNext = pCache->apBuckets[nBucket];\n      pCache->apBuckets[nBucket] = pEntry;\n      puVar1 = &pEntry->nFileSize;\n      pEntry = (D2CofTextureCacheEntryStrc *)(&pEntry->field_0x18 + *puVar1);\n    }\n    pCache->nFrameCount = 1;\n  }\n  return;\n}\n\n",
+    "compareSites": "0\t==\t-\n1\t==\t-\n2\t!=\t-\n3\t!=\t-\n4\t<\t-\n5\t!=\t-\n6\t<\tINT_LESS\t4\t0\t7\tc:7\te\t0046de8c\t0046de8f\tJNC\t0046de8c\tCMP\t4\tr\ti\t8\t1"
+  },
+  "types": [
+    {
+      "name": "D2CofTextureCacheEntryStrc",
+      "category": "/D2Client",
+      "size": 28,
+      "alignment": 1,
+      "kind": "STRUCTURE",
+      "fields": [
+        {
+          "name": "pNext",
+          "dataType": "D2CofTextureCacheEntryStrc *",
+          "offset": 0,
+          "size": 4
+        },
+        {
+          "name": "dwFlags",
+          "dataType": "uint32_t",
+          "offset": 4,
+          "size": 4
+        },
+        {
+          "name": "nFileSize",
+          "dataType": "uint32_t",
+          "offset": 8,
+          "size": 4
+        },
+        {
+          "name": "szName",
+          "dataType": "char[8]",
+          "offset": 12,
+          "size": 8
+        },
+        {
+          "name": "pFileData",
+          "dataType": "uint8_t *",
+          "offset": 20,
+          "size": 4
+        },
+        {
+          "dataType": "undefined",
+          "offset": 24,
+          "size": 1
+        },
+        {
+          "dataType": "undefined",
+          "offset": 25,
+          "size": 1
+        },
+        {
+          "dataType": "undefined",
+          "offset": 26,
+          "size": 1
+        },
+        {
+          "dataType": "undefined",
+          "offset": 27,
+          "size": 1
+        }
+      ]
+    },
+    {
+      "name": "D2CofCacheStrc",
+      "category": "/D2Client",
+      "size": 2060,
+      "alignment": 1,
+      "kind": "STRUCTURE",
+      "fields": [
+        {
+          "name": "nFrameCount",
+          "dataType": "int32_t",
+          "offset": 0,
+          "size": 4
+        },
+        {
+          "name": "pCacheMemory",
+          "dataType": "void *",
+          "offset": 4,
+          "size": 4
+        },
+        {
+          "name": "nCacheEntryCount",
+          "dataType": "int32_t",
+          "offset": 8,
+          "size": 4
+        },
+        {
+          "name": "apBuckets",
+          "dataType": "D2CofTextureCacheEntryStrc *[512]",
+          "offset": 12,
+          "size": 2048
+        }
+      ]
+    }
+  ]
+}

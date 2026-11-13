@@ -567,6 +567,9 @@ export interface ThunkForward {
 }
 
 export interface ImplGenContext {
+  /** Architecture and pointer width of the extracted binary, for target-specific forms. */
+  targetLanguageId?: string;
+  targetPointerSize?: number;
   /**
    * Thunk address → the forwarder's callee. Absent for a thunk whose target
    * Ghidra could not resolve, or which is not emitted anywhere in this tree;
@@ -1826,6 +1829,7 @@ export function generateFunctionImplementation(
           maskSites: override?.action === 'patch' ? undefined : func.maskSites,
           zextSites: override?.action === 'patch' ? undefined : func.zextSites,
           signedDivides: override?.action === 'patch' ? undefined : func.signedDivides,
+          truncatingRounds: override?.action === 'patch' ? undefined : func.truncatingRounds,
           // A text patch anchors on the stores as Ghidra printed them.
           registerStores: override?.action === 'patch' ? undefined : func.registerStores,
           // A text patch anchors on the shifts as Ghidra printed them.
@@ -2327,7 +2331,10 @@ function pushSlotInits(func: ExtractedFunction): Array<{ local: string; value: s
     if (m && p.name) byReg.set(m[1], p.name);
   }
   for (const v of func.localVariables ?? []) {
-    const m = /^Stack\[(-?0x[0-9a-f]+)\]:4$/i.exec((v.storage ?? '').trim());
+    // A raw byte/word stack record can resolve to a wider decompiler local.
+    // PUSH wrote the whole four-byte slot; the out-call proof below still uses
+    // the emitted local's type to require a complete overwrite before any read.
+    const m = /^Stack\[(-?0x[0-9a-f]+)\]:([1-4])$/i.exec((v.storage ?? '').trim());
     if (!m || !v.name) continue;
     const off = parseInt(m[1], 16);
     const slot = func.pushSlots.find(s => s.offset === off);
@@ -2932,6 +2939,7 @@ function transformDecompiledCode(
     zextSites?: import('../extract/zext-sites.js').ZextSiteFacts;
     /** The `/` and `%` operators the original computes with IDIV (extract/signed-divides.ts). */
     signedDivides?: import('../extract/signed-divides.js').SignedDivideFacts;
+    truncatingRounds?: import('../extract/truncating-rounds.js').TruncatingRoundFacts;
     /** The constants the original stores from a register (extract/register-stores.ts). */
     registerStores?: import('../extract/register-stores.js').RegisterStoreFacts;
     /** The rotates by an immediate the original performs, per line (extract/rotate-sites.ts). */
@@ -3592,7 +3600,9 @@ function transformDecompiledCode(
       if (context.funcPtrArgCasts.outParams) {
         const oracle = context.funcPtrArgCasts.outParams;
         perPluginOptions['dead-out-slot-store'] = {
-          outParamWidth: (callee: string, index: number) => oracle.outParamWidth(callee, index),
+          // This pass only hands the callee &local, so its null-output branch
+          // cannot leave the local unwritten.
+          outParamWidth: (callee: string, index: number) => oracle.outParamWidthNonNull(callee, index),
           typeSize: (spelling: string) => oracle.typeSize(spelling),
           pushSlotInits: enclosing?.pushSlotInits ?? [],
         };
@@ -3793,6 +3803,9 @@ function transformDecompiledCode(
     // Divisions the original computes with IDIV, tagged before any pass reshapes them.
     if (enclosing?.signedDivides) {
       perPluginOptions['signed-divide-site'] = { counts: enclosing.signedDivides.counts, sites: enclosing.signedDivides.sites };
+    }
+    if (enclosing?.truncatingRounds) {
+      perPluginOptions['truncating-round-site'] = enclosing.truncatingRounds;
     }
     if (enclosing?.compareForm) {
       perPluginOptions['compare-form'] = {
@@ -4015,9 +4028,15 @@ function transformDecompiledCode(
           console.warn(`[narrow-compare-widen] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.name} ${e.from} -> ${e.to}`),
       };
     }
-    if (enclosing?.compareSites) {
-      perPluginOptions['strlen-difference'] = { compareSites: enclosing.compareSites };
-    }
+    perPluginOptions['strlen-difference'] = {
+      compareSites: enclosing?.compareSites,
+      functionParamTypes: context?.funcPtrArgCasts?.functionParamTypes,
+      varArgFunctions: context?.funcPtrArgCasts?.varArgFunctions,
+      globalTypes: context?.funcPtrArgCasts?.globalTypes,
+      typedefTargets: context?.funcPtrArgCasts?.typedefTargets,
+      structFields: context?.funcPtrArgCasts?.structFields,
+      enclosingVarTypes,
+    };
     // A materialised comparison spelled as VC8 compiles the original's setcc or neg/sbb
     // (bool-select-form.ts): the rows give each comparison's flag reader, the decompile the
     // neg/sbb selects the generator folds.
@@ -4419,11 +4438,17 @@ function transformDecompiledCode(
         forms: vc8.forms,
         selectTables: {
           ...(perPluginOptions['select-argument'] as SelectArgumentOptions | undefined),
+          structLayouts: context?.funcPtrArgCasts?.structLayouts,
+          aggregateMembers: context?.funcPtrArgCasts?.aggregateMembers,
+          unionNames: context?.funcPtrArgCasts?.unionNames,
           accessors: context?.accessorTwins,
           ...(context?.funcPtrArgCasts?.outParams ? {
             outParamWidth: (callee: string, index: number) => context.funcPtrArgCasts!.outParams!.outParamWidthDocumented(callee, index),
             typeSize: (spelling: string) => context.funcPtrArgCasts!.outParams!.typeSize(spelling),
           } : {}),
+          structFieldOffsets: context?.funcPtrArgCasts?.structFieldOffsets,
+          targetLanguageId: context?.targetLanguageId,
+          targetPointerSize: context?.targetPointerSize,
         },
         onSite: s => {
           if (s.applied) for (const d of s.prefix ?? []) if (!vc8Prefix.includes(d)) vc8Prefix.push(d);

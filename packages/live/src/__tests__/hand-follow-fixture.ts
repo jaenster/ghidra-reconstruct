@@ -234,7 +234,13 @@ export function runScenario(root: string, exec: Exec): Map<string, string> {
     ['simulate', ['simulate', '--inventory', inv, '--plan', plan, '--worktree', repo, ...maps, '--tag', 'gold', '-o', path.join(out, 'sim')]],
   ];
   const res = new Map<string, string>();
-  const clean = (s: string) => s.split(repo).join('<TREE>').split(out).join('<OUT>').split(root).join('<ROOT>');
+  const clean = (s: string) => {
+    for (const [dir, label] of [[repo, '<TREE>'], [out, '<OUT>'], [root, '<ROOT>']]) {
+      // JSON doubles Windows backslashes; match that spelling before the raw path.
+      s = s.split(JSON.stringify(dir).slice(1, -1)).join(label).split(dir).join(label);
+    }
+    return s;
+  };
   for (const [name, argv] of steps) {
     const r = exec(argv);
     res.set(`${name}.stdout`, clean(`exit ${r.code}\n${r.stdout}`));

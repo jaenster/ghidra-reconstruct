@@ -19,6 +19,13 @@
  * SCMD_0x58_MarkQuestDone 0054c9c0). Such an operand is cast to `int32_t`, which is the
  * comparison the instructions make; an operand narrower than an int is promoted to a signed
  * int anyway and is left as it is, and a pointer comparison is never touched.
+ *
+ * At a native byte/word equality, the operands are bit patterns of that width.
+ * C++ instead promotes a signed and unsigned narrow pair to int: int16_t(-1)
+ * and uint16_t(65535) then compare unequal. Where compare-form records a native
+ * one- or two-byte comparison, cast the signed operand to that unsigned width.
+ * Both declared widths must match the native width. An implicit widening needs
+ * its own sign/zero-extension evidence, which a comparison-width fact lacks.
  */
 
 import { NodeKind } from '../../../ast/kinds.js';
@@ -51,6 +58,36 @@ const UNSIGNED_INT = new Set([
 ]);
 
 const ARITHMETIC = new Set(['+', '-', '*', '/', '%', '&', '|', '^']);
+
+const NARROW_SIGNED = new Map([
+  ...['char', 'signed char', 'int8_t', 'sbyte', 'CHAR'].map(n => [n, 1] as const),
+  ...['short', 'short int', 'signed short', 'signed short int', 'int16_t', 'SHORT', 'sword'].map(n => [n, 2] as const),
+]);
+const NARROW_UNSIGNED = new Map([
+  ...['unsigned char', 'uint8_t', 'byte', 'uchar', 'BYTE', 'UCHAR'].map(n => [n, 1] as const),
+  ...['unsigned short', 'unsigned short int', 'uint16_t', 'ushort', 'word', 'WORD', 'USHORT'].map(n => [n, 2] as const),
+]);
+
+function narrowInteger(e: Expression, shapeOf: ExprShape): { width: number; signed: boolean } | null {
+  const s = shapeOf(e);
+  if (!s || s.stars !== 0) return null;
+  const signed = NARROW_SIGNED.get(s.base), unsigned = NARROW_UNSIGNED.get(s.base);
+  if (signed) return { width: signed, signed: true };
+  if (unsigned) return { width: unsigned, signed: false };
+  return null;
+}
+
+/** The native equality's bit domain, instead of the wider integer promotions. */
+function narrowEquality(be: BinaryExpr, shapeOf: ExprShape): BinaryExpr | null {
+  const width = be.ghidraInfo?.compareWidth;
+  if ((be.operator !== '==' && be.operator !== '!=') || (width !== 1 && width !== 2)) return null;
+  const l = narrowInteger(be.left, shapeOf), r = narrowInteger(be.right, shapeOf);
+  if (!l || !r || l.width !== width || r.width !== width || l.signed === r.signed) return null;
+  return updateNode(be, {
+    left: l.signed ? compareCast(be.left, width) : be.left,
+    right: r.signed ? compareCast(be.right, width) : be.right,
+  } as Partial<BinaryExpr>);
+}
 
 /**
  * Whether `e` is an `unsigned int` once the integer promotions and the usual arithmetic
@@ -145,6 +182,8 @@ export function createCompareSignednessTransformer(options?: PluginOptions): Tra
       let changed = false;
       const inner = createTransformer({
         visitBinaryExpr(be: BinaryExpr): ASTNode | undefined {
+          const equality = narrowEquality(be, shapeOf);
+          if (equality) { changed = true; return equality; }
           const unsignedWidth = be.ghidraInfo?.unsignedCompareWidth;
           const signedWidth = be.ghidraInfo?.signedCompareWidth;
           if (unsignedWidth) {

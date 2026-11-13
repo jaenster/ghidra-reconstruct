@@ -1,0 +1,197 @@
+{
+  "note": "Live Ghidra decompiles with manually bound comparison facts checked against high P-code and native compare widths. Not an owning snapshot export or extraction.",
+  "functions": [
+    {
+      "address": "004155d0",
+      "name": "SFILE_SearchHashTable",
+      "decompiled": "\n/* @function SFILE_SearchHashTable\n   @address Game.exe.ram:004155d0\n   @date 2026.06.13\n   @params\n     pArchive: ECX:4 (D2ArchiveStrc *)\n     nLocale: Stack[0x4]:2 (int16_t)\n     cPlatform: Stack[0x8]:1 (char)\n     szFileName: EAX:4 (char *)\n   @description Diablo 2 1.14d reverse team\n   https://blizzhackers.dev\n   \n   Function uses custom registers for function arguments!\n   [D2ArchiveStrc * pArchive@ECX:4]\n   [int16_t nLocale@Stack[0x4]:2]\n   [char cPlatform@Stack[0x8]:1]\n   [char * szFileName@EAX:4]\n   @blizzard SearchHashTable (SFILE.CPP) */\n\nuint32_t Storm::Source::SFile::SFILE_SearchHashTable\n                   (D2ArchiveStrc *pArchive,int16_t nLocale,char cPlatform,char *szFileName)\n\n{\n  uint32_t nHashIndex;\n  uint32_t nHashA;\n  uint32_t nHashB;\n  uint nStartSlot;\n  uint32_t nSlot;\n  D2MPQHashEntryStrc *pHashSlot;\n  uint32_t nBestSlot;\n  char cEntryPlatform;\n  uint16_t nEntryLocale;\n  uint nTableMask;\n  \n  nHashIndex = Storm::Source::SFile::SFILE_Hash(0,szFileName);\n  nHashA = Storm::Source::SFile::SFILE_Hash(1,szFileName);\n  nHashB = Storm::Source::SFile::SFILE_Hash(2,szFileName);\n  nTableMask = pArchive->pMpqHeader->dwHashTableSize - 1;\n  nStartSlot = nTableMask & nHashIndex;\n  pHashSlot = pArchive->pHashTable + nStartSlot;\n  nHashIndex = pHashSlot->dwBlockIndex;\n  nBestSlot = 0xffffffff;\n  nSlot = nStartSlot;\n  do {\n    if (nHashIndex == 0xffffffff) {\n      return nBestSlot;\n    }\n    if (((pHashSlot->dwHashA == nHashA) && (pHashSlot->dwHashB == nHashB)) &&\n       (pHashSlot->dwBlockIndex != 0xfffffffe)) {\n      nEntryLocale = pHashSlot->wLocale;\n      if ((nEntryLocale == nLocale) && ((char)pHashSlot->wPlatform == cPlatform)) {\n        return nSlot;\n      }\n      if (((nEntryLocale == 0) || (nEntryLocale == nLocale)) &&\n         ((cEntryPlatform = (char)pHashSlot->wPlatform, cEntryPlatform == '\\0' ||\n          (cEntryPlatform == cPlatform)))) {\n        nBestSlot = nSlot;\n      }\n    }\n    nSlot = nSlot + 1 & nTableMask;\n    if (nSlot == nStartSlot) {\n      return nBestSlot;\n    }\n    pHashSlot = pArchive->pHashTable + nSlot;\n    nHashIndex = pHashSlot->dwBlockIndex;\n  } while( true );\n}\n\n",
+      "rules": [
+        {
+          "left": "nEntryLocale",
+          "right": "nLocale",
+          "width": 2,
+          "native": [
+            "00415649",
+            "0041565c"
+          ]
+        }
+      ],
+      "types": {}
+    },
+    {
+      "address": "004403f0",
+      "name": "CHATDLG_HandleChatListClick",
+      "decompiled": "\n/* @function CHATDLG_HandleChatListClick\n   @address Game.exe.ram:004403f0\n   @date 2026.06.12\n   @calling __fastcall\n   @description Updates ladder board display after player click - renders rank cells with class\n   colors and experience */\n\nvoid __fastcall\nD2Multi::ChatDlg::CHATDLG_HandleChatListClick\n          (int32_t nStartRank,int32_t nRankCount,int32_t nEntryIndex,char nFilterMode,\n          uint8_t *nLadderData)\n\n{\n  byte *pbEntry;\n  byte *pbName;\n  int nCmp;\n  uint nCopyWords;\n  char *pbCopySrc;\n  byte *pbCursor;\n  WCHAR *pwszScratch;\n  uint nCopyLen;\n  char *pbCopyDst;\n  D2LadderRowBufStrc *pcScratch;\n  bool bCmpLess;\n  WCHAR wszNamePart [256];\n  WCHAR wszEmptyMsg [256];\n  char sScratch [256];\n  D2LadderRowBufStrc sRowBuf;\n  char szNumBuf [256];\n  int nNextRank;\n  int nEntryStride;\n  int nEndRank;\n  byte byCur;\n  char cTitleChar;\n  uint dwCharStats;\n  char *pcDstScan;\n  \n  if (g_pLadderBoardTextBox != (D2WinTextBox *)0x0) {\n    if (nRankCount == 0) {\n      pcScratch = &sRowBuf;\n      for (nCmp = 0x80; nCmp != 0; nCmp = nCmp + -1) {\n        pcScratch->wszCell[0] = L'\\0';\n        pcScratch->wszCell[1] = L'\\0';\n        pcScratch = (D2LadderRowBufStrc *)(pcScratch->wszCell + 2);\n      }\n      pwszScratch = wszNamePart;\n      for (nCmp = 0x80; nCmp != 0; nCmp = nCmp + -1) {\n        pwszScratch[0] = L'\\0';\n        pwszScratch[1] = L'\\0';\n        pwszScratch = pwszScratch + 2;\n      }\n      pwszScratch = wszEmptyMsg;\n      for (nCmp = 0x80; nCmp != 0; nCmp = nCmp + -1) {\n        pwszScratch[0] = L'\\0';\n        pwszScratch[1] = L'\\0';\n        pwszScratch = pwszScratch + 2;\n      }\n      D2Multi::OOGUtilities::OOGUTIL_GetProfileCharacterName(sScratch);\n      D2Lang::Unicode::UNISYS::STRING_CopyCharToWCharWithSetMaxSize\n                (wszNamePart,\"Player \\'%s\\' is not on the ladder.\",0x100);\n      D2Lang::Unicode::UNISYS::STRING_CopyCharToWCharWithSetMaxSize(wszEmptyMsg,sScratch,0x100);\n      D2Lang::Unicode::UNISYS::UNICODE_FormatWideString\n                (0x100,sRowBuf.wszCell,wszNamePart,wszEmptyMsg);\n      D2Multi::ChatDlg::UIMENU_DrawSpecificJoinGameError(sRowBuf.wszCell,(ChatDlgCallback *)0x0);\n      return;\n    }\n    if (nFilterMode == g_nLadderFilterMode) {\n      if (gnLadderBoardSelectedRank == -1) {\n        D2Win::Src::D2WinTextBox::D2WINTEXTBOX_ScrollToLine(g_pLadderBoardTextBox,nStartRank);\n        gnLadderBoardSelectedRank = nStartRank;\n        gnLadderRequestedCharIndex = nStartRank;\n        gnLadderScrollPos = nStartRank;\n      }\n      nEndRank = nStartRank + nRankCount;\n      if (gnLadderListRowCount < nStartRank + nRankCount) {\n        nEndRank = gnLadderListRowCount;\n      }\n      if (nStartRank < nEndRank) {\n        nEntryStride = nEntryIndex + 0xc;\n        pbEntry = nLadderData + 0xc;\n        do {\n          dwCharStats = *(uint *)(pbEntry + -4);\n          pbCopyDst = gszLadderCharNameFilter;\n          pbName = pbEntry;\n          do {\n            byCur = *pbName;\n            bCmpLess = byCur < (byte)*pbCopyDst;\n            if (byCur != *pbCopyDst) {\nLAB_00440551:\n              nCmp = (1 - (uint)bCmpLess) - (uint)(bCmpLess != 0);\n              goto LAB_00440556;\n            }\n            if (byCur == 0) break;\n            byCur = pbName[1];\n            bCmpLess = byCur < (byte)pbCopyDst[1];\n            if (byCur != pbCopyDst[1]) goto LAB_00440551;\n            pbName = pbName + 2;\n            pbCopyDst = pbCopyDst + 2;\n          } while (byCur != 0);\n          nCmp = 0;\nLAB_00440556:\n          if (nCmp == 0) {\n            nCopyLen = 0;\n          }\n          else {\n            nCopyLen = (dwCharStats & 0x10 | 0x40) >> 4;\n          }\n          D2Win::Src::D2WinTextBox::D2WINTEXTBOX_ClearLineRow(g_pLadderBoardTextBox,nStartRank);\n          D2Win::Src::D2WinTextBox::D2WINTEXTBOX_SetLineColor\n                    (g_pLadderBoardTextBox,nStartRank,nCopyLen);\n          nNextRank = nStartRank + 1;\n          compiler::_itoa(nNextRank,szNumBuf,10);\n          D2Win::Src::D2WinTextBox::D2WINTEXTBOX_SetLineCellTextA\n                    (g_pLadderBoardTextBox,szNumBuf,nStartRank,0);\n          sRowBuf.szName[0] = '\\0';\n          pbCopySrc = D2Win::Src::D2WinSmack::D2WINSMACK_GetTitlePrefixIndexFromClass\n                                (dwCharStats & 0xf,dwCharStats >> 8 & 0x1f,dwCharStats & 0x20,\n                                 dwCharStats & 0x40);\n          pbName = pbEntry;\n          pbCopyDst = pbCopySrc;\n          if (pbCopySrc != (char *)0x0) {\n            do {\n              cTitleChar = *pbCopyDst;\n              pbCopyDst = pbCopyDst + 1;\n            } while (cTitleChar != '\\0');\n            nCopyLen = (int)pbCopyDst - (int)pbCopySrc;\n            pbCopyDst = (char *)((int)sRowBuf.wszCell + 0x1ff);\n            do {\n              pcDstScan = pbCopyDst + 1;\n              pbCopyDst = pbCopyDst + 1;\n            } while (*pcDstScan != '\\0');\n            for (nCopyWords = nCopyLen >> 2; nCopyWords != 0; nCopyWords = nCopyWords - 1) {\n              *(undefined4 *)pbCopyDst = *(undefined4 *)pbCopySrc;\n              pbCopySrc = pbCopySrc + 4;\n              pbCopyDst = pbCopyDst + 4;\n            }\n            for (nCopyLen = nCopyLen & 3; nCopyLen != 0; nCopyLen = nCopyLen - 1) {\n              *pbCopyDst = *pbCopySrc;\n              pbCopySrc = pbCopySrc + 1;\n              pbCopyDst = pbCopyDst + 1;\n            }\n          }\n          do {\n            byCur = *pbName;\n            pbName = pbName + 1;\n          } while (byCur != 0);\n          nCopyLen = (int)pbName - (int)pbEntry;\n          pbName = (byte *)((int)sRowBuf.wszCell + 0x1ff);\n          do {\n            pbCursor = pbName + 1;\n            pbName = pbName + 1;\n          } while (*pbCursor != 0);\n          pbCursor = pbEntry;\n          for (nCopyWords = nCopyLen >> 2; nCopyWords != 0; nCopyWords = nCopyWords - 1) {\n            *(undefined4 *)pbName = *(undefined4 *)pbCursor;\n            pbCursor = pbCursor + 4;\n            pbName = pbName + 4;\n          }\n          for (nCopyLen = nCopyLen & 3; nCopyLen != 0; nCopyLen = nCopyLen - 1) {\n            *pbName = *pbCursor;\n            pbCursor = pbCursor + 1;\n            pbName = pbName + 1;\n          }\n          D2Win::Src::D2WinTextBox::D2WINTEXTBOX_SetLineCellTextA\n                    (g_pLadderBoardTextBox,sRowBuf.szName,nStartRank,1);\n          D2Win::Src::D2WinTextBox::D2WINTEXTBOX_SetLineCellTextA\n                    (g_pLadderBoardTextBox,gaszPlayerClassTokens[dwCharStats & 0xf],nStartRank,2);\n          compiler::_itoa((int)dwCharStats >> 0x10 & 0xff,szNumBuf,10);\n          D2Win::Src::D2WinTextBox::D2WINTEXTBOX_SetLineCellTextA\n                    (g_pLadderBoardTextBox,szNumBuf,nStartRank,3);\n          pcScratch = &sRowBuf;\n          for (nCmp = 0x80; nCmp != 0; nCmp = nCmp + -1) {\n            pcScratch->wszCell[0] = L'\\0';\n            pcScratch->wszCell[1] = L'\\0';\n            pcScratch = (D2LadderRowBufStrc *)(pcScratch->wszCell + 2);\n          }\n          D2Lang::StrTable::strtable::STRTABLE_FormatUInt64WithAbbrev\n                    (sRowBuf.wszCell,*(uint32_t *)(pbEntry + -0xc),*(uint32_t *)(pbEntry + -8),0xff)\n          ;\n          D2Win::Src::D2WinTextBox::D2WINTEXTBOX_SetLineCellTextWDirect\n                    (g_pLadderBoardTextBox,sRowBuf.wszCell,nStartRank,4);\n          pbEntry = pbEntry + nEntryStride;\n          nStartRank = nNextRank;\n        } while (nNextRank < nEndRank);\n      }\n    }\n  }\n  return;\n}\n\n",
+      "rules": [
+        {
+          "left": "nFilterMode",
+          "right": "g_nLadderFilterMode",
+          "width": 1,
+          "native": [
+            "004404b0"
+          ]
+        }
+      ],
+      "types": {
+        "globalTypes": {
+          "g_nLadderFilterMode": "uint8_t"
+        }
+      }
+    },
+    {
+      "address": "005770e0",
+      "name": "NPC_ProcessMercHire",
+      "decompiled": "\n/* WARNING: Enum \"eCollisionFlags\": Some values do not have unique names */\n/* WARNING: Enum \"eD2TimerType\": Some values do not have unique names */\n/* WARNING: Enum \"eD2TimerTypeDWORD\": Some values do not have unique names */\n/* @function NPC_ProcessMercHire\n   @address Game.exe.ram:005770e0\n   @date 2026.09.05\n   @calling __fastcall\n   @description Server-side handler for hiring a mercenary from a town NPC. Validates the NPC and\n   that quest gates are met (Qualkehk/0x203 requires RescueOnMountArreat; Akara/0x96 requires\n   SistersBurialGrounds before higher-cost mercs). Looks up the game NPC record and the requested\n   merc by name id (range-checked against GetHirelingNamesAndSize), rolls the merc's stats/cost\n   (RollMercStats), checks the player can afford it (CheckIfPlayerCanAffordCost), then spawns the\n   merc monster (SpawnMonster) and binds it to the player (MERC_HireAndReplaceMerc). On success\n   marks the hire slot taken, refreshes the for-hire list, and sends an NPC-transaction result\n   (0x2A, code 5). On any failure sends 0x2A with an error code (9/0xb/0xc/0xf) and current gold.\n   Side effects: spawns a unit, mutates NPC hire slots, sends packets to the player's client.\n   @sourcefile .\\UNIT\\SUNITNPC.CPP\n   @sourcefile-basis Blizzard __FILE__ literal referenced from inside this function's body (3 sites:\n   00577338, 0057736e, 005773b0). First-party 1.14d evidence, not inferred and not from D2R. */\n\nvoid __fastcall\nD2Game::UNIT::SUNITNPC::NPC_ProcessMercHire\n          (SGAMEDATA *pGame,D2UnitStrc *pUnit,D2UnitStrc *pNPC,uint16_t nMarcNameId)\n\n{\n  int32_t nPlayerLevel;\n  D2UnitDataPlayerStrc *pPlayerData;\n  BOOL bCheckPassed;\n  int nPlayerGold;\n  D2GameNpcStrc *pGameNpc;\n  uint32_t nNameId;\n  D2MercForHire *pHireSlot;\n  D2MonsterAiStrc *pNpcMonsterAi;\n  int32_t nGold;\n  D2ClientStrc *pClientSend;\n  uint bFirstInteraction;\n  D2UnitStrc *pClient;\n  byte nResult;\n  byte nTradeType_00;\n  D2HirelingHireData sMercHireData;\n  int32_t nNpcDataIdx;\n  uint32_t nNameLast;\n  uint32_t nNameFirst;\n  int nGameNpcPtr;\n  int32_t nClassId;\n  int32_t nNcpClassId;\n  byte bTransactionCode;\n  int32_t nUnitGUID;\n  byte nTradeType;\n  int32_t nLineNum;\n  \n  nPlayerLevel = D2Common::Stats::StatsEx::STATSEX_GetCurrentStat(pUnit,UNITSTAT_level,0);\n  nGameNpcPtr = D2Game::UNIT::SUNITNPC::SUNITNPC_GetActCappedLevel(pGame,pNPC,nPlayerLevel);\n  D2Common::Units::Units::GetPlayerData(pUnit);\n  if (pNPC != (D2UnitStrc *)0x0) {\n                    /* Qualkehk */\n    if (pNPC->nClassId == 0x203) {\n      pPlayerData = D2Common::Units::Units::GetPlayerData(pUnit);\n      bCheckPassed = D2Common::QuestRecord::QuestRecord::GetQuestState\n                               (pPlayerData->pQuestRecord[pGame->nDifficulty],\n                                QUEST_RescueOnMountArreat,QUESTSTATE_Completed);\n      if (bCheckPassed == 0) {\n        nUnitGUID = -1;\n        nPlayerGold = D2Common::Stats::StatsEx::STATSEX_GetCurrentStat(pUnit,UNITSTAT_gold,0);\n        nTradeType_00 = (byte)bCheckPassed;\n        nResult = 0xb;\n        nLineNum = 0x654;\n        goto send_hire_failure;\n      }\n    }\n    if ((pNPC->nClassId == 0x96) && (nGameNpcPtr < 8)) {\n      pPlayerData = D2Common::Units::Units::GetPlayerData(pUnit);\n      bCheckPassed = D2Common::QuestRecord::QuestRecord::GetQuestState\n                               (pPlayerData->pQuestRecord[pGame->nDifficulty],\n                                QUEST_SistersBurialGrounds,QUESTSTATE_Completed);\n      if (bCheckPassed == 0) {\n        nUnitGUID = -1;\n        nPlayerGold = D2Common::Stats::StatsEx::STATSEX_GetCurrentStat(pUnit,UNITSTAT_gold,0);\n        nTradeType_00 = (byte)bCheckPassed;\n        nResult = 0xb;\n        nLineNum = 0x65f;\n        goto send_hire_failure;\n      }\n    }\n  }\n  pGameNpc = D2Game::UNIT::sunitproxy::GetGameNpcByUnit(pGame,pNPC,&nNpcDataIdx);\n  nGameNpcPtr = (int)pGameNpc;\n  if (pGameNpc == (D2GameNpcStrc *)0x0) {\n    nUnitGUID = -1;\n    nPlayerGold = D2Common::Stats::StatsEx::STATSEX_GetCurrentStat(pUnit,UNITSTAT_gold,0);\n    nTradeType_00 = (byte)pGameNpc;\n    nResult = 9;\n    nLineNum = 0x66c;\n  }\n  else {\n    if (pNPC == (D2UnitStrc *)0x0) {\n      nNcpClassId = -1;\n    }\n    else {\n      nNcpClassId = pNPC->nClassId;\n    }\n    D2Game::PLAYER::PlayerPets::GetHirelingNamesAndSize\n              (pGame,nNcpClassId,&nNameFirst,&nNameLast,&nClassId);\n    nNameId = (uint32_t)nMarcNameId;\n    if (((int)nNameId < (int)nNameFirst) || ((int)nNameLast < (int)nNameId)) {\n      nTradeType_00 = 0;\n      nUnitGUID = -1;\n      nPlayerGold = D2Common::Stats::StatsEx::STATSEX_GetCurrentStat(pUnit,UNITSTAT_gold,0);\n      nResult = 9;\n      nLineNum = 0x685;\n    }\n    else {\n      pHireSlot = (D2MercForHire *)((nNameId - nNameFirst) * 0x10 + *(int *)(nGameNpcPtr + 0x10));\n      if (pHireSlot->nNameStringId == nMarcNameId) {\n        if (pHireSlot->bActive == 0) {\n          nLineNum = D2Common::Merc::GetMercAct(pGame->bExpansion,0,pHireSlot->nNameStringId);\n          bCheckPassed = D2Common::Merc::RollMercStats\n                                   (pGame->bExpansion,pUnit,pHireSlot->nSeed,nLineNum,\n                                    (uint)pGame->nDifficulty,&sMercHireData);\n          if (bCheckPassed == 0) {\n            return;\n          }\n          bCheckPassed = D2Game::UNIT::SUNITNPC::CheckIfPlayerCanAffordCost\n                                   (pGame,pUnit,sMercHireData.nCost);\n          nTradeType_00 = 0;\n          if (bCheckPassed == 0) {\n            nUnitGUID = -1;\n            nPlayerGold = D2Common::Stats::StatsEx::STATSEX_GetCurrentStat(pUnit,UNITSTAT_gold,0);\n            nResult = 0xc;\n            nLineNum = 0x6ae;\n          }\n          else {\n            pClient = D2Game::Monster::Monster::Create::SpawnMonsterAtUnit\n                                (pGame,pNPC,nClassId,Neutral,4,0);\n            if ((pClient != (D2UnitStrc *)0x0) ||\n               (pClient = D2Game::Monster::Monster::Create::SpawnMonsterAtUnit\n                                    (pGame,pUnit,nClassId,Neutral,4,0), pClient != (D2UnitStrc *)0x0\n               )) {\n              pHireSlot->bActive = 1;\n              D2Game::Monster::MonsterAI::MERC_HireAndReplaceMerc\n                        (pGame,pUnit,pClient,-1,pHireSlot,0);\n              pNpcMonsterAi = D2Game::UNIT::sunitproxy::GetMonsterAI(pNPC);\n              nLineNum = D2Game::Monster::MonsterAI::CountMonstersByAi(pNpcMonsterAi);\n              bFirstInteraction = (uint)(nLineNum < 2);\n              pClientSend = D2Game::UNIT::SUnit::SUNIT_GetClient\n                                      (pUnit,\".\\\\UNIT\\\\SUNITNPC.CPP\",0x6c5);\n              D2Game::UNIT::SUNITNPC::SendMercForHireList(pGame,pClientSend,pNPC,bFirstInteraction);\n              if (pClient == (D2UnitStrc *)0x0) {\n                nPlayerGold = -1;\n              }\n              else {\n                nPlayerGold = pClient->nUnitGUID;\n              }\n              nTradeType = 0;\n              nGold = D2Common::Stats::StatsEx::STATSEX_GetCurrentStat(pUnit,UNITSTAT_gold,0);\n              bTransactionCode = 5;\n              pClientSend = D2Game::UNIT::SUnit::SUNIT_GetClient\n                                      (pUnit,\".\\\\UNIT\\\\SUNITNPC.CPP\",0x6c6);\n              D2Game::GAME::SCmd::NET_D2GS_SERVER_Send_0x2A_NpcTransaction\n                        (pClientSend,0x2a,bTransactionCode,nGold,nPlayerGold,nTradeType);\n              D2Game::UNIT::SUNITNPC::ResetNpcHireListIfEmpty\n                        (pGame,nNcpClassId,(D2GameNpcStrc *)nGameNpcPtr);\n              return;\n            }\n            nUnitGUID = -1;\n            nPlayerGold = D2Common::Stats::StatsEx::STATSEX_GetCurrentStat(pUnit,UNITSTAT_gold,0);\n            nTradeType_00 = (byte)pClient;\n            nResult = 0xf;\n            nLineNum = 0x6ba;\n          }\n        }\n        else {\n          nTradeType_00 = 0;\n          nUnitGUID = -1;\n          nPlayerGold = D2Common::Stats::StatsEx::STATSEX_GetCurrentStat(pUnit,UNITSTAT_gold,0);\n          nResult = 9;\n          nLineNum = 0x69a;\n        }\n      }\n      else {\n        nTradeType_00 = 0;\n        nUnitGUID = -1;\n        nPlayerGold = D2Common::Stats::StatsEx::STATSEX_GetCurrentStat(pUnit,UNITSTAT_gold,0);\n        nResult = 9;\n        nLineNum = 0x693;\n      }\n    }\n  }\nsend_hire_failure:\n  pClientSend = D2Game::UNIT::SUnit::SUNIT_GetClient(pUnit,\".\\\\UNIT\\\\SUNITNPC.CPP\",nLineNum);\n  D2Game::GAME::SCmd::NET_D2GS_SERVER_Send_0x2A_NpcTransaction\n            (pClientSend,0x2a,nResult,nPlayerGold,nUnitGUID,nTradeType_00);\n  return;\n}\n\n",
+      "rules": [
+        {
+          "left": "pHireSlot->nNameStringId",
+          "right": "nMarcNameId",
+          "width": 2,
+          "native": [
+            "00577218"
+          ]
+        }
+      ],
+      "types": {
+        "structFields": {
+          "D2MercForHire": {
+            "nNameStringId": "short"
+          }
+        }
+      }
+    },
+    {
+      "address": "0044ac20",
+      "name": "NET_MCP_CLIENT_Incoming0x04",
+      "decompiled": "\n/* @function NET_MCP_CLIENT_Incoming0x04\n   @address Game.exe.ram:0044ac20\n   @date 2026.06.13\n   @calling __fastcall\n   @description Diablo 2 1.14d reverse team\n   https://blizzhackers.dev */\n\nBOOL __fastcall\nD2MCPClient::McpConnect::NET_MCP_CLIENT_Incoming0x04(MCPPacketSrv0x04 *pBytes,size_t nSize)\n\n{\n  char *szGameIpString;\n  int nGameTokenUnused;\n  int nGameHashValue;\n  int32_t nIpStringMaxLen;\n  \n  nGameTokenUnused = pBytes->nGameToken;\n  nGameHashValue = pBytes->nGameHash;\n  if (pBytes->nRequestId == nMcpPacketSequence) {\n    D2MCPClient::McpConnect::D2GSRequestId = nMcpPacketSequence;\n    D2MCPClient::McpConnect::D2GSGameHash = nGameHashValue;\n    D2MCPClient::McpConnect::D2GSGameToken = nGameTokenUnused;\n    if (pBytes->nGameIp == 0) {\n      if (pBytes->nResult != 0) {\n        D2MCPClient::McpConnect::SetD2GSJoinResult(pBytes->nResult);\n        return 1;\n      }\n      D2MCPClient::McpConnect::SetD2GSJoinResult(0x28);\n      return 1;\n    }\n    nIpStringMaxLen = 0x12;\n    szGameIpString = Fog::Src::Safesock::NET_MakeIPV4AddressHumanFriendly(pBytes->nGameIp);\n    Storm::Source::SSTR::SStrCopy\n              (D2MCPClient::McpConnect::D2GSConnectIp,szGameIpString,nIpStringMaxLen);\n  }\n  return 1;\n}\n\n",
+      "rules": [
+        {
+          "left": "pBytes->nRequestId",
+          "right": "nMcpPacketSequence",
+          "width": 2,
+          "native": [
+            "0044ac38"
+          ]
+        }
+      ],
+      "types": {
+        "globalTypes": {
+          "nMcpPacketSequence": "uint16_t"
+        },
+        "structFields": {
+          "MCPPacketSrv0x04": {
+            "nRequestId": "short"
+          }
+        }
+      }
+    }
+  ],
+  "nativeComparisons": [
+    {
+      "address": "00415649",
+      "mnemonic": "cmp",
+      "operands": "si, word ptr [ebp + 8]",
+      "widths": [
+        2,
+        2
+      ],
+      "bytes": "663b7508",
+      "following": [
+        [
+          "0041564d",
+          "jne",
+          "0x415657"
+        ],
+        [
+          "0041564f",
+          "mov",
+          "bl, byte ptr [edx + 0xa]"
+        ]
+      ]
+    },
+    {
+      "address": "0041565c",
+      "mnemonic": "cmp",
+      "operands": "si, word ptr [ebp + 8]",
+      "widths": [
+        2,
+        2
+      ],
+      "bytes": "663b7508",
+      "following": [
+        [
+          "00415660",
+          "jne",
+          "0x415671"
+        ],
+        [
+          "00415662",
+          "mov",
+          "dl, byte ptr [edx + 0xa]"
+        ]
+      ]
+    },
+    {
+      "address": "004404b0",
+      "mnemonic": "cmp",
+      "operands": "al, byte ptr [0x70cd62]",
+      "widths": [
+        1,
+        1
+      ],
+      "bytes": "3a0562cd7000",
+      "following": [
+        [
+          "004404b6",
+          "jne",
+          "0x4406e5"
+        ]
+      ]
+    },
+    {
+      "address": "0044ac38",
+      "mnemonic": "cmp",
+      "operands": "word ptr [eax + 1], di",
+      "widths": [
+        2,
+        2
+      ],
+      "bytes": "66397801",
+      "following": [
+        [
+          "0044ac3c",
+          "jne",
+          "0x44ac8a"
+        ],
+        [
+          "0044ac3e",
+          "test",
+          "ecx, ecx"
+        ]
+      ]
+    },
+    {
+      "address": "00577218",
+      "mnemonic": "cmp",
+      "operands": "ax, cx",
+      "widths": [
+        2,
+        2
+      ],
+      "bytes": "663bc1",
+      "following": [
+        [
+          "0057721b",
+          "mov",
+          "dword ptr [ebp + 0xc], ebx"
+        ],
+        [
+          "0057721e",
+          "je",
+          "0x57723b"
+        ]
+      ]
+    }
+  ],
+  "originalExeSHA256": "631066c1649c4ea9ffe48bf97e24c00bca1f7a6759c21150f1a79982589adaaf"
+}

@@ -25,7 +25,10 @@
  * Value-preserving: p = s + strlen(s) + 1 exactly, so p - (s + 1) is strlen(s) and p == s + 1
  * iff it is 0. Only where the two assignments are adjacent statements, the uses are all in
  * the statement right after them (nothing runs in between that could change the string), p
- * is a local read nowhere else and never has its address taken, and s is an identifier. The
+ * is a nonvolatile local read nowhere else and never has its address taken. The string is
+ * a typed nonvolatile char pointer/array or a known object's char-array member. The
+ * consumer must evaluate only built-in scalar/pointer expressions before the new strlen;
+ * integer differences require matching full-word casts, whose type is preserved. The
  * two assignments are then dead and removed (a declaration `T *p = s;` keeps its
  * declaration without the initializer only if p is declared there).
  */
@@ -37,11 +40,13 @@ import type {
 } from '../../../ast/nodes.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
 import type { Transformer } from '../../transformer.js';
-import { Expr, Type } from '../../../ast/factory.js';
+import { Expr } from '../../../ast/factory.js';
+import { cloneNode } from '../../transformer.js';
 import { buildFunctionFlow, type FunctionFlow } from '../../cfg/dataflow.js';
 import type { IfStmt, ReturnStmt } from '../../../ast/nodes.js';
+import { createStrlenProof, type StrlenProofOptions } from './strlen-difference-proof.js';
 
-export interface StrlenDifferenceOptions extends PluginOptions {
+export interface StrlenDifferenceOptions extends PluginOptions, StrlenProofOptions {
   /** The function's compare-sites row (extract/compare-sites.ts). */
   compareSites?: string;
   onSite?: (e: { pointer: string; string: string; form: string }) => void;
@@ -50,13 +55,6 @@ export interface StrlenDifferenceOptions extends PluginOptions {
 function unwrapParens(e: Expression): Expression {
   while (e.kind === NodeKind.ParenExpr) e = (e as ParenExpr).expression;
   return e;
-}
-function unwrapAll(e: Expression): Expression {
-  for (;;) {
-    if (e.kind === NodeKind.ParenExpr) e = (e as ParenExpr).expression;
-    else if (e.kind === NodeKind.CStyleCastExpr) e = (e as CStyleCastExpr).expression;
-    else return e;
-  }
 }
 const ident = (e: Expression | null | undefined): string | null => {
   if (!e) return null;
@@ -78,18 +76,18 @@ function walk(node: unknown, visit: (n: ASTNode, parent: Record<string | number,
 }
 
 /** `p = s;` or `T *p = s;`: p, s. */
-function initOf(st: Statement): { p: string; s: string; decl: VariableDecl | null } | null {
+function initOf(st: Statement): { p: string; s: Expression; decl: VariableDecl | null } | null {
   if (st.kind === NodeKind.ExprStmt) {
     const e = unwrapParens((st as ExprStmt).expression);
     if (e.kind !== NodeKind.AssignExpr || (e as AssignExpr).operator !== '=') return null;
-    const p = ident((e as AssignExpr).left), s = ident((e as AssignExpr).right);
+    const p = ident((e as AssignExpr).left), s = (e as AssignExpr).right;
     return p && s ? { p, s, decl: null } : null;
   }
   if (st.kind === NodeKind.DeclStmt) {
     const ds = (st as DeclStmt).declarations;
     if (ds.length !== 1 || ds[0].kind !== NodeKind.VariableDecl) return null;
     const v = ds[0] as VariableDecl;
-    const s = v.initializer ? ident(v.initializer as Expression) : null;
+    const s = v.initializer as Expression | null;
     return s ? { p: v.name.name, s, decl: v } : null;
   }
   return null;
@@ -113,15 +111,15 @@ function isAdvance(st: Statement, p: string): boolean {
 }
 
 /** `s + 1` */
-function isSPlusOne(e: Expression, s: string): boolean {
-  const u = unwrapAll(e);
+function isSPlusOne(e: Expression, s: string, proof: ReturnType<typeof createStrlenProof>): boolean {
+  const u = unwrapParens(e);
   if (u.kind !== NodeKind.BinaryExpr || (u as BinaryExpr).operator !== '+') return false;
   const one = unwrapParens((u as BinaryExpr).right);
-  return ident((u as BinaryExpr).left) === s && one.kind === NodeKind.IntegerLiteral && (one as IntegerLiteralExpr).value === 1n;
+  return proof.baseKey((u as BinaryExpr).left) === s && one.kind === NodeKind.IntegerLiteral && (one as IntegerLiteralExpr).value === 1n;
 }
 
-function strlenOf(s: string): CallExpr {
-  return Expr.call('strlen', [Expr.identifier(s)]);
+function strlenOf(s: Expression): CallExpr {
+  return Expr.call('strlen', [cloneNode(s)]);
 }
 
 /** Does the compare-sites row for `p ==/!= ...` say CMP with immediate 1? */
@@ -161,15 +159,16 @@ function headOf(st: Statement): [Record<string | number, unknown>, string | numb
   return null;
 }
 
-function rewriteBlock(blk: CompoundStmt, opts: StrlenDifferenceOptions, flow: FunctionFlow): void {
+function rewriteBlock(blk: CompoundStmt, opts: StrlenDifferenceOptions, flow: FunctionFlow, proof: ReturnType<typeof createStrlenProof>): void {
   for (let i = 0; i + 2 < blk.statements.length; i++) {
     const init = initOf(blk.statements[i]);
     if (!init || flow.isEscaped(init.p) || !isAdvance(blk.statements[i + 1], init.p)) continue;
     const { p, s } = init;
-    if (p === s) continue;
+    const string = proof.baseKey(s);
+    if (!string || p === string || !proof.pointer(p)) continue;
     const use = blk.statements[i + 2];
     const head = headOf(use);
-    if (!head) continue;
+    if (!head || !proof.safeConsumer(use, head.map(([obj, key]) => obj[key] as Expression))) continue;
     const nInit = flow.nodeOf(blk.statements[i]), nAdv = flow.nodeOf(blk.statements[i + 1]), nUse = flow.nodeOf(use);
     if (nInit === undefined || nAdv === undefined || nUse === undefined) continue;
     // the scan's start feeds only the scan, and the scan's end only this statement's head
@@ -182,14 +181,16 @@ function rewriteBlock(blk: CompoundStmt, opts: StrlenDifferenceOptions, flow: Fu
       if (n.kind !== NodeKind.BinaryExpr) return;
       const b = n as BinaryExpr;
       const trivia = { leadingTrivia: n.leadingTrivia ?? [], trailingTrivia: n.trailingTrivia ?? [] };
-      if ((b.operator === '!=' || b.operator === '==') && ident(b.left) === p && isSPlusOne(b.right, s)) {
+      if ((b.operator === '!=' || b.operator === '==') && ident(b.left) === p && isSPlusOne(b.right, string, proof)) {
         const ne = b.operator === '!=';
         const op = withOne ? (ne ? '>=' : '<') : (ne ? '!=' : '==');
         sites.push({ parent, key, make: () => ({ ...Expr.binary(strlenOf(s), op as never, Expr.intLiteral(withOne ? 1 : 0)), ...trivia }) });
         return;
       }
-      if (b.operator === '-' && unwrapParens(b.left).kind === NodeKind.CStyleCastExpr && ident(unwrapAll(b.left)) === p && isSPlusOne(b.right, s)) {
-        sites.push({ parent, key, make: () => ({ ...Expr.cast(Type.int(), strlenOf(s)), ...trivia }) as Expression });
+      const cast = b.operator === '-' ? proof.differenceCast(b.left, b.right) : null;
+      if (cast && ident((unwrapParens(b.left) as CStyleCastExpr).expression) === p
+        && isSPlusOne((unwrapParens(b.right) as CStyleCastExpr).expression, string, proof)) {
+        sites.push({ parent, key, make: () => ({ ...Expr.cast(cloneNode(cast), strlenOf(s)), ...trivia }) as Expression });
       }
     };
     let reads = 0;
@@ -200,8 +201,8 @@ function rewriteBlock(blk: CompoundStmt, opts: StrlenDifferenceOptions, flow: Fu
       visit(e, obj, key);
       reads += countIdent(e, p) + (e.kind === NodeKind.Identifier && (e as Identifier).name === p ? 1 : 0);
       const w = (n: ASTNode) => {
-        if (n.kind === NodeKind.AssignExpr && ident((n as AssignExpr).left) === s) writesS = true;
-        if ((n.kind === NodeKind.UnaryExpr || n.kind === NodeKind.PostfixExpr) && ['++', '--'].includes((n as UnaryExpr).operator) && ident((n as UnaryExpr).operand) === s) writesS = true;
+        if (n.kind === NodeKind.AssignExpr && proof.baseKey((n as AssignExpr).left) === string) writesS = true;
+        if ((n.kind === NodeKind.UnaryExpr || n.kind === NodeKind.PostfixExpr) && ['++', '--'].includes((n as UnaryExpr).operator) && proof.baseKey((n as UnaryExpr).operand) === string) writesS = true;
       };
       walk(e, w); w(e);
     }
@@ -214,7 +215,7 @@ function rewriteBlock(blk: CompoundStmt, opts: StrlenDifferenceOptions, flow: Fu
     } else {
       blk.statements.splice(i, 2);
     }
-    for (const _ of sites) opts.onSite?.({ pointer: p, string: s, form: withOne ? 'one' : 'zero' });
+    for (const _ of sites) opts.onSite?.({ pointer: p, string, form: withOne ? 'one' : 'zero' });
     return; // the flow is stale now; the caller rebuilds it
   }
 }
@@ -235,6 +236,7 @@ export const strlenDifferencePlugin: TransformPlugin = {
       walk(ast, (n) => { if (n.kind === NodeKind.FunctionDecl) fns.push(n as FunctionDecl); });
       for (const fn of fns) {
         if (!fn.body) continue;
+        const proof = createStrlenProof(ast, fn, opts);
         const locals = new Set<string>();
         for (const prm of fn.parameters) { const n = (prm as unknown as { name?: Identifier | null }).name; if (n) locals.add(n.name); }
         walk(fn.body, (n) => { if (n.kind === NodeKind.VariableDecl) locals.add((n as VariableDecl).name.name); });
@@ -246,7 +248,7 @@ export const strlenDifferencePlugin: TransformPlugin = {
           let fired = 0;
           const count = { n: 0 };
           const o2 = { ...opts, onSite: (e: { pointer: string; string: string; form: string }) => { count.n++; opts.onSite?.(e); } };
-          for (const blk of blocks) { rewriteBlock(blk, o2, flow); if (count.n) { fired = count.n; break; } }
+          for (const blk of blocks) { rewriteBlock(blk, o2, flow, proof); if (count.n) { fired = count.n; break; } }
           if (!fired) break;
         }
       }
