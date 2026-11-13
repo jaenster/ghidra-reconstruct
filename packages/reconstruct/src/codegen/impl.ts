@@ -4020,9 +4020,15 @@ function transformDecompiledCode(
           console.warn(`[narrow-compare-widen] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.name} ${e.from} -> ${e.to}`),
       };
     }
-    if (enclosing?.compareSites) {
-      perPluginOptions['strlen-difference'] = { compareSites: enclosing.compareSites };
-    }
+    perPluginOptions['strlen-difference'] = {
+      compareSites: enclosing?.compareSites,
+      functionParamTypes: context?.funcPtrArgCasts?.functionParamTypes,
+      varArgFunctions: context?.funcPtrArgCasts?.varArgFunctions,
+      globalTypes: context?.funcPtrArgCasts?.globalTypes,
+      typedefTargets: context?.funcPtrArgCasts?.typedefTargets,
+      structFields: context?.funcPtrArgCasts?.structFields,
+      enclosingVarTypes,
+    };
     // A materialised comparison spelled as VC8 compiles the original's setcc or neg/sbb
     // (bool-select-form.ts): the rows give each comparison's flag reader, the decompile the
     // neg/sbb selects the generator folds.
