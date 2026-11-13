@@ -364,6 +364,23 @@ export function isConstantStore(e: Expression, enumConstants: ReadonlySet<string
 }
 
 /**
+ * Before nullptr-cleanup (25), Ghidra spells a small literal address such as 2
+ * as `&DAT_00000002`. Like a literal store, it supplies a value but no evidence
+ * for the reused slot's new type. A mapped/global address or a shadowing local
+ * still has to participate in type inference.
+ */
+function isNullPageAddressConstant(e: Expression, localTypes: ReadonlyMap<string, TypeNode>): boolean {
+  const x = unwrapParens(e);
+  if (x.kind !== NodeKind.UnaryExpr || (x as UnaryExpr).operator !== '&') return false;
+  const operand = unwrapParens((x as UnaryExpr).operand);
+  if (operand.kind !== NodeKind.Identifier) return false;
+  const name = (operand as Identifier).name;
+  if (localTypes.has(name)) return false;
+  const match = /^_?DAT_([0-9a-fA-F]{8})$/.exec(name);
+  return match !== null && parseInt(match[1], 16) < 0x1000;
+}
+
+/**
  * A name for the second value. Ghidra has no variable to carry one, so it comes from
  * the type where the type is a program struct (`D2RoomStrc *` -> pRoom, `D2MissilesTxt *`
  * -> pMissilesTxt), and from the parameter whose slot it shares otherwise.
@@ -472,7 +489,8 @@ export function splitReusedValueSlots(fn: FunctionDecl, o: ReusedParamSlotOption
     } else {
       // A literal store (`p = (T *)0x0`) holds a value of whichever type the others say;
       // the second range's type is what every other store agrees on.
-      const values = [...stores.values()].map(s => storedValue(s.value, paramType)).filter(v => !isConstantStore(v, enumConstants, localTypes));
+      const values = [...stores.values()].map(s => storedValue(s.value, paramType))
+        .filter(v => !isConstantStore(v, enumConstants, localTypes) && !isNullPageAddressConstant(v, localTypes));
       const evident = values.map(v => evidentType(v, o, localTypes));
       const spelled = evident.map(t => t ? spellingOf(t) : null);
       if (evident.length > 0 && spelled.every(t => t !== null) && new Set(spelled.map(t => canonicalWord(t!))).size === 1) target = evident[0];

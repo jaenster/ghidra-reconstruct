@@ -5,11 +5,14 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
+import { readFileSync } from 'node:fs';
 import { parse } from '../../../parser/index.js';
 import { emit } from '../../../emit/index.js';
 import type { AnyNode } from '../../../ast/nodes.js';
 import { reusedParamSlotPlugin, type ReusedParamSlotOptions } from '../builtins/reused-param-slot.js';
 import { compileAndRun, hasNativeGpp } from '../../../testing/native-cpp.js';
+import { transformGhidraCode } from '../../../ghidra.js';
+import { input as nativeInput, harness as nativeHarness } from './fixtures/reused-param-slot/native.js';
 
 const native = { skip: !hasNativeGpp() };
 
@@ -316,5 +319,62 @@ describe('reused-param-slot: mixed integer views of a reused pointer slot', () =
       UseUnsigned((uint32_t)nParam);
     }`;
     assert.strictEqual(run(src, V).replace(/\s+/g, ' '), run(src, {}).replace(/\s+/g, ' '));
+  });
+});
+
+describe('reused-param-slot: the current MONSTER_InitStats body', () => {
+  it('preserves the incoming pointer, difficulty byte address, aliases and mixed word views', native, () => {
+    const lower = (split: boolean) => transformGhidraCode(nativeInput, {
+      preset: 'full', usePluginRegistry: true, tolerateErrors: false,
+      pluginOptions: { pluginOptions: { 'reused-param-slot': { stackParameters: split ? ['p'] : [] } } },
+    }).code;
+    assert.strictEqual(compileAndRun(nativeHarness(lower(false), lower(true)), 'if (CheckCases()) return 1;',
+      { optimize: true, flags: ['-fwrapv', '-fno-delete-null-pointer-checks'] }).trim(), '1548');
+  });
+
+  it('splits the current v2088 body with its small-address store and typed region-field read', () => {
+    const source = readFileSync(new URL('./fixtures/reused-param-slot/00573cb0.c', import.meta.url), 'utf8');
+    const out = run(source, { stackParameters: ['pMonRegionField'] });
+    const code = out.replace(/\/\*[\s\S]*?\*\//g, '');
+    assert.match(code, /\b(?:uint|uint32_t|unsigned int) nMonRegionField;/);
+    assert.match(code, /MONSTER_RollComponentAppearance\(pMonRegionField, pUnit\)/);
+    assert.strictEqual((code.match(/\bpMonRegionField\b/g) ?? []).length, 2, 'only the parameter and its incoming-pointer use remain');
+    assert.doesNotMatch(code, /\bpMonRegionField\s*=/);
+  });
+
+  it('keeps the captured function split through the full transform pipeline', () => {
+    const source = readFileSync(new URL('./fixtures/reused-param-slot/00573cb0.c', import.meta.url), 'utf8');
+    const out = transformGhidraCode(source, {
+      preset: 'full', usePluginRegistry: true, tolerateErrors: false,
+      pluginOptions: { pluginOptions: { 'reused-param-slot': { stackParameters: ['pMonRegionField'] } } },
+    }).code.replace(/\/\*[\s\S]*?\*\//g, '');
+    assert.match(out, /\bnMonRegionField\b/);
+    assert.strictEqual((out.match(/\bpMonRegionField\b/g) ?? []).length, 2);
+    assert.doesNotMatch(out, /\bDAT_00000002\b/);
+  });
+
+  for (const address of ['&DAT_00002000', '&gRegion']) {
+    it(`still requires a type for the real address ${address}`, () => {
+      const source = `void f(Region *p, uint32_t next, int choose) {
+        UseRegion(p);
+        p = (Region *)(uint32_t)next;
+        if (choose) p = (Region *)${address};
+        UseUnsigned((uint32_t)p);
+        UseSigned((int)p);
+      }`;
+      assert.strictEqual(run(source, { stackParameters: ['p'] }), run(source, {}));
+    });
+  }
+
+  it('does not treat the address of a shadowing local DAT name as a literal', () => {
+    const source = `void f(Region *p, uint32_t next, int choose) {
+      int DAT_00000002;
+      UseRegion(p);
+      p = (Region *)(uint32_t)next;
+      if (choose) p = (Region *)&DAT_00000002;
+      UseUnsigned((uint32_t)p);
+      UseSigned((int)p);
+    }`;
+    assert.strictEqual(run(source, { stackParameters: ['p'] }), run(source, {}));
   });
 });
