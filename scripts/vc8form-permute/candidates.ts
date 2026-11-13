@@ -73,7 +73,8 @@ const accTables: {
   unionNames: string[];
   enumValues: Record<string, number>;
   accessors: Vc8Accessor[];
-} = { structFields: {}, structLayouts: {}, aggregateMembers: {}, unionNames: [], enumValues: {}, accessors: [] };
+  typedefTargets: Record<string, string>;
+} = { structFields: {}, structLayouts: {}, aggregateMembers: {}, unionNames: [], enumValues: {}, accessors: [], typedefTargets: {} };
 
 function loadTypes(path?: string) {
   if (!path) return;
@@ -85,6 +86,7 @@ function loadTypes(path?: string) {
     if (t.kind === 'TYPEDEF' && t.underlyingType && !(t.name in typedefTargets)) typedefTargets[t.name] = spell(t.underlyingType);
     if (structs.has(t.name)) continue;
     structs.set(t.name, { kind: t.kind, fields: t.fields, typedefOf: t.underlyingType });
+    if (t.underlyingType) accTables.typedefTargets[t.name] = spell(t.underlyingType);
     if (t.fields) accTables.structFields[t.name] = Object.fromEntries(t.fields.filter((f: Field) => f.name).map((f: Field) => [f.name, spell(f.dataType)]));
     if (t.kind === 'STRUCTURE' || t.kind === 'UNION') {
       accTables.structLayouts[t.name] = (t.fields ?? []).map((f: Field) => ({
@@ -252,6 +254,7 @@ function sites(c: Ctx, maxAnchors: number): string[] {
   for (const v of locals) {
     // coalesce before fold: where both print one body, the tag names the proven fold.
     out.add(`coalesce(${v})`);
+    out.add(`branchret(${v})`);
     out.add(`fold(${v})`);
     out.add(`ifsel(${v})`);
     if (declarable(vars.get(v))) out.add(`split(${v},${vars.get(v)},${v}_2)`);

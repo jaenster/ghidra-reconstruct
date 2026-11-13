@@ -64,6 +64,10 @@
  *                        guard of both conditions.
  *   retval(V,K)          `V = K;` that ends an arm falling through to `return V;` becomes
  *                        `return K;`.
+ *   branchret(V)         an integer V loaded from a typed field, conditionally
+ *                        incremented and returned, becomes two direct branch returns.
+ *                        Field/local types agree, storage-width conversion stays, and
+ *                        the guard is a nonvolatile integer field test.
  *   width(V,T)           local V is declared T; a cast of V to T, a cast to V's old type
  *                        stored into V, and a cast of V to T's width in a truth test go.
  *   boolflag(V)          the bool local V, stored only `true`/`false` and read only as a
@@ -342,7 +346,7 @@
 import { NodeKind, isExpression, isType } from '../../../ast/kinds.js';
 import type {
   ASTNode, AssignExpr, BinaryExpr, CallExpr, CompoundStmt, ConditionalExpr, CStyleCastExpr, DeclStmt, Expression,
-  ExprStmt, ForStmt, FunctionDecl, Identifier, IfStmt, IntegerLiteralExpr, MemberExpr, ParenExpr, ReturnStmt, Statement, SubscriptExpr, TranslationUnit,
+  ExprStmt, ForStmt, FunctionDecl, Identifier, IfStmt, IntegerLiteralExpr, MemberExpr, ParenExpr, PostfixExpr, ReturnStmt, Statement, SubscriptExpr, TranslationUnit,
   TypeNode, UnaryExpr, VariableDecl,
 } from '../../../ast/nodes.js';
 import { parse } from '../../../parser/index.js';
@@ -368,6 +372,7 @@ export type Vc8Form =
   | { op: 'guards'; split: number; index: number }
   | { op: 'merge-guards'; index: number }
   | { op: 'retval'; name: string; value: string }
+  | { op: 'branchret'; name: string }
   | { op: 'width'; name: string; type: string }
   | { op: 'boolflag'; name: string }
   | { op: 'retwiden'; name: string }
@@ -458,7 +463,7 @@ export interface Vc8FormOptions {
   selectTables?: Vc8FormTables;
 }
 
-const OPS = new Set(['seq', 'fold', 'join', 'coalesce', 'recordwalk', 'cache', 'own', 'guards', 'merge-guards', 'retval', 'width', 'boolflag', 'retwiden', 'arms',
+const OPS = new Set(['seq', 'fold', 'join', 'coalesce', 'recordwalk', 'cache', 'own', 'guards', 'merge-guards', 'retval', 'branchret', 'width', 'boolflag', 'retwiden', 'arms',
   'nest', 'merge-tail', 'tailguard', 'tailcopy', 'continue', 'dup', 'tarms', 'zero', 'nonzero', 'bool', 'cmp', 'swap', 'ifsel', 'clamp', 'split', 'select', 'decl', 'unselect', 'tsel', 'hoist',
   'nestcall', 'fill', 'elems', 'copy', 'shift', 'ptrwalk', 'rowptr', 'acc', 'retvar', 'onecall', 'roundup', 'swmerge', 'switch', 'dec', 'opas', 'range', 'castout', 'signbit']);
 
@@ -527,6 +532,7 @@ export function parseVc8Form(text: string): Vc8Form | undefined {
       return !anchor && args.length <= 1 && i >= 1 ? { op: 'merge-guards', index: i } : undefined;
     }
     case 'retval': return args.length === 2 && !anchor ? { op: 'retval', name: args[0], value: args[1] } : undefined;
+    case 'branchret': return args.length === 1 && !anchor && /^[A-Za-z_]\w*$/.test(args[0]) ? { op: 'branchret', name: args[0] } : undefined;
     case 'width': return args.length === 2 && !anchor ? { op: 'width', name: args[0], type: args[1] } : undefined;
     case 'boolflag': case 'retwiden':
       return args.length === 1 && !anchor && /^[A-Za-z_]\w*$/.test(args[0]) ? { op: m[1], name: args[0] } as Vc8Form : undefined;
@@ -1507,6 +1513,100 @@ function doRetval(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'retval' }>): void
     }
   }
   refuse(`no ${f.name} = ${f.value} falling through to return ${f.name}`);
+}
+
+/** Re-form a typed load, conditional local increment, and return as branch returns. */
+function doBranchret(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'branchret' }>): void {
+  const st = fn.body?.statements;
+  if (!st || (st.length !== 3 && st.length !== 4) || !intType(text(fn.returnType), false))
+    refuse('not an integral load, conditional increment, and return');
+  const d = declOf(st[0]);
+  if (!d || d.name.name !== f.name || fn.parameters.some(p => p.name?.name === f.name)
+      || d.specifiers.length || d.attributes.length || d.directInit || d.copyListInit || d.bitWidth
+      || !d.initializer || d.initializer.kind === NodeKind.InitListExpr)
+    refuse(`${f.name} is not one plain initialized local`);
+  const localType = text(d.type);
+  const local = intType(localType, false);
+  if (!local || localType === 'bool' || /const|volatile/.test(localType)) refuse('local is not a mutable integer');
+  const resolve = (name: string) => selectTables?.typedefTargets?.[name];
+  const shapeOf = createExprShape(localTypesOf(fn), { resolve });
+  const volatileType = (t: string): boolean => {
+    for (let i = 0; i < 8; i++) {
+      if (/volatile/.test(t)) return true;
+      const base = norm(t).replace(/\*/g, '').replace(/^const/, '');
+      const next = resolve(base);
+      if (!next) return false;
+      t = next;
+    }
+    return true;
+  };
+  // An exact field of a nonvolatile pointer parameter: no guessed field-name type,
+  // operator->, indirect getter, or volatile read may be reordered with the guard.
+  const fieldType = (expr: Expression): string | undefined => {
+    const e = unparen(expr);
+    if (e.kind !== NodeKind.MemberExpr) return undefined;
+    const m = e as MemberExpr, object = unparen(m.object);
+    if (!m.isArrow || !isId(object) || !isId(m.member)) return undefined;
+    const parameters = fn.parameters.filter(p => p.name?.name === (object as Identifier).name);
+    if (parameters.length !== 1 || volatileType(text(parameters[0].type))) return undefined;
+    const shape = shapeOf(object);
+    return shape?.stars === 1 ? selectTables?.structFields?.[shape.base]?.[(m.member as Identifier).name] : undefined;
+  };
+  const source = unparen(d.initializer as Expression);
+  const sourceType = fieldType(source);
+  const loaded = sourceType && intType(sourceType, false);
+  if (!loaded || loaded.w !== local.w || loaded.r.lo !== local.r.lo || loaded.r.hi !== local.r.hi)
+    refuse('loaded field and local must have the same integer type');
+  const guard = st[1];
+  if (guard.kind !== NodeKind.IfStmt || (guard as IfStmt).elseBranch || (guard as IfStmt).init || (guard as IfStmt).isConstexpr)
+    refuse('not a single conditional arm');
+  const gateOf = (expr: Expression): { field: Expression; nonzero: boolean } | undefined => {
+    const e = unparen(expr);
+    if (e.kind === NodeKind.UnaryExpr && (e as UnaryExpr).operator === '!') {
+      const inner = gateOf((e as UnaryExpr).operand);
+      return inner && { ...inner, nonzero: !inner.nonzero };
+    }
+    if (e.kind === NodeKind.BinaryExpr && ['==', '!='].includes((e as BinaryExpr).operator)) {
+      const c = e as BinaryExpr;
+      const field = constValue(c.right) === 0n ? c.left : constValue(c.left) === 0n ? c.right : undefined;
+      const type = field && fieldType(field);
+      return type && intType(type, false) ? { field: field!, nonzero: c.operator === '!=' } : undefined;
+    }
+    const type = fieldType(e);
+    return type && intType(type, false) ? { field: e, nonzero: true } : undefined;
+  };
+  const gate = gateOf((guard as IfStmt).condition);
+  if (!gate) refuse('guard is not a typed nonvolatile integer field test');
+  const returnsLocal = (stmt: Statement): boolean => stmt.kind === NodeKind.ReturnStmt
+    && !!(stmt as ReturnStmt).value && isId(unparen((stmt as ReturnStmt).value!), f.name);
+  const incrementsLocal = (stmt: Statement): boolean => {
+    if (stmt.kind !== NodeKind.ExprStmt) return false;
+    const e = unparen((stmt as ExprStmt).expression);
+    if ((e.kind === NodeKind.PostfixExpr || e.kind === NodeKind.UnaryExpr) && (e as UnaryExpr).operator === '++')
+      return isId(unparen((e as UnaryExpr).operand), f.name);
+    if (e.kind !== NodeKind.AssignExpr || !isId(unparen((e as AssignExpr).left), f.name)) return false;
+    const a = e as AssignExpr, one = (x: Expression): boolean => {
+      const l = unparen(x);
+      return l.kind === NodeKind.IntegerLiteral && (l as IntegerLiteralExpr).value === 1n && !(l as IntegerLiteralExpr).suffix;
+    };
+    if (a.operator === '+=') return one(a.right);
+    const r = unparen(a.right);
+    return a.operator === '=' && r.kind === NodeKind.BinaryExpr && (r as BinaryExpr).operator === '+'
+      && isId(unparen((r as BinaryExpr).left), f.name) && one((r as BinaryExpr).right);
+  };
+  const arm = (guard as IfStmt).thenBranch;
+  const statements = arm.kind === NodeKind.CompoundStmt ? (arm as CompoundStmt).statements : [arm];
+  if (statements.length !== 1) refuse('conditional arm is not one statement');
+  const positive = st.length === 3;
+  if (positive ? !incrementsLocal(statements[0]) || !returnsLocal(st[2])
+      : !returnsLocal(statements[0]) || !incrementsLocal(st[2]) || !returnsLocal(st[3]))
+    refuse('arm, increment, and return do not describe the same local');
+  const condition = `${gate.nonzero === positive ? '' : '!'}${emit(gate.field as never)}`;
+  const load = emit(source as never);
+  const type = emit(d.type as never);
+  // The inner cast gives a bitfield the local's arithmetic type. The outer cast
+  // preserves a narrow local's wrap before the function's own return conversion.
+  fn.body!.statements = parseStmts(`if (${condition}) { return (${type})((${type})${load} + 1); } return (${type})${load};`);
 }
 
 const WIDTH: Record<string, number> = {
@@ -4375,7 +4475,7 @@ function opasShift(fn: FunctionDecl, u: OpasUpdate, matches: (e: Expression, u: 
 
 const APPLY: { [K in Vc8Form['op']]: (fn: FunctionDecl, f: Extract<Vc8Form, { op: K }>) => void } = {
   seq: doSeq, fold: doFold, join: doJoin, coalesce: doCoalesce, recordwalk: doRecordwalk, cache: doCache, own: doOwn, guards: doGuards, 'merge-guards': doMergeGuards,
-  retval: doRetval, width: doWidth, boolflag: doBoolflag, retwiden: doRetwiden, arms: doArms,
+  retval: doRetval, branchret: doBranchret, width: doWidth, boolflag: doBoolflag, retwiden: doRetwiden, arms: doArms,
   nest: doNest, 'merge-tail': doMergeTail, tailguard: doTailguard, tailcopy: doTailcopy, continue: doContinue, dup: doDup, tarms: doTarms, zero: doZero, nonzero: doNonzero,
   bool: doBool,
   cmp: doCmp, swap: doSwap, ifsel: doIfsel, clamp: doClamp, split: doSplit, select: doSelect, decl: doDecl, unselect: doUnselect,
