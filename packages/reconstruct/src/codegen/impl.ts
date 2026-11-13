@@ -2327,7 +2327,10 @@ function pushSlotInits(func: ExtractedFunction): Array<{ local: string; value: s
     if (m && p.name) byReg.set(m[1], p.name);
   }
   for (const v of func.localVariables ?? []) {
-    const m = /^Stack\[(-?0x[0-9a-f]+)\]:4$/i.exec((v.storage ?? '').trim());
+    // A raw byte/word stack record can resolve to a wider decompiler local.
+    // PUSH wrote the whole four-byte slot; the out-call proof below still uses
+    // the emitted local's type to require a complete overwrite before any read.
+    const m = /^Stack\[(-?0x[0-9a-f]+)\]:([1-4])$/i.exec((v.storage ?? '').trim());
     if (!m || !v.name) continue;
     const off = parseInt(m[1], 16);
     const slot = func.pushSlots.find(s => s.offset === off);
@@ -3592,7 +3595,9 @@ function transformDecompiledCode(
       if (context.funcPtrArgCasts.outParams) {
         const oracle = context.funcPtrArgCasts.outParams;
         perPluginOptions['dead-out-slot-store'] = {
-          outParamWidth: (callee: string, index: number) => oracle.outParamWidth(callee, index),
+          // This pass only hands the callee &local, so its null-output branch
+          // cannot leave the local unwritten.
+          outParamWidth: (callee: string, index: number) => oracle.outParamWidthNonNull(callee, index),
           typeSize: (spelling: string) => oracle.typeSize(spelling),
           pushSlotInits: enclosing?.pushSlotInits ?? [],
         };
