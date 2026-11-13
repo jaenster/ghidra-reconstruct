@@ -610,7 +610,7 @@ export async function extractBranchLayout(connection: GhidraConnection, function
   for (const batch of branchLayoutBatches(functions)) {
     const result = await connection.sendCommand<{ success?: boolean; output?: string; error?: string }>(
       'execute_script',
-      { language: 'java', code: branchLayoutScript(batch), scriptTimeout: 600, _commandTimeout: 660000 }
+      { language: 'java', readOnly: true, code: branchLayoutScript(batch), scriptTimeout: 600, _commandTimeout: 660000 }
     );
     if (result.success === false || typeof result.output !== 'string') throw new Error(result.error ?? 'no output');
     for (const [fn, facts] of parseBranchLayout(result.output)) {

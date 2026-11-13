@@ -55,6 +55,28 @@ describe('arrayFillCollapsePlugin', () => {
     assert.ok(tx(`void f() { p->w[0]=0; p->w[1]=0; p->w[2]=0; p->w[3]=0; }`).includes('memset(p->w, 0, 4 * sizeof(p->w[0]));'));
   });
 
+  it('takes *p as the first element of the run (Unreferenced_0047fbc0)', () => {
+    // Split as `*p = 0; memset(p + 1, ...)`, VC8 stored the first element as an
+    // immediate; the original stores the zeroed register into all five.
+    expectSource(
+      `uint32_t* f(uint32_t* param_1) { *param_1 = 0; param_1[1] = 0; param_1[2] = 0; param_1[3] = 0; param_1[4] = 0; return param_1; }`,
+      `uint32_t* f(uint32_t* param_1) {
+  memset(param_1, 0, 5 * sizeof(param_1[0]));
+  return param_1;
+}`,
+    );
+  });
+
+  it('leaves a run that only reaches the threshold with *p as printed', () => {
+    const out = tx(`void f(uint32_t* p) { *p = 0; p[1] = 0; p[2] = 0; p[3] = 0; }`);
+    assert.ok(out.includes('*p = 0;') && out.includes('p[3] = 0;') && !out.includes('memset'), out);
+  });
+
+  it('leaves *p alone when no run follows it', () => {
+    const out = tx(`void f(uint32_t* p, uint32_t* q) { *p = 0; q[1] = 0; q[2] = 0; q[3] = 0; }`);
+    assert.ok(out.includes('*p = 0;'), out);
+  });
+
   it('handles a partial run not starting at 0', () => {
     expectSource(
       `void f() { a[3]=0; a[4]=0; a[5]=0; a[6]=0; }`,

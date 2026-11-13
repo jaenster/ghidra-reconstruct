@@ -28,7 +28,10 @@ import {
   type GhidraConnection,
   type ReconstructionOptions,
 } from '@ghidra-mcp/reconstruct';
-import { decompileFunction, getFunctionInfo, listFunctionRecord } from '@ghidra-mcp/reconstruct/extract/functions';
+import {
+  decompileFunction, decompileFunctions, functionNamesAt, getFunctionInfo, listFunctionRecord, listFunctionRecords,
+  type DecompiledBody,
+} from '@ghidra-mcp/reconstruct/extract/functions';
 import { DETAIL_KINDS } from '@ghidra-mcp/reconstruct/extract/types';
 import { disambiguateVtableTypes } from '@ghidra-mcp/reconstruct/modules/vtable-types';
 import { disambiguateCategoryDuplicates } from '@ghidra-mcp/reconstruct/modules/category-duplicate-types';
@@ -66,6 +69,13 @@ export interface ModelIndices {
    * documented as holding either.
    */
   callersOf: Map<string, Set<string>>;
+  /**
+   * Function address key -> the address keys of every function whose code takes its
+   * address without calling it (`PUSH 0x4fd1f0` into `_eh_vector_constructor_iterator_`,
+   * a callback stored into a struct), from the `C` rows of the operand references. Such a
+   * body spells the function's name and type just as a call site does.
+   */
+  addressTakersOf: Map<string, Set<string>>;
   /** Function address key -> the C identifiers appearing in its body. */
   bodyTokens: Map<string, Set<string>>;
 }
@@ -132,9 +142,6 @@ export type LiveLog = (message: string) => void;
  * full re-run that also fixes anything the event stream failed to mention.
  */
 const FULL_DECOMPILE_FRACTION = 0.3;
-
-/** Function refreshes in flight at once; the local worker's decompiler pool is per core. */
-const REFRESH_CONCURRENCY = Number(process.env.D2_LIVE_REFRESH_CONCURRENCY ?? '16');
 
 /**
  * A body is scanned for identifiers with a plain lexical regex — no parse.
@@ -406,7 +413,7 @@ export function shiftedFactsReader(client: GhidraConnection): ShiftedFacts {
   let read: Promise<Map<string, ShiftedPointerFact>> | undefined;
   return () => (read ??= (async () => {
     const r = await client.sendCommand<{ success?: boolean; output?: string; error?: string }>(
-      'execute_script', { language: 'java', code: SHIFTED_POINTER_SCRIPT, scriptTimeout: 300, _commandTimeout: 360000 },
+      'execute_script', { language: 'java', readOnly: true, code: SHIFTED_POINTER_SCRIPT, scriptTimeout: 300, _commandTimeout: 360000 },
     );
     if (r.success === false || typeof r.output !== 'string') throw new Error(`shifted pointers not read: ${r.error ?? 'no output'}`);
     return parseShiftedPointers(r.output);
@@ -472,7 +479,7 @@ type ExtractedGlobalRow = Awaited<ReturnType<typeof extractGlobals>>['globals'][
 /** `execute_script` on the worker, Java, returning its printed output. */
 async function javaScript(client: GhidraConnection, code: string, timeoutSec = 120): Promise<string> {
   const r = await client.sendCommand<{ success?: boolean; output?: string; error?: string }>(
-    'execute_script', { language: 'java', code, scriptTimeout: timeoutSec, _commandTimeout: (timeoutSec + 60) * 1000 },
+    'execute_script', { language: 'java', readOnly: true, code, scriptTimeout: timeoutSec, _commandTimeout: (timeoutSec + 60) * 1000 },
   );
   if (r.success === false || typeof r.output !== 'string') throw new Error(r.error ?? 'no output');
   return r.output;
@@ -735,6 +742,7 @@ export function buildIndices(m: LiveModel): ModelIndices {
   const dtByKey = new Map<string, ExtractedDataType>();
   const globalByAddr = new Map<string, AnalyzedDataSymbol>();
   const callersOf = new Map<string, Set<string>>();
+  const addressTakersOf = new Map<string, Set<string>>();
   const bodyTokens = new Map<string, Set<string>>();
 
   for (const fn of m.primary.functions) {
@@ -746,7 +754,7 @@ export function buildIndices(m: LiveModel): ModelIndices {
   for (const dt of m.primary.dataTypes) dtByKey.set(dataTypeKey(dt.name, dt.category), dt);
   for (const g of m.primary.globals) globalByAddr.set(addressKey(g.address), g);
 
-  const indices: ModelIndices = { fnByAddr, dtByKey, globalByAddr, callersOf, bodyTokens };
+  const indices: ModelIndices = { fnByAddr, dtByKey, globalByAddr, callersOf, addressTakersOf, bodyTokens };
   reindexCallers(m, indices);
   return indices;
 }
@@ -1237,7 +1245,9 @@ export async function applyEvents(
   // ---------------------------------------------------------------------------
   // Functions. The callers are not a nicety: a rename or a signature change is
   // invisible in the renamed function's own body and visible in every one of its
-  // call sites, which live in the callers.
+  // call sites, which live in the callers. A body that takes the function's address
+  // (passes it to `_eh_vector_constructor_iterator_`, stores it as a callback) spells
+  // its signature as well, through the cast or the pointer type the decompiler prints.
   // ---------------------------------------------------------------------------
   for (const event of events) {
     if (event.target !== 'function') continue;
@@ -1251,6 +1261,7 @@ export async function applyEvents(
       if (!alias) continue;
       for (const caller of indices.callersOf.get(alias) ?? []) affected.add(caller);
     }
+    for (const taker of indices.addressTakersOf.get(key) ?? []) affected.add(taker);
   }
 
   const total = model.primary.functions.length || 1;
@@ -1263,25 +1274,17 @@ export async function applyEvents(
     return result;
   }
 
-  // In parallel: the worker answers reads concurrently on its decompiler pool, and one
-  // round trip at a time left it idle. Each refresh replaces only its own record, and
-  // the touched list keeps the order of the input so what follows is deterministic.
+  // Batched: a chunk of functions costs a few round trips, and the worker decompiles
+  // each chunk over its pool at once. Each record replaces only its own, in the order
+  // of the input, so what follows is deterministic.
   const refreshAll = async (addrs: readonly string[]): Promise<string[]> => {
-    const replaced = new Array<boolean>(addrs.length).fill(false);
-    let next = 0;
-    const lanes = Math.max(1, Math.min(REFRESH_CONCURRENCY, addrs.length));
-    await Promise.all(Array.from({ length: lanes }, async () => {
-      for (let i = next++; i < addrs.length; i = next++) {
-        replaced[i] = await refreshFunction(model, indices, client, addrs[i], {
-          // The record too, not only the body: a caller's locals carry the decompiler's
-          // resolved types, and those move with a callee's signature. A full extraction
-          // reads every record fresh, so a carried-over one would disagree with it.
-          reextractInfo: true,
-          timeout,
-          log,
-        });
-      }
-    }));
+    // The record too, not only the body: a caller's locals carry the decompiler's
+    // resolved types, and those move with a callee's signature. A full extraction
+    // reads every record fresh, so a carried-over one would disagree with it.
+    const fetched = await fetchFunctionRecords(
+      client, addrs.map(addr => ({ existing: indices.fnByAddr.get(addr), addr })), { reextractInfo: true, timeout, log },
+    );
+    const replaced = fetched.map((f, i) => (f ? placeFunctionRecord(model, indices, addrs[i], f.record) : false));
     const done = addrs.filter((_, i) => replaced[i]);
     if (done.length > 0) {
       recomputeCallEdges(model, indices, done);
@@ -1478,57 +1481,147 @@ export async function fetchFunctionRecord(
   addr: string,
   opts: { reextractInfo: boolean; timeout: number; log: LiveLog },
 ): Promise<FetchedFunction | null> {
-  const address = existing?.address ?? addr;
+  return (await fetchFunctionRecords(client, [{ existing, addr }], opts))[0];
+}
 
-  let record: ExtractedFunction | undefined = existing;
-  if (opts.reextractInfo || !existing) {
-    const info = await getFunctionInfo(client, address);
-    if (!info) {
-      opts.log(`function ${address}: no longer present in Ghidra`);
-      return null;
+/** Addresses per name-script, listing and batch-decompile call of a refresh. */
+const REFRESH_CHUNK = Number(process.env.D2_LIVE_REFRESH_CHUNK ?? '200');
+
+/**
+ * `fetchFunctionRecord` for many functions, in a handful of round trips.
+ *
+ * Per function the steps are the same - which function is at the address now, its
+ * `list_functions` row under that name, its body - and so are their answers; only how
+ * they are asked changes: one name script per chunk instead of `get_function_info` per
+ * function (which decompiles on the worker's single shared decompiler, so sixteen lanes
+ * queued behind one another), one listing per chunk of names, and one `batch_decompile`
+ * per chunk, which the worker runs over its decompiler pool and which takes the body the
+ * listing just decompiled to resolve local types instead of decompiling it again.
+ * Any batched call that fails falls back to the per-function call it replaces.
+ */
+export async function fetchFunctionRecords(
+  client: GhidraConnection,
+  items: ReadonlyArray<{ existing: ExtractedFunction | undefined; addr: string }>,
+  opts: { reextractInfo: boolean; timeout: number; log: LiveLog },
+): Promise<Array<FetchedFunction | null>> {
+  const out: Array<FetchedFunction | null> = new Array(items.length).fill(null);
+  for (let i = 0; i < items.length; i += REFRESH_CHUNK) {
+    const chunk = items.slice(i, i + REFRESH_CHUNK);
+    const got = await fetchFunctionChunk(client, chunk, opts);
+    for (let j = 0; j < got.length; j++) out[i + j] = got[j];
+  }
+  return out;
+}
+
+async function fetchFunctionChunk(
+  client: GhidraConnection,
+  items: ReadonlyArray<{ existing: ExtractedFunction | undefined; addr: string }>,
+  opts: { reextractInfo: boolean; timeout: number; log: LiveLog },
+): Promise<Array<FetchedFunction | null>> {
+  const records: Array<ExtractedFunction | null> = items.map(it => (it.existing ? { ...it.existing } : null));
+  const needInfo = items.map((it, i) => i).filter(i => opts.reextractInfo || !items[i].existing);
+
+  // Which function each address names now.
+  const addressOf = (i: number) => items[i].existing?.address ?? items[i].addr;
+  let idents: Map<string, { address: string; name: string } | null> | null = null;
+  try {
+    idents = await functionNamesAt(client, needInfo.map(addressOf));
+  } catch {
+    idents = null;
+  }
+  const infos = new Map<number, ExtractedFunction | null>();
+  const ident = new Map<number, { address: string; name: string } | null>();
+  for (const i of needInfo) {
+    if (idents) {
+      ident.set(i, idents.get(addressOf(i)) ?? null);
+    } else {
+      const info = await getFunctionInfo(client, addressOf(i));
+      infos.set(i, info);
+      ident.set(i, info ? { address: info.address, name: info.name } : null);
+    }
+  }
+
+  // Their listing rows, by address.
+  const present = needInfo.filter(i => ident.get(i));
+  const rows = new Map<number, ExtractedFunction | null>();
+  for (let c = 0; c < present.length; c += GLOBAL_LIST_CHUNK) {
+    const slice = present.slice(c, c + GLOBAL_LIST_CHUNK);
+    let byAddr: Map<string, ExtractedFunction> | null = null;
+    try {
+      byAddr = await listFunctionRecords(client, slice.map(i => ident.get(i)!.name));
+    } catch {
+      byAddr = null;
+    }
+    for (const i of slice) {
+      const id = ident.get(i)!;
+      rows.set(i, byAddr
+        ? byAddr.get(addressKey(id.address)) ?? null
+        : await listFunctionRecord(client, id.name, id.address).catch(() => null));
+    }
+  }
+
+  for (const i of needInfo) {
+    const id = ident.get(i);
+    if (!id) {
+      opts.log(`function ${addressOf(i)}: no longer present in Ghidra`);
+      records[i] = null;
+      continue;
     }
     // The record itself comes from the listing, as the full extraction reads it;
     // `get_function_info` only says what the function is called now, which a rename
     // moved. Everything derived later — the body, call edges, platform guards, thunk
     // targets — is carried forward from the record being replaced.
-    const listed = await listFunctionRecord(client, info.name, info.address).catch(() => null);
-    if (!listed) opts.log(`function ${info.name}: not listed under its name; using get_function_info`);
-    const fresh = listed ?? info;
-    record = existing ? { ...existing, ...defined(fresh) } : fresh;
-  } else {
-    record = { ...existing };
+    const listed = rows.get(i) ?? null;
+    let fresh: ExtractedFunction | null = listed;
+    if (!listed) {
+      opts.log(`function ${id.name}: not listed under its name; using get_function_info`);
+      fresh = infos.has(i) ? infos.get(i)! : await getFunctionInfo(client, id.address);
+      if (!fresh) {
+        opts.log(`function ${id.address}: no longer present in Ghidra`);
+        records[i] = null;
+        continue;
+      }
+    }
+    const existing = items[i].existing;
+    records[i] = existing ? { ...existing, ...defined(fresh!) } : fresh;
   }
-  if (!record) return null;
 
-  let decompileFailed = false;
-  if (!record.isThunk && !record.isExternal) {
+  // Bodies.
+  const toDecompile = records.map((r, i) => i).filter(i => records[i] && !records[i]!.isThunk && !records[i]!.isExternal);
+  let bodies: Map<string, DecompiledBody> | null = null;
+  try {
+    bodies = await decompileFunctions(client, toDecompile.map(i => records[i]!.address), opts.timeout);
+  } catch {
+    bodies = null;
+  }
+  const failed = new Set<number>();
+  for (const i of toDecompile) {
+    const record = records[i]!;
+    const body = bodies?.get(addressKey(record.address));
     try {
-      record.decompiled = await decompileFunction(client, record.address, opts.timeout);
+      if (body === undefined) record.decompiled = await decompileFunction(client, record.address, opts.timeout);
+      else if ('error' in body) throw new Error(body.error);
+      else record.decompiled = body.pseudocode;
     } catch (e) {
-      decompileFailed = true;
+      failed.add(i);
       opts.log(`function ${record.name}: decompile failed (${(e as Error).message}); keeping previous body`);
     }
   }
-  return { record, decompileFailed };
+  return records.map((record, i) => (record ? { record, decompileFailed: failed.has(i) } : null));
 }
 
 /**
- * Re-fetch one function's record and body, replacing it at the position it
- * already occupies. Returns false when nothing could be fetched, so a transient
- * daemon failure leaves the previous record standing rather than a hole.
+ * Put a fetched record in the model at the position the one it replaces occupies.
+ * A record that could not be fetched never reaches here, so a transient daemon
+ * failure leaves the previous record standing rather than a hole.
  */
-async function refreshFunction(
+function placeFunctionRecord(
   model: LiveModel,
   indices: ModelIndices,
-  client: GhidraConnection,
   addr: string,
-  opts: { reextractInfo: boolean; timeout: number; log: LiveLog },
-): Promise<boolean> {
+  record: ExtractedFunction,
+): boolean {
   const existing = indices.fnByAddr.get(addr);
-  const fetched = await fetchFunctionRecord(client, existing, addr, opts);
-  if (!fetched) return false;
-  const { record } = fetched;
-
   if (existing) {
     model.primary.functions[model.primary.functions.indexOf(existing)] = record;
   } else {
@@ -1657,9 +1750,13 @@ export class FactsRefreshError extends Error {
   }
 }
 
-/** Rebuild `callersOf` as the reverse of every function's `calledFunctions`. */
+/**
+ * Rebuild `callersOf` as the reverse of every function's `calledFunctions`, and
+ * `addressTakersOf` as the reverse of every function's taken function addresses.
+ */
 function reindexCallers(model: LiveModel, indices: ModelIndices): void {
   indices.callersOf.clear();
+  indices.addressTakersOf.clear();
   const nameToAddr = new Map<string, string>();
   for (const fn of model.primary.functions) nameToAddr.set(fn.name, addressKey(fn.address));
 
@@ -1672,6 +1769,14 @@ function reindexCallers(model: LiveModel, indices: ModelIndices): void {
         if (!set) indices.callersOf.set(alias, (set = new Set()));
         set.add(caller);
       }
+    }
+    if (fn.platform) continue;
+    for (const ref of fn.operandRefs?.functions ?? []) {
+      const target = addressKey(ref.to);
+      if (target === caller) continue;
+      let set = indices.addressTakersOf.get(target);
+      if (!set) indices.addressTakersOf.set(target, (set = new Set()));
+      set.add(caller);
     }
   }
 }

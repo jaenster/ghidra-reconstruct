@@ -31,6 +31,12 @@
  * that binds outside it or a case label of an enclosing switch; two cases never fall into
  * one. When in doubt the ifs are left as printed.
  *
+ * A case whose code opens with a test of its own comes back folded into the case's test,
+ * `if (v == K && R) B` with no else (MONSTERAI_GetAliveKillerUnit 005de830: `sub eax, 0; je;
+ * sub eax, 1; jne` and then the mode tests). Where the subtraction stands for `v == K` alone,
+ * on lines of its own, the if is read as `if (v == K) { if (R) B }`, the same code, and the
+ * case is `case K: { if (R) B }`; a decision left as ifs keeps the printed if.
+ *
  * Cases are put in source order, read off the original's layout: VC8 lays the bodies of a
  * switch it lowers this way out in reverse source order, the last case right after the tests
  * (NET_D2GS_CLIENT_Send_0x67, 00477ca0, and BuildKurast, 0067f190, both matching byte for
@@ -42,7 +48,7 @@ import { NodeKind } from '../../../ast/kinds.js';
 import type {
   ASTNode, CompoundStmt, IfStmt, Statement, Expression, BinaryExpr, UnaryExpr, ParenExpr,
   Identifier, IntegerLiteralExpr, CharLiteralExpr, FunctionDecl, SwitchStmt, CaseStmt, DefaultStmt,
-  MemberExpr, SubscriptExpr, CStyleCastExpr, VariableDecl, QualifiedId,
+  MemberExpr, SubscriptExpr, CStyleCastExpr, VariableDecl, QualifiedId, ExprStmt, AssignExpr,
 } from '../../../ast/nodes.js';
 import { traverseAST, getChildren } from '../../../ast/visitor.js';
 import { createTransformer, updateNode, type Transformer } from '../../transformer.js';
@@ -73,6 +79,8 @@ export interface SwitchChainOptions extends PluginOptions {
   noreturnFunctions?: string[];
   /** Called once per decision rewritten, and per decision on subtraction tests left. */
   onSite?: (e: { rule: 'switch' | 'left'; line: number; cases: number; why?: string }) => void;
+  /** Set by switchChainLatePlugin: only chains of two ifs or more whose cases keep their own code. */
+  late?: boolean;
 }
 
 const SUBTRACTS = new Set(['SUB', 'ADD', 'DEC', 'INC']);
@@ -339,6 +347,9 @@ const INTEGRAL = new Set([
   'BYTE', 'WORD', 'DWORD', 'QWORD', 'UINT', 'INT', 'LONG', 'ULONG', 'SHORT', 'USHORT', 'CHAR', 'UCHAR',
   'BOOL', 'BOOLEAN', 'WPARAM', 'LPARAM', 'size_t', 'ptrdiff_t', 'intptr_t', 'uintptr_t',
   'undefined1', 'undefined2', 'undefined4', 'undefined8', '__int8', '__int16', '__int32', '__int64',
+  // The parser prints `short` as `short int` (and so on): the spellings `emit` gives a declaration.
+  'short int', 'unsigned short int', 'signed short', 'signed short int', 'signed', 'signed int',
+  'long int', 'unsigned long int', 'signed long', 'signed long int', 'long long int', 'unsigned long long int',
 ]);
 
 /** A declared type spelling is an integer or an enum (through typedefs); unknown is not. */
@@ -401,6 +412,8 @@ interface Ctx {
   /** Test offset -> the offsets of its compare run (compareRuns). */
   compares: Map<number, readonly number[]>;
   n: number;
+  /** The run after arm-constant-call (switchChainLatePlugin). */
+  late: boolean;
 }
 
 /** A test of the decision: its if, the parsed test and the instructions behind it. */
@@ -411,6 +424,8 @@ interface Node {
   ev: EqualityTest[];
   /** Per operand, the compared constant, unsigned at the instruction's size. */
   k: bigint[];
+  /** Tied by its own condition's lines: an if a pass split off a decompiled `&&`. */
+  split?: boolean;
 }
 
 /**
@@ -425,6 +440,8 @@ interface Leaf {
 
 class Decision {
   readonly nodes = new Map<IfStmt, Node>();
+  /** The ifs read as `if (v == K) { if (R) B }`, with their printed condition and arm. */
+  private readonly unfolded: Array<{ ifs: IfStmt; condition: Expression; thenBranch: Statement }> = [];
   /** Every leaf the tests can reach, in source order. */
   readonly leaves: Leaf[] = [];
   why: string | null = null;
@@ -436,11 +453,16 @@ class Decision {
     if (s.kind !== NodeKind.IfStmt) return 'other';
     const ifs = s as IfStmt;
     if (ifs.init || ifs.isConstexpr) return 'other';
-    const t = equality(ifs.condition, this.ctx.enums);
+    let t = equality(ifs.condition, this.ctx.enums);
+    const lead = t ? null : leadingTest(ifs, this.ctx.enums);
+    if (lead) t = lead.test;
     if (!t || !same(t.v, this.v)) return 'other';
     const known = this.nodes.get(ifs);
     if (known) return known;
-    const ev = this.ctx.reader.conditionTests(ifs);
+    const probe = lead ? ({ ...ifs, condition: lead.first } as IfStmt) : ifs;
+    const own = this.ctx.reader.conditionTests(probe);
+    const split = !own;
+    const ev = own ?? this.ctx.reader.conditionTests(probe, true);
     if (!ev) { this.why = this.why ?? 'no-evidence'; return null; }
     if (ev.length !== t.ops.length) { this.why = this.why ?? 'tokens'; return null; }
     const ks: bigint[] = [];
@@ -455,7 +477,12 @@ class Decision {
       ks.push(k);
     }
     if (new Set(ks).size !== ks.length) { this.why = this.why ?? 'value'; return null; }
-    const n: Node = { ifs, test: t, ev: [...ev], k: ks };
+    if (lead) {
+      this.unfolded.push({ ifs, condition: ifs.condition, thenBranch: ifs.thenBranch });
+      ifs.condition = lead.first;
+      ifs.thenBranch = Stmt.compound([lead.inner]);
+    }
+    const n: Node = { ifs, test: t, ev: [...ev], k: ks, ...(split ? { split: true } : {}) };
     this.nodes.set(ifs, n);
     return n;
   }
@@ -507,6 +534,50 @@ class Decision {
   find(l: Leaf): Leaf | undefined {
     return this.leaves.find(x => x.list === l.list && x.at === l.at);
   }
+
+  /** Put back every if read as two: the decision stays ifs as printed. */
+  revert(): void {
+    for (const u of this.unfolded.reverse()) {
+      u.ifs.condition = u.condition;
+      u.ifs.thenBranch = u.thenBranch;
+    }
+    this.unfolded.length = 0;
+  }
+}
+
+/**
+ * `if (v == K && R) B` with no else, the test `v == K` on lines of its own: that test, and
+ * `if (R) B` to put in the arm. The operands are read in text order; `&&` evaluates the
+ * same in either grouping.
+ */
+function leadingTest(ifs: IfStmt, enums: ReadonlySet<string>): { test: Test; first: Expression; inner: IfStmt } | null {
+  if (ifs.elseBranch) return null;
+  const leaves: Expression[] = [];
+  const flatten = (e: Expression): void => {
+    const u = unwrap(e);
+    if (u.kind === NodeKind.BinaryExpr && (u as BinaryExpr).operator === '&&') {
+      flatten((u as BinaryExpr).left);
+      flatten((u as BinaryExpr).right);
+    } else leaves.push(e);
+  };
+  flatten(ifs.condition);
+  if (leaves.length < 2) return null;
+  const one = equalityOperand(leaves[0], enums);
+  if (!one || one.neg) return null;
+  const first = leaves[0];
+  const rest = leaves.slice(1);
+  const end = first.location?.end.line;
+  if (end === undefined || rest.some(r => (r.location?.start.line ?? end) <= end)) return null;
+  const cond = rest.slice(1).reduce<Expression>((l, r) => ({
+    kind: NodeKind.BinaryExpr, operator: '&&', left: l, right: r, location: { start: l.location!.start, end: r.location!.end },
+    leadingTrivia: [], trailingTrivia: [],
+  }) as unknown as Expression, rest[0]);
+  const inner = {
+    kind: NodeKind.IfStmt, condition: cond, thenBranch: ifs.thenBranch, elseBranch: null, isConstexpr: false,
+    location: { start: rest[0].location!.start, end: ifs.location?.end ?? rest[rest.length - 1].location!.end },
+    leadingTrivia: [], trailingTrivia: [],
+  } as unknown as IfStmt;
+  return { test: { v: one.v, ops: [one.op], neg: false }, first, inner };
 }
 
 interface Frame {
@@ -553,6 +624,7 @@ function decisionAt(list: readonly Statement[], i: number, ctx: Ctx, inBlock = t
   const region = list.slice(i, end);
   const line = head.location?.start.line ?? 0;
   const left = (why: string, cases: number) => {
+    d.revert();
     if (why !== 'no-evidence' && why !== 'tokens') ctx.onSite?.({ rule: 'left', line, cases, why });
     return { replace: null, end: Math.max(end, i + 1) };
   };
@@ -573,6 +645,9 @@ function decisionAt(list: readonly Statement[], i: number, ctx: Ctx, inBlock = t
   const cmpSwitch = nodes.length >= 2 && nodes.every(n => n.ev.length === 1);
   const run = first.mnemonic === 'CMP' ? (cmpSwitch ? ctx.compares.get(first.at) : undefined) : ctx.runs.get(first.at);
   if (!run) return left('sum', nodes.length);
+  // A split-off test counts only in a run of subtractions: a compare run of such tests is the
+  // original's if-chain (QUESTLOG_ShowQuestDescription 004a27d0, `CMP CX,0xe8c; CMP CX,0xe8d`).
+  if (first.mnemonic === 'CMP' && nodes.some(n => n.split)) return left('split-compare', nodes.length);
   if (run.length !== ats.size || run.some(a => !ats.has(a))) return left('partial', nodes.length);
 
   // Where each value goes, and where each leaf's code goes after it.
@@ -620,6 +695,11 @@ function decisionAt(list: readonly Statement[], i: number, ctx: Ctx, inBlock = t
   const intoEnd = [...nextOf.values()].filter(x => x === null).length;
   const endGroup = fallOut.length > 0 && !fallOut.includes(null);
   const moveTail = endGroup && inBlock && intoEnd <= 1;
+  // After arm-constant-call only a chain of ifs whose cases keep their own code is taken:
+  // one `if (v != A && v != B)`, or a guard whose exit leads into the rest of the block, was
+  // left by the first run for a reason the later passes do not change
+  // (QUESTLOG_ShowQuestDescription 004a27d0 matches as the guard).
+  if (ctx.late && (moveTail || nodes.length < 2)) return left('late-shape', nodes.length);
   const tail = moveTail ? (list.slice(end) as Statement[]) : [];
   const labelFor = (val: bigint | null): Expression | null => {
     if (val === null) return null;
@@ -702,12 +782,24 @@ function pathTo(d: Decision, region: readonly Statement[], leaf: Leaf): Frame[] 
 /**
  * Lines of the ifs that sit under a relational test of a variable (`v < 5`), with that
  * variable: VC8 splits a larger switch by such a test and counts down each half, so a chain
- * there is a fragment of one switch, not a switch of its own.
+ * there is a fragment of one switch, not a switch of its own. A variable the block assigns
+ * before the chain holds a new value there, so the test above no longer splits it
+ * (DRLGPRESET_AddPresetUnitToDrlgMap 00667620: `if (nClassId < nTableSize) .. else {
+ * nTableSize = ..; if (nTableSize == 0x21) ..` is one countdown, `sub ecx, 0x21; je; dec ecx`).
  */
 function splitLines(root: ASTNode): Map<number, Set<string>> {
   const out = new Map<number, Set<string>>();
   const visit = (n: ASTNode, under: readonly string[]): void => {
     let inner = under;
+    if (n.kind === NodeKind.CompoundStmt && under.length) {
+      let cur = under;
+      for (const s of (n as CompoundStmt).statements) {
+        visit(s, cur);
+        const written = assignedBy(s);
+        if (written) cur = cur.filter(u => u !== written);
+      }
+      return;
+    }
     if (n.kind === NodeKind.IfStmt) {
       const i = n as IfStmt;
       if (i.location && under.length) {
@@ -732,6 +824,15 @@ function splitLines(root: ASTNode): Map<number, Set<string>> {
   };
   visit(root, []);
   return out;
+}
+
+/** The variable a plain `v = ...;` statement assigns, as printed. */
+function assignedBy(s: Statement): string | undefined {
+  if (s.kind !== NodeKind.ExprStmt) return undefined;
+  const e = unwrap((s as ExprStmt).expression);
+  if (e.kind !== NodeKind.AssignExpr) return undefined;
+  const left = unwrap((e as AssignExpr).left);
+  return pureLvalue(left) ? emit(left as never) : undefined;
 }
 
 function rewriteList(list: readonly Statement[], ctx: Ctx): Statement[] | null {
@@ -791,6 +892,7 @@ function rewriteFunction(fn: FunctionDecl, ev: BranchLayoutEvidence, opts: Switc
     enums: new Set(opts.enumConstants ?? []),
     noreturn: new Set([...DEFAULT_NORETURN_FUNCTIONS, ...(opts.noreturnFunctions ?? [])]),
     onSite: opts.onSite,
+    late: !!opts.late,
     split: splitLines(fn.body),
     runs: countdownRuns(ev.tests),
     compares: compareRuns(ev.tests),
@@ -846,4 +948,21 @@ export const switchChainPlugin: TransformPlugin = {
   priority: 44,
   tags: ['control-flow', 'layout'],
   createTransformer: createSwitchChainTransformer,
+};
+
+/**
+ * The same rule once more after arm-constant-call (59.4). A switch whose cases each end in
+ * their own copy of a call VC8 cross-jumped (`push 0x5a; jmp L` / `push 0x5b` into one CALL)
+ * prints as one call after the if-chain, which joins two leaves and is refused at 44;
+ * arm-constant-call writes the call back into each arm. Taken here only as a chain of two
+ * ifs or more whose cases keep their own code (`late`). AITHINK_Fn1_ClawViper 005f1b60 and
+ * AITHINK_Fn1_ClawViperEx 005f1de0 match with both of their `aip[5]` tests as switches.
+ */
+export const switchChainLatePlugin: TransformPlugin = {
+  ...switchChainPlugin,
+  id: 'switch-chain-late',
+  name: 'Switch Chain (late)',
+  // After arm-constant-call (59.4), before nest-call (59.5).
+  priority: 59.45,
+  createTransformer: (options: SwitchChainOptions = {}) => createSwitchChainTransformer({ ...options, late: true }),
 };

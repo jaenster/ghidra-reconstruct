@@ -167,7 +167,7 @@ async function extractPlateComments(
   try {
     const result = await connection.sendCommand<{ success?: boolean; output?: unknown; error?: string }>(
       'execute_script',
-      { language: 'java', code: PLATE_COMMENT_SCRIPT, scriptTimeout: 300, _commandTimeout: 360000 },
+      { language: 'java', readOnly: true, code: PLATE_COMMENT_SCRIPT, scriptTimeout: 300, _commandTimeout: 360000 },
     );
     if (result.success !== false && typeof result.output === 'string') return parsePlateComments(result.output);
     console.warn(`  Plate comments by script unavailable (${result.error ?? 'no output'}); walking list_comments`);
@@ -318,7 +318,7 @@ export interface PrimaryLabel {
 export async function extractPrimaryLabels(connection: GhidraConnection): Promise<Map<string, PrimaryLabel>> {
   const result = await connection.sendCommand<{ success?: boolean; output?: string; error?: string }>(
     'execute_script',
-    { language: 'java', code: PRIMARY_LABEL_SCRIPT, scriptTimeout: 300, _commandTimeout: 360000 }
+    { language: 'java', readOnly: true, code: PRIMARY_LABEL_SCRIPT, scriptTimeout: 300, _commandTimeout: 360000 }
   );
   if (result.success === false || typeof result.output !== 'string') {
     throw new Error(result.error ?? 'no output');
@@ -392,7 +392,7 @@ println(sb.toString());
 export async function extractImportSlots(connection: GhidraConnection): Promise<Map<string, string>> {
   const result = await connection.sendCommand<{ success?: boolean; output?: string; error?: string }>(
     'execute_script',
-    { language: 'java', code: IMPORT_SLOT_SCRIPT, scriptTimeout: 120, _commandTimeout: 180000 }
+    { language: 'java', readOnly: true, code: IMPORT_SLOT_SCRIPT, scriptTimeout: 120, _commandTimeout: 180000 }
   );
   if (result.success === false || typeof result.output !== 'string') {
     throw new Error(result.error ?? 'no output');

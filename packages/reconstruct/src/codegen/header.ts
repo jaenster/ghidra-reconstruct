@@ -27,7 +27,8 @@ import { generateExternDeclaration, isFuncDefTypedefName, sanitizeSymbolName, or
 import { declarationHead, pointerConvention } from './calling-convention.js';
 import { enumTypedefLine } from './enum-width.js';
 import { requiresPacking, adoptGhidraLayout } from './struct-packing.js';
-import { memberDefinitionScope, signatureParameters } from './templates/index.js';
+import { COMDAT_SPECIFIERS, memberDefinitionScope, signatureParameters } from './templates/index.js';
+import { isInlineHost } from './inline-hosts.js';
 import { classKeyOf, templateRegistry } from './templates/registry.js';
 import { baseComponentOf, ownFields } from './templates/bases.js';
 import { stripPlateTemplate } from './plate-comment.js';
@@ -129,6 +130,32 @@ function isValidNamespace(name: string): boolean {
 /**
  * Generate a header file
  */
+/**
+ * Marker lines around each function declaration, for the module-library pass
+ * (codegen/module-boundary.ts): it keeps a declaration other modules reference
+ * where it is and moves the rest into the module-private block. Written only
+ * while that pass is on, and always consumed by it.
+ */
+export const DECLS_BEGIN_MARKER = '//@@decls-begin';
+export const DECLS_END_MARKER = '//@@decls-end';
+export const DECL_MARKER = '//@@decl ';
+export const DECL_END_MARKER = '//@@decl-end';
+export const TYPE_MARKER = '//@@type ';
+export const TYPE_END_MARKER = '//@@type-end';
+/** Around one body of a unit's inline header: `//@@inline <address>`, so the module pass can publish it. */
+export const INLINE_MARKER = '//@@inline ';
+export const INLINE_END_MARKER = '//@@inline-end';
+/** Around one extern of a unit's data header: `//@@global <name>`, so the module pass can publish it. */
+export const GLOBAL_MARKER = '//@@global ';
+export const GLOBAL_END_MARKER = '//@@global-end';
+let declarationMarkers = false;
+export function setDeclarationMarkers(on: boolean): void {
+  declarationMarkers = on;
+}
+export function declarationMarkersOn(): boolean {
+  return declarationMarkers;
+}
+
 export function generateHeader(
   name: string,
   functions: ExtractedFunction[],
@@ -357,7 +384,11 @@ export function generateHeader(
       }
       if (library && !inSdk) { lines.push(SDK_BLOCK_OPEN); lines.push(''); inSdk = true; }
       if (!library) closeSdk();
+      // An enum is named by its constants, which no type reference reaches: it stays public.
+      const markType = declarationMarkers && !library && !ifdef && type.kind !== 'ENUM';
+      if (markType) lines.push(`${TYPE_MARKER}${type.name}`);
       if (emitTypeDefinition(type, lines)) classEmittedInTopoSort = true;
+      if (markType) lines.push(TYPE_END_MARKER);
     }
     closeSdk();
     if (currentIfdef) {
@@ -522,6 +553,7 @@ export function generateHeader(
 
     if (declaredFunctions.length > 0) {
       lines.push('// Function declarations');
+      if (declarationMarkers) lines.push(DECLS_BEGIN_MARKER);
       let currentIfdef: string | undefined;
       const emittedFuncNames = new Set<string>();
       for (const func of declaredFunctions) {
@@ -545,12 +577,16 @@ export function generateHeader(
           }
           currentIfdef = func.ifdef;
         }
+        const marked = declarationMarkers && !func.ifdef && func.address;
+        if (marked) lines.push(`${DECL_MARKER}${func.address}`);
         lines.push(generateFunctionDeclaration(func, options, fnAddrMap));
+        if (marked) lines.push(DECL_END_MARKER);
       }
       // Close any open ifdef
       if (currentIfdef) {
         lines.push(`#endif // ${currentIfdef}`);
       }
+      if (declarationMarkers) lines.push(DECLS_END_MARKER);
       if (internalCount > 0) {
         lines.push(`// ${internalCount} internal function${internalCount > 1 ? 's' : ''} (defined in .cpp)`);
       }
@@ -897,8 +933,10 @@ export function generateFunctionDeclaration(
 
   const cleanName = emittedFunctionName(func);
   const member = memberDefinitionScope(func);
+  // A header inline is declared as its inline header defines it (inline-hosts.ts).
+  const prefix = member?.prefix ?? (isInlineHost(func) ? COMDAT_SPECIFIERS : '');
 
-  return `${commentBlock}${member?.prefix ?? ''}${declarationHead(returnSigType(func.returnType), func)}${member?.qualifier ?? ''}${cleanName}(${params});${addressComment}`;
+  return `${commentBlock}${prefix}${declarationHead(returnSigType(func.returnType), func)}${member?.qualifier ?? ''}${cleanName}(${params});${addressComment}`;
 }
 
 /**

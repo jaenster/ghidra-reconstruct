@@ -28,7 +28,8 @@
  */
 
 import { parse, preprocessGhidraCode, NodeKind, type FunctionDecl, type Expression } from '@ghidra-mcp/cpp-parser';
-import { paramReaches, type Reach, type ReachField } from '@ghidra-mcp/cpp-parser/transform/cfg/index';
+import { paramReaches, type Reach, type ReachField, type ParamReachContext, type ReachOptions } from '@ghidra-mcp/cpp-parser/transform/cfg/index';
+import type { ASTNode } from '@ghidra-mcp/cpp-parser';
 import type { DataValue, ExtractedDataType, ExtractedFunction, ExtractedStruct } from '../types.js';
 import { decompiledBody, makeTypeSize } from './out-params.js';
 
@@ -40,6 +41,13 @@ export interface ParamReachOracle {
    * expression can denote, or null when those are not all known (see `tableTargets`).
    */
   argReachThrough(callee: Expression, index: number, argCount: number): Reach;
+  /**
+   * The bytes a caller's own body reaches through one of its names, as `paramReaches` reads
+   * a parameter, with this oracle's types, fields and callees: a local pointer holding a
+   * frame object's address (`p = &rc; GetClientRect(h, p)`). `opts.include` leaves out the
+   * stores that give it that address.
+   */
+  bodyReach(body: ASTNode, name: string, type: string, opts?: ReachOptions): Reach;
 }
 
 /** The part of a data symbol a function table is read from. */
@@ -229,8 +237,26 @@ export function createParamReachOracle(
     const v = instances.get(aggregate);
     return v && v.length > 0 ? v : null;
   };
-  const field = (aggregate: string, member: string): ReachField | null =>
-    tables.get(aggregate)?.get(member) ?? null;
+  // A typedef naming an aggregate (`POINT` -> `tagPOINT`, the SDK's spelling) has its fields.
+  const typedefs = new Map<string, string | null>();
+  for (const dt of dataTypes) {
+    if (dt.kind !== 'TYPEDEF' || !dt.name) continue;
+    const under = (dt as { underlyingType?: string }).underlyingType;
+    const target = typeof under === 'string' && !/[*[\]()&]/.test(under) ? bareType(under) : null;
+    const seen = typedefs.get(dt.name);
+    typedefs.set(dt.name, seen === undefined ? target : seen === target ? seen : null);
+  }
+  const field = (aggregate: string, member: string): ReachField | null => {
+    let name = aggregate;
+    for (let i = 0; i < 8; i++) {
+      const table = tables.get(name);
+      if (table !== undefined) return table?.get(member) ?? null;
+      const next = typedefs.get(name);
+      if (!next) return null;
+      name = next;
+    }
+    return null;
+  };
 
   /** Results that are a pure function of the callee. */
   const settled = new Map<ExtractedFunction, Reach[]>();
@@ -296,12 +322,14 @@ export function createParamReachOracle(
       }
     }
     if (names.some(n => OFF_PROTOTYPE.test(n))) return unknownFor(fn);
-    return paramReaches(f.body, params.map(p => ({ name: p.name ?? '', type: p.dataType ?? '' })), {
-      typeSize,
-      field,
-      calleeReach: (callee, index, argCount) => reachAt(callee, index, argCount),
-      computedCalleeReach: (callee, index, argCount) => reachThrough(callee, index, argCount),
-    });
+    return paramReaches(f.body, params.map(p => ({ name: p.name ?? '', type: p.dataType ?? '' })), reachContext);
+  };
+
+  const reachContext: ParamReachContext = {
+    typeSize,
+    field,
+    calleeReach: (callee, index, argCount) => reachAt(callee, index, argCount),
+    computedCalleeReach: (callee, index, argCount) => reachThrough(callee, index, argCount),
   };
 
   const reachAt = (callee: string, index: number, argCount: number): Reach => {
@@ -338,6 +366,14 @@ export function createParamReachOracle(
     argReachThrough(callee: Expression, index: number, argCount: number): Reach {
       if (stack.length === 0) provisional = new Map();
       return reachThrough(callee, index, argCount);
+    },
+    bodyReach(body: ASTNode, name: string, type: string, opts: ReachOptions = {}): Reach {
+      if (stack.length === 0) provisional = new Map();
+      try {
+        return paramReaches(body, [{ name, type }], reachContext, opts)[0];
+      } catch {
+        return null;
+      }
     },
   };
 }

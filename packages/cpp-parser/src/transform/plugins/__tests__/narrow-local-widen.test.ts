@@ -109,4 +109,150 @@ describe('narrow-local-widen', () => {
       'int bad = 0; for (int v = -32768; v < 32768; v++) { D2SkillsTxt t; t.srvdofunc = (short)v; if (wide(&t) != narrow(&t)) bad++; } printf("%d\\n", bad);');
     assert.strictEqual(res.trim(), '0');
   });
+
+  // CLIENT_UpdateUnitLightRadius 00460930: `MOVZX EAX,AL; CMP EAX,ECX; JGE` against a byte field.
+  describe('a byte local the original compares signed at four bytes with a byte field', () => {
+    const LIGHT = `void f(D2MonStats2Txt *pMonStats2, D2UnitStrc *pUnit) {
+  uint8_t bVar1;
+  uint32_t nLightRadius;
+  bVar1 = GetRadius(pUnit);
+  nLightRadius = (uint32_t)bVar1;
+  if ((uint32_t)bVar1 < (uint32_t)pMonStats2->byLight) {
+    nLightRadius = (uint32_t)pMonStats2->byLight;
+  }
+  g(nLightRadius);
+}`;
+    const sites: Site[] = [{ text: '<', fp: ['e', 'e'] }];
+    const tables = { structFields: { D2MonStats2Txt: { byLight: 'uint8_t' } }, functionReturnTypes: { GetRadius: 'uint8_t' } };
+    // compare-form reads the same type tables to prove the operands narrow.
+    const both = (code: string, t: Record<string, unknown>) => emit(createNarrowLocalWidenTransformer(t)(
+      createCompareFormTransformer({ sites, decisions: [dec({ ord: 0, ...sites[0], signed: true, zextPair: true })], ...t } as CompareFormOptions)(parse(code))) as AnyNode);
+    it('drops the unsigned casts and declares the local int', () => {
+      const out = both(LIGHT, tables).replace(/\s+/g, ' ');
+      assert.ok(out.includes('if (bVar1 < pMonStats2->byLight)'), out);
+      assert.ok(out.includes('int32_t bVar1;'), out);
+    });
+    it('leaves the compare as printed when an operand is not a zero-extended narrow value', () => {
+      const wide = { structFields: { D2MonStats2Txt: { byLight: 'uint32_t' } }, functionReturnTypes: { GetRadius: 'uint8_t' } };
+      const out = both(LIGHT, wide).replace(/\s+/g, ' ');
+      assert.ok(out.includes('(uint32_t)bVar1 < (uint32_t)pMonStats2->byLight'), out);
+      assert.ok(out.includes('uint8_t bVar1;'), out);
+    });
+  });
+
+  // Q33_Callback02_NpcDeactivate 00588f80: `MOV EAX,dword ptr [EAX+4] .. CMP AX,0x201`.
+  describe('a narrow local the original loads whole and compares narrow', () => {
+    const Q33 = `void f(D2QuestArgStrc *pQuestArgs) {
+  short nTargetClassId = !pQuestArgs->pTarget ? -1 : (short)pQuestArgs->pTarget->nClassId;
+  if (nTargetClassId != 0x201) {
+    return;
+  }
+  g();
+}`;
+    const sites: Site[] = [{ text: '!=', fp: ['v:nTargetClassId', 'c:201'], size: 2 }];
+    const tables = { structFields: { D2UnitStrc: { nClassId: 'int' }, D2QuestArgStrc: { pTarget: 'D2UnitStrc*' } } };
+
+    it('declares it int, drops the cast on the load and narrows it at the compare', () => {
+      const out = run(Q33, sites, [dec({ ord: 0, ...sites[0], width: 2 })], tables).replace(/\s+/g, ' ');
+      assert.ok(out.includes('int32_t nTargetClassId = !pQuestArgs->pTarget ? -1 : pQuestArgs->pTarget->nClassId;'), out);
+      assert.ok(/if \(\(short( int)?\)nTargetClassId != 0x201\)/.test(out), out);
+    });
+
+    it('leaves it where it is read other than in a narrow compare, or holds a wider value', () => {
+      const read = run(Q33.replace('g();', 'g(nTargetClassId);'), sites, [dec({ ord: 0, ...sites[0], width: 2 })], tables);
+      assert.match(read, /short (int )?nTargetClassId/);
+      const wide = run(Q33, sites, [dec({ ord: 0, ...sites[0], width: 4 })], tables);
+      assert.ok(!/\(short( int)?\)nTargetClassId/.test(wide), wide);
+      const big = run(Q33.replace('? -1 :', '? 0x12345 :'), sites, [dec({ ord: 0, ...sites[0], width: 2 })], tables);
+      assert.match(big, /short (int )?nTargetClassId/);
+      const narrowField = run(Q33, sites, [dec({ ord: 0, ...sites[0], width: 2 })], { structFields: { D2UnitStrc: { nClassId: 'short' }, D2QuestArgStrc: { pTarget: 'D2UnitStrc*' } } });
+      assert.match(narrowField, /short (int )?nTargetClassId/);
+    });
+  });
+
+  // NET_SID_CLIENT_SetCDKeyBit 005225a0 and its neighbours: `MOV ECX,EDX; AND ECX,0x1f`.
+  describe('a narrow local the original computes in a full register', () => {
+    const go = (code: string) => run(code, [], [], {}).replace(/\s+/g, ' ');
+    it('declares a masked byte int and drops the cast under the mask', () => {
+      const out = go('void f(uint32_t* p, uint32_t nBitIndex) { uint8_t byBitPos = (uint8_t)nBitIndex & 0x1f; p[0] = 1 << byBitPos; }');
+      assert.ok(out.includes('int32_t byBitPos = nBitIndex & 0x1f;'), out);
+    });
+    it('takes a multiple of a mask and spells its char operand as an integer', () => {
+      const out = go("uint32_t f(uint32_t* p, uint32_t n) { int8_t nShift = ((uint8_t)n & 7) * '\\x04'; return p[0] >> nShift; }");
+      assert.ok(out.includes('int32_t nShift = (n & 7) * 4;'), out);
+    });
+    it('takes a value an early-return guard holds in range (DAMAGE_SafeShiftMultiply 0057e350)', () => {
+      const out = go('int f(int a, int n) { if (!(n - 1U <= 0x1e)) { return a; } uint8_t byShift = (uint8_t)n; return a >> byShift; }');
+      assert.ok(out.includes('int32_t byShift = n;'), out);
+    });
+    it('leaves a value out of range, unguarded, stored again, or compared narrow', () => {
+      assert.ok(go('void f(uint32_t n) { int8_t b = (uint8_t)n & 0xff; g(b); }').includes('int8_t b'));
+      assert.ok(go('int f(int a, int n) { uint8_t s = (uint8_t)n; return a >> s; }').includes('uint8_t s'));
+      assert.ok(go('int f(int a, int n) { if (!(n - 1 <= 0x1e)) { return a; } uint8_t s = (uint8_t)n; return a >> s; }').includes('uint8_t s'));
+      assert.ok(go('int f(int a, int n) { if (!(n - 1U <= 0x1e)) { return a; } n = g(); uint8_t s = (uint8_t)n; return a >> s; }').includes('uint8_t s'));
+      assert.ok(go('void f(uint32_t n) { uint8_t b = (uint8_t)n & 0x1f; b = 3; g(b); }').includes('uint8_t b'));
+      assert.ok(go('void f(uint32_t n) { uint8_t b = (uint8_t)n & 0x1f; g(&b); }').includes('uint8_t b'));
+    });
+  });
+  // SCMD_0x3E_QuestItemPickup 0054bf60: `MOV EBX,[ECX+0xc]` / `MOV EBX,EAX` / `XOR EBX,EBX`, one PUSH.
+  describe('a narrow local the original holds whole and narrows only where it passes or stores it', () => {
+    const PICKUP = `int f(D2UnitStrc *pItem, int e) {
+  uint16_t nPosX;
+  int32_t nCoord;
+  if (e == 2) {
+    nPosX = (uint16_t)pItem->pStaticPath->nPosX;
+  } else if (pItem->pDynamicPath) {
+    nCoord = GetXPos(pItem->pDynamicPath);
+    nPosX = (uint16_t)nCoord;
+  } else {
+    nPosX = 0;
+  }
+  return CheckIfCoordsAreInRange(pItem, 10, nPosX);
+}`;
+    const tables = {
+      structFields: { D2UnitStrc: { pStaticPath: 'D2StaticPathStrc*', pDynamicPath: 'D2DynamicPathStrc*' }, D2StaticPathStrc: { nPosX: 'int' } },
+      functionReturnTypes: { GetXPos: 'int32_t' },
+      functionParamTypes: { CheckIfCoordsAreInRange: ['D2UnitStrc*', 'int32_t', 'uint16_t'], g: ['int'] },
+    };
+    const go = (code: string, t: Record<string, unknown> = tables) => run(code, [], [], t).replace(/\s+/g, ' ');
+
+    it('declares it int and drops the narrowing casts on its values', () => {
+      const out = go(PICKUP);
+      assert.ok(out.includes('int32_t nPosX;'), out);
+      assert.ok(out.includes('nPosX = pItem->pStaticPath->nPosX;'), out);
+      assert.ok(out.includes('nPosX = nCoord;'), out);
+      assert.ok(out.includes('nPosX = 0;'), out);
+    });
+
+    // CLIENT_PopulateVisibilityPacketBuffer 00537ee0: the value is stored through a word pointer.
+    it('takes a store through a pointer no wider than the local', () => {
+      const out = go(PICKUP.replace('return CheckIfCoordsAreInRange(pItem, 10, nPosX);', '*(short int*)((char*)pItem + 0x23) = nPosX; return 0;'));
+      assert.ok(out.includes('int32_t nPosX;'), out);
+    });
+
+    it('leaves it where a read sees more than its own width, or no value lost a cast', () => {
+      for (const use of ['return g(nPosX);', 'return nPosX + 1;', 'return h(nPosX);', 'return nPosX;']) {
+        assert.match(go(PICKUP.replace('return CheckIfCoordsAreInRange(pItem, 10, nPosX);', use)), /uint16_t nPosX;/, use);
+      }
+      assert.match(go(PICKUP.replace(/\(uint16_t\)/g, '')), /uint16_t nPosX;/);
+      assert.match(go(PICKUP.replace('nPosX = 0;', 'nPosX = 0; g((int)&nPosX);')), /uint16_t nPosX;/);
+      // One store (MOUSE handler 0044c000 lost its MATCH so), or no field among the values.
+      assert.match(go('int f(D2UnitStrc *p) { uint16_t nPosX; nPosX = (uint16_t)p->pStaticPath->nPosX; return CheckIfCoordsAreInRange(p, 10, nPosX); }'), /uint16_t nPosX;/);
+      assert.match(go(PICKUP.replace('(uint16_t)pItem->pStaticPath->nPosX', '(uint16_t)GetXPos(pItem->pDynamicPath)')), /uint16_t nPosX;/);
+    });
+
+    it('passes the same bits as the narrow local, over every value', { skip: !hasNativeGpp() }, () => {
+      const code = `int wide(P *p, int e) {
+  uint16_t n;
+  if (e) { n = (uint16_t)p->x; } else { n = 0xffff; }
+  return take(n);
+}`;
+      const out = run(code, [], [], { structFields: { P: { x: 'int' } }, functionParamTypes: { take: ['uint16_t'] } });
+      assert.match(out, /int32_t n;/);
+      const narrow = out.replace('int wide(', 'int narrow(').replace('int32_t n;', 'uint16_t n;');
+      const res = compileAndRun(`struct P { int x; };\nint take(uint16_t v) { return v; }\n${out}\n${narrow}`,
+        'int bad = 0; for (long long v = -0x30000; v < 0x30000; v += 7) for (int e = 0; e < 2; e++) { P p; p.x = (int)v; if (wide(&p, e) != narrow(&p, e)) bad++; } printf("%d\\n", bad);');
+      assert.strictEqual(res.trim(), '0');
+    });
+  });
 });

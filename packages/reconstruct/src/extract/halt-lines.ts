@@ -17,6 +17,8 @@
  *             guard   the offset of the conditional branch that chooses this way: the Jcc
  *                     the PUSH falls out of, or the Jcc that jumps to the PUSH; null when
  *                     neither
+ *             guards  every conditional branch that leads to the PUSH (jumps to it, and the
+ *                     Jcc it falls out of even when something else enters it too)
  *   probeReturns  the return address of each CALL to `__alloca_probe` or `__SEH_prolog4`.
  *           The probe runs on the frame it is allocating, so the CALL's return address lands
  *           in the slot that becomes the frame's top local, and the decompiler prints that as
@@ -35,6 +37,12 @@ export interface HaltPath {
   line: number | null;
   /** Offset of the conditional branch that selects this way; null when there is none. */
   guard: number | null;
+  /**
+   * Every conditional branch that leads to this way's PUSH: the jumps to it and the Jcc it
+   * falls out of, even when other ways enter it too. A superset of `guard`; absent in
+   * snapshots read before it was recorded.
+   */
+  guards?: number[];
 }
 
 export interface HaltSite {
@@ -109,6 +117,7 @@ for (String a : items.split(";")) {
     StringBuilder ways = new StringBuilder();
     for (ghidra.program.model.listing.Instruction p : pushers) {
       String line = "-", guard = "-";
+      StringBuilder guards = new StringBuilder();
       if (p != null && p.getMnemonicString().equals("PUSH") && p.getNumOperands() == 1
           && p.getScalar(0) != null && p.getRegister(0) == null) {
         line = Long.toHexString(p.getScalar(0).getUnsignedValue());
@@ -126,8 +135,19 @@ for (String a : items.split(";")) {
               && b.getFallThrough().equals(p.getAddress())) c = b;
         }
         if (c != null) guard = Long.toHexString(c.getAddress().getOffset() - base);
+        // Every conditional branch that leads to this PUSH: the jumps to it and the Jcc it
+        // falls out of, whether or not other ways enter it too.
+        java.util.TreeSet<Long> gs = new java.util.TreeSet<>();
+        for (ghidra.program.model.symbol.Reference r : rm.getReferencesTo(p.getAddress())) {
+          if (r.getReferenceType().isConditional() && f.getBody().contains(r.getFromAddress())) gs.add(r.getFromAddress().getOffset() - base);
+        }
+        ghidra.program.model.listing.Instruction fb = L.getInstructionBefore(p.getAddress());
+        if (fb != null && fb.getFlowType().isConditional() && fb.getFallThrough() != null
+            && fb.getFallThrough().equals(p.getAddress()) && f.getBody().contains(fb.getAddress())) gs.add(fb.getAddress().getOffset() - base);
+        for (Long x : gs) guards.append(guards.length() > 0 ? "+" : "").append(Long.toHexString(x));
       }
       ways.append(ways.length() > 0 ? "," : "").append(line).append('/').append(guard);
+      if (guards.length() > 0) ways.append('/').append(guards);
     }
     row.append(row.length() > 0 ? ";" : "").append(Long.toHexString(hc.getAddress().getOffset() - base))
       .append(':').append(Long.toHexString(g.getAddress().getOffset() - base)).append(':').append(ways);
@@ -175,8 +195,11 @@ export function parseHaltLines(output: string): Map<string, HaltLineFacts> {
       const [at, ip, ways] = part.split(':');
       if (at === undefined || ip === undefined || ways === undefined) continue;
       const paths = ways.split(',').map(w => {
-        const [line, guard] = w.split('/');
-        return { line: hex(line ?? '-'), guard: hex(guard ?? '-') };
+        const [line, guard, guards] = w.split('/');
+        const path: HaltPath = { line: hex(line ?? '-'), guard: hex(guard ?? '-') };
+        const all = (guards ?? '').split('+').filter(x => /^[0-9a-fA-F]+$/.test(x)).map(x => parseInt(x, 16));
+        if (all.length > 0) path.guards = all;
+        return path;
       });
       halts.push({ at: parseInt(at, 16), ip: parseInt(ip, 16), paths });
     }
@@ -199,7 +222,7 @@ export async function extractHaltLines(connection: GhidraConnection, functions: 
   for (const batch of haltLinesBatches(functions)) {
     const result = await connection.sendCommand<{ success?: boolean; output?: string; error?: string }>(
       'execute_script',
-      { language: 'java', code: haltLinesScript(batch), scriptTimeout: 300, _commandTimeout: 360000 }
+      { language: 'java', readOnly: true, code: haltLinesScript(batch), scriptTimeout: 300, _commandTimeout: 360000 }
     );
     if (result.success === false || typeof result.output !== 'string') throw new Error(result.error ?? 'no output');
     for (const [fn, facts] of parseHaltLines(result.output)) {

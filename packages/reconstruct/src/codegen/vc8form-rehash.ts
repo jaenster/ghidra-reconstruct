@@ -26,8 +26,9 @@ export function planRehash(now: Map<string, Vc8FormHashRecord>, before?: Map<str
         if (b && b.size === r.size && b.legacy === tag.body && b.form === r.form) reason = 'moved';
       }
       if (!reason) { stale.push({ address, name: r.name, tag: data, why: `decompile ${r.legacy}/${r.form}, the tag measured ${tag.body}` }); continue; }
-      const at = data.lastIndexOf(';dh=');
-      rows.push({ address, name: r.name, old: 'vc8form:' + data, new: 'vc8form:' + data.slice(0, at) + ';dh=' + r.form, reason });
+      // Only the dh value changes; the fields after it (`ord`) stay.
+      const at = data.lastIndexOf(';dh=') + 4;
+      rows.push({ address, name: r.name, old: 'vc8form:' + data, new: 'vc8form:' + data.slice(0, at) + r.form + data.slice(at + tag.body.length), reason });
     }
   }
   return { rows, kept, stale, checksum: rowsChecksum(rows) };

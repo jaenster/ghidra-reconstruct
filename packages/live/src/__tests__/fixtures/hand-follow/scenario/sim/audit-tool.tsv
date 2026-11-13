@@ -1,0 +1,11 @@
+id	hash	scope	addr	fn	status	how	expected	found_in	note
+h001	4a3e31ac1229	file			present	ctx	Source/A/Alpha.cpp	Source/A/Alpha.cpp	
+h002	1ed8c6b8a640	function	00401000	One	present	ctx	Source/A/Alpha.cpp	Source/A/Alpha.cpp	
+h003	75e0261ec40b	multi			present	ctx	Source/A/Alpha.cpp	Source/A/Alpha.cpp	
+h004	e2c7988dc652	function	00401040	Three	present	ctx	Source/A/Alpha.cpp	Source/A/Alpha.cpp	
+h005	01aa0f413719	function	00401080	Four	present	ctx	Source/A/Alpha.cpp	Source/A/Alpha.cpp	
+h006	e35bd188e7cc	multi			present	ctx	Source/A/Alpha.cpp	Source/A/Alpha.cpp	
+h007	27835a65942e	file			present	ctx	Source/B/Beta.cpp	Source/B/Beta.cpp	
+h008	dc789ced94cc	function	00402040	Seven	present	ctx	Source/A/Alpha.cpp	Source/A/Alpha.cpp	
+h009	6d806faa5f00	function	00402040	Seven	present	ctx	Source/A/Alpha.cpp	Source/A/Alpha.cpp	
+h010	4236520c0e28	function	00403000	Eight	fn-missing		Source/C/Gamma.cpp		

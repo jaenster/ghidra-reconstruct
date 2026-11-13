@@ -23,10 +23,12 @@ import {
 import { declName, functionScope, walk, type ScopeEntry } from './ast.js';
 import { quotedIncludePath } from '../codegen/path-case.js';
 import { isGlobalsHeaderPath } from '../codegen/globals-layout.js';
+import { isInlineHeaderPath } from '../codegen/inline-hosts.js';
 
 export interface SourceFile {
   /** Path relative to the tree root, forward slashes. */
   path: string;
+  /** A file of declarations; a unit's inline header is not one. */
   isHeader: boolean;
   tu: TranslationUnit;
   parseErrors: Array<{ line: number; message: string }>;
@@ -182,7 +184,8 @@ export function parseSource(path: string, text: string): SourceFile {
   }));
   const tokens = new Lexer(text, { filename: path }).tokenizeWithTrivia();
   return {
-    path, isHeader: path.endsWith('.h'), tu, parseErrors,
+    // An inline header holds bodies (codegen/inline-hosts.ts): the body checks read it as code.
+    path, isHeader: path.endsWith('.h') && !isInlineHeaderPath(path), tu, parseErrors,
     includes: includesOf(tokens), initializerComments: initializerCommentsOf(tokens),
   };
 }

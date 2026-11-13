@@ -11,6 +11,8 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 
 import { foreignParameterRegisters, readForeignSources, selectFileStaticFunctions } from '../codegen/file-static-functions.js';
+import { vc8formBodyHash } from '../codegen/vc8form-spec.js';
+import { parseVc8LinkageTag, vc8LinkageVerdict } from '../codegen/vc8-linkage.js';
 import { generateProject } from '../codegen/index.js';
 import type {
   AnalyzedDataSymbol,
@@ -197,8 +199,42 @@ describe('selectFileStaticFunctions', () => {
     assert.deepStrictEqual(sel.refused.get('referenced from excluded code'), ['Helper']);
   });
 
-  it('keeps it extern when nothing calls it', () => {
+  it('keeps a function nothing references static, alive by a reference of its unit', () => {
+    // TOKTBLS_GetTokenIndex 0065c300: its first argument in EAX, `ret 4`, no reference in
+    // the original; every call to it was inlined by a caller the decompile does not show.
     const lone = fn('Lone', '00401200', 'A', '  return nValue;', { params: [inEax()] });
+    const all = [lone, caller];
+    const sel = selectFileStaticFunctions({ allFunctions: all, unitOf: unitsOf(all), globals: [] });
+    assert.deepStrictEqual(sel.selected.get('00401200'), { unit: 'A', referrers: new Set(), keepAlive: true });
+    assert.strictEqual(sel.refused.get('no caller in its unit'), undefined);
+  });
+
+  it('keeps a function nothing references extern when its declaration spells its storage', () => {
+    // LEVEL_CountRoomsInAct 0053b090: ECX and DL under __stdcall, printed __fastcall, MATCH extern.
+    const lone = {
+      ...fn('Lone', '00401200', 'A', '  return 0;', {
+        params: [
+          { name: 'pGame', dataType: 'void *', size: 4, ordinal: 0, storage: 'ECX:4' },
+          { name: 'nAct', dataType: 'byte', size: 1, ordinal: 1, storage: 'DL:1' },
+        ],
+      }),
+      callingConvention: '__stdcall',
+    };
+    const all = [lone, caller];
+    const sel = selectFileStaticFunctions({ allFunctions: all, unitOf: unitsOf(all), globals: [] });
+    assert.strictEqual(sel.selected.size, 0);
+    assert.deepStrictEqual(sel.refused.get('no caller in its unit'), ['Lone']);
+  });
+
+  it('keeps it alive the same way when no inlined copy of it is found', () => {
+    const lone = fn('Lone', '00401200', 'A', '  return nValue;', { params: [inEax()] });
+    const all = [lone, caller];
+    const sel = selectFileStaticFunctions({ allFunctions: all, unitOf: unitsOf(all), globals: [], inlinedCalls: () => new Map() });
+    assert.deepStrictEqual(sel.selected.get('00401200'), { unit: 'A', referrers: new Set(), keepAlive: true });
+  });
+
+  it('keeps it extern when nothing references it and the reference cannot call it', () => {
+    const lone = { ...fn('Lone', '00401200', 'A', '  return nValue;', { params: [inEax()] }), hasVarArgs: true };
     const all = [lone, caller];
     const sel = selectFileStaticFunctions({ allFunctions: all, unitOf: unitsOf(all), globals: [] });
     assert.strictEqual(sel.selected.size, 0);
@@ -247,7 +283,8 @@ describe('selectFileStaticFunctions', () => {
     const mentioner = fn('Mentioner', '00401100', 'A', '  /* Helper(1) */\n  Log("Helper(2)");\n  return 0;');
     const all = [helper, mentioner];
     const sel = selectFileStaticFunctions({ allFunctions: all, unitOf: unitsOf(all), globals: [] });
-    assert.deepStrictEqual(sel.refused.get('no caller in its unit'), ['Helper']);
+    // Unreferenced, so kept alive by its unit rather than by the mention.
+    assert.deepStrictEqual(sel.selected.get('00401000'), { unit: 'A', referrers: new Set(), keepAlive: true });
   });
 
   it('keeps it extern when a data initializer names it', () => {
@@ -265,6 +302,56 @@ describe('selectFileStaticFunctions', () => {
     const all = [helper, caller, twin];
     const sel = selectFileStaticFunctions({ allFunctions: all, unitOf: unitsOf(all), globals: [] });
     assert.deepStrictEqual(sel.refused.get('name shared with another symbol'), ['Helper']);
+  });
+
+  it('tells a shared name apart by the namespace each mention prints', () => {
+    const own = fn('Helper', '00401000', 'A::X', '  return nValue + 1;', { params: [inEax()] });
+    const user = fn('Caller', '00401100', 'A::X', '  return A::X::Helper(3);');
+    const twin = fn('Helper', '00402000', 'B::X', '  return 0;');
+    const other = fn('Other', '00402100', 'B::X', '  return B::X::Helper() + X::Helper();');
+    const all = [own, user, twin, other];
+    const sel = selectFileStaticFunctions({ allFunctions: all, unitOf: unitsOf(all), globals: [] });
+    // `X::Helper` fits both: Other's unit keeps A::X::Helper extern.
+    assert.deepStrictEqual(sel.refused.get('name shared with another symbol'), ['Helper']);
+    const clean = fn('Other', '00402100', 'B::X', '  return B::X::Helper();');
+    const all2 = [own, user, twin, clean];
+    const sel2 = selectFileStaticFunctions({ allFunctions: all2, unitOf: unitsOf(all2), globals: [] });
+    assert.deepStrictEqual([...sel2.selected.keys()], ['00401000']);
+    assert.deepStrictEqual([...sel2.selected.get('00401000')!.referrers], ['00401100']);
+  });
+
+  it('keeps a shared name extern when another unit calls it by its namespace', () => {
+    const own = fn('Helper', '00401000', 'A', '  return nValue + 1;', { params: [inEax()] });
+    const user = fn('Caller', '00401100', 'A', '  return A::Helper(3);');
+    const twin = fn('Helper', '00402000', 'B', '  return 0;');
+    const other = fn('Other', '00402100', 'B', '  return A::Helper(1);');
+    const all = [own, user, twin, other];
+    const sel = selectFileStaticFunctions({ allFunctions: all, unitOf: unitsOf(all), globals: [] });
+    assert.deepStrictEqual(sel.refused.get('referenced from another unit'), ['Helper']);
+  });
+
+  it('keeps a shared name extern when foreign source names it or a table holds it', () => {
+    const own = fn('Helper', '00401000', 'A', '  return nValue + 1;', { params: [inEax()] });
+    const user = fn('Caller', '00401100', 'A', '  return A::Helper(3);');
+    const twin = fn('Helper', '00402000', 'B', '  return 0;');
+    const all = [own, user, twin];
+    const foreign = selectFileStaticFunctions({
+      allFunctions: all, unitOf: unitsOf(all), globals: [],
+      foreignSources: [{ path: 'hand.cpp', text: 'void f() { B::Helper(); }' }],
+    });
+    assert.deepStrictEqual(foreign.refused.get('named by foreign source'), ['Helper']);
+    const table: Partial<AnalyzedDataSymbol> = {
+      name: 'gpfnHandlers',
+      initializedData: { kind: 'array', elements: [{ kind: 'pointer', value: 'A::Helper' }] },
+    };
+    const data = selectFileStaticFunctions({ allFunctions: all, unitOf: unitsOf(all), globals: [table] });
+    assert.deepStrictEqual(data.refused.get('named by a data initializer'), ['Helper']);
+    const twinTable: Partial<AnalyzedDataSymbol> = {
+      name: 'gpfnOthers',
+      initializedData: { kind: 'array', elements: [{ kind: 'pointer', value: 'B::Helper' }] },
+    };
+    const none = selectFileStaticFunctions({ allFunctions: all, unitOf: unitsOf(all), globals: [twinTable] });
+    assert.deepStrictEqual([...none.selected.keys()], ['00401000']);
   });
 
   it('counts emitted code beside the decompile as a reference', () => {
@@ -400,6 +487,116 @@ describe('selectFileStaticFunctions', () => {
   });
 });
 
+describe('registers the original leaves unread are no convention of its own', () => {
+  // The original enters these 1.14d functions reading ECX and not EDX with stack
+  // arguments (`ret N`), or EDX and not ECX. Their storage is the declared convention's
+  // own placement, a parameter left unused or a receiver in ECX: compiled extern they
+  // match the original byte for byte, so nothing says they were static.
+  const p = (name: string, dataType: string, ordinal: number, storage: string): ExtractedParameter =>
+    ({ name, dataType, size: 4, ordinal, storage });
+
+  it('leaves a receiver in ECX and the rest on the stack extern', () => {
+    // TSGrowableArray_Ui_CalcChunkSize 004210a0, MATCH extern (emitted __thiscall).
+    assert.deepStrictEqual(foreignParameterRegisters({
+      callingConvention: '__fastcall',
+      parameters: [p('this', 'BigBuffer *', 0, 'ECX:4'), p('nValue', 'uint32_t', 1, 'Stack[0x4]:4')],
+    }), []);
+  });
+
+  it('leaves a fastcall extern whose EDX parameter is unused', () => {
+    // Missiles_SrvDmgFunc_ConvertColdLengthToFreezeLength 005ad290, a table callback: the
+    // original never reads pMissile (EDX). MATCH extern.
+    assert.deepStrictEqual(foreignParameterRegisters({
+      callingConvention: '__fastcall',
+      parameters: [
+        p('pGame', 'SGAMEDATA *', 0, 'ECX:4'), p('pMissile', 'D2UnitStrc *', 1, 'EDX:4'),
+        p('pTarget', 'D2UnitStrc *', 2, 'Stack[0x4]:4'), p('pDamage', 'D2DamageStrc *', 3, 'Stack[0x8]:4'),
+      ],
+    }), []);
+  });
+
+  it('leaves a fastcall extern whose ECX parameter is unused', () => {
+    // AUTOMAP_RotateCellRight 00457860: dwUnused in ECX, never read. MATCH extern.
+    assert.deepStrictEqual(foreignParameterRegisters({
+      callingConvention: '__fastcall',
+      parameters: [p('dwUnused', 'undefined4', 0, 'ECX:4'), p('ppRootNode', 'D2AutomapCellStrc * *', 1, 'EDX:4')],
+    }), []);
+  });
+});
+
+describe('vc8linkage tags', () => {
+  const body = (name: string): string => `int __stdcall ${name}(int nValue)\n{\n  return nValue;\n}\n`;
+  const tag = (linkage: string, decompiled: string, size = 0x20): { type: string; data: string } =>
+    ({ type: 'vc8linkage', data: `${linkage};ev=0123456789;bh=${size}-89abcdef;dh=${vc8formBodyHash(decompiled)}` });
+
+  it('parses a record and refuses a malformed one', () => {
+    assert.deepStrictEqual(parseVc8LinkageTag('extern;ev=0123456789;bh=32-89abcdef;dh=01234567'),
+      { linkage: 'extern', size: 32, body: '01234567' });
+    assert.strictEqual(parseVc8LinkageTag('inline;ev=0123456789;bh=32-89abcdef;dh=01234567'), undefined);
+    assert.strictEqual(parseVc8LinkageTag('static;ev=0123;bh=32-89abcdef;dh=01234567'), undefined);
+    assert.strictEqual(parseVc8LinkageTag('static;ev=0123456789;bh=32-89abcdef'), undefined);
+  });
+
+  it('applies a tag measured against this size and decompile, and stales any other', () => {
+    const decompiled = body('F');
+    assert.strictEqual(vc8LinkageVerdict({ size: 0x20, decompiled, tags: [tag('static', decompiled)] }).linkage, 'static');
+    const moved = vc8LinkageVerdict({ size: 0x24, decompiled, tags: [tag('static', decompiled)] });
+    assert.strictEqual(moved.linkage, undefined);
+    assert.match(moved.stale[0].why, /^size 36/);
+    const retyped = vc8LinkageVerdict({ size: 0x20, decompiled: body('G'), tags: [tag('extern', decompiled)] });
+    assert.strictEqual(retyped.linkage, undefined);
+    assert.match(retyped.stale[0].why, /^decompile /);
+  });
+
+  it('stales two tags that disagree', () => {
+    const decompiled = body('F');
+    const v = vc8LinkageVerdict({ size: 0x20, decompiled, tags: [tag('static', decompiled), tag('extern', decompiled)] });
+    assert.strictEqual(v.linkage, undefined);
+    assert.strictEqual(v.stale.length, 2);
+  });
+
+  it('keeps a function its storage selects extern when the oracle measured it so', () => {
+    const helper = fn('Helper', '00401000', 'A', '  return nValue + 1;', { params: [inEax()] });
+    helper.tags = [tag('extern', helper.decompiled!)];
+    const caller = fn('Caller', '00401100', 'A', '  return Helper(3);');
+    const all = [helper, caller];
+    const sel = selectFileStaticFunctions({ allFunctions: all, unitOf: unitsOf(all), globals: [] });
+    assert.strictEqual(sel.selected.size, 0);
+    assert.deepStrictEqual(sel.refused.get('measured extern by the VC8 oracle'), ['Helper']);
+  });
+
+  it('selects a function its storage does not when the oracle measured it static', () => {
+    const plain = fn('Plain', '00401300', 'A', '  return nValue;', { params: [onStack()] });
+    plain.tags = [tag('static', plain.decompiled!)];
+    const user = fn('User', '00401400', 'A', '  return Plain(1);');
+    const all = [plain, user];
+    const sel = selectFileStaticFunctions({ allFunctions: all, unitOf: unitsOf(all), globals: [] });
+    assert.deepStrictEqual([...sel.selected.keys()], ['00401300']);
+    assert.strictEqual(sel.measuredStatic, 1);
+  });
+
+  it('still keeps a measured-static function extern when another unit calls it', () => {
+    const plain = fn('Plain', '00401300', 'A', '  return nValue;', { params: [onStack()] });
+    plain.tags = [tag('static', plain.decompiled!)];
+    const user = fn('User', '00401400', 'B', '  return Plain(1);');
+    const all = [plain, user];
+    const sel = selectFileStaticFunctions({ allFunctions: all, unitOf: unitsOf(all), globals: [] });
+    assert.strictEqual(sel.selected.size, 0);
+    assert.deepStrictEqual(sel.refused.get('referenced from another unit'), ['Plain']);
+  });
+
+  it('ignores a stale tag and reports it', () => {
+    const plain = fn('Plain', '00401300', 'A', '  return nValue;', { params: [onStack()] });
+    plain.tags = [tag('static', plain.decompiled!, 0x40)];
+    const user = fn('User', '00401400', 'A', '  return Plain(1);');
+    const all = [plain, user];
+    const sel = selectFileStaticFunctions({ allFunctions: all, unitOf: unitsOf(all), globals: [] });
+    assert.strictEqual(sel.selected.size, 0);
+    assert.strictEqual(sel.staleLinkageTags.length, 1);
+    assert.strictEqual(sel.staleLinkageTags[0].name, 'Plain');
+  });
+});
+
 describe('file-static emission', () => {
   const options: ReconstructOptions = {
     outputDir: './out',
@@ -504,5 +701,25 @@ describe('file-static emission', () => {
     assert.ok(/return GetCell\(a, b\) \+ 1;/.test(impl), `call not restored:\n${impl}`);
     assert.ok(/return gaTable\[a\] - b;/.test(impl), `an unrelated body must stay:\n${impl}`);
     assert.ok(!/\bGetCell\s*\(/.test(file('Alpha.h')), 'a static is not declared in the header');
+  });
+
+  it('defines a function nothing references static and keeps it alive with a reference that runs nothing', () => {
+    // TOKTBLS_GetTokenIndex 0065c300: `shl eax, 4; add eax, [ebp+8]; ret 4`, no reference.
+    const index = fn('GetTokenIndex', '0065c300', 'Alpha', '  return nParam1 * 0x10 + nParam2;', {
+      params: [
+        { name: 'nParam1', dataType: 'int', size: 4, ordinal: 0, storage: 'EAX:4' },
+        { name: 'nParam2', dataType: 'int', size: 4, ordinal: 1, storage: 'Stack[0x4]:4' },
+      ],
+    });
+    const other = fn('Other', '00401080', 'Alpha', '  return 0;');
+    const namespaces: ExtractedNamespace[] = [{ name: 'Alpha', fullPath: 'Alpha', functionCount: 2, isClass: false }];
+    const project = generateProject('keepalive', [index, other], [], [], [], namespaces, options, programInfo);
+    const file = (suffix: string) => [...project.files.values()].find(f => f.path.endsWith(suffix))!.content;
+    const impl = file('Alpha.cpp');
+    assert.ok(/^static int __stdcall GetTokenIndex\(int nParam1, int nParam2\) \{$/m.test(impl), `static definition missing:\n${impl}`);
+    const keep = 'static void * keep_0065c300 = (0 ? (GetTokenIndex(*(int *)0, *(int *)0), (void *)0) : (void *)0);';
+    assert.ok(impl.includes(keep), `keep-alive reference missing:\n${impl}`);
+    assert.ok(impl.indexOf(keep) > impl.indexOf('Other('), 'the reference follows every definition');
+    assert.ok(!/\bGetTokenIndex\s*\(/.test(file('Alpha.h')), 'a static is not declared in the header');
   });
 });

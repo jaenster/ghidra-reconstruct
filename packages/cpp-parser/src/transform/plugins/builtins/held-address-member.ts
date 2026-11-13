@@ -238,7 +238,10 @@ function rewriteFunction(fn: FunctionDecl, opts: HeldAddressMemberOptions): Func
       // Without that, the stores the original addresses off the register its LEA put the
       // link in (the store-bases facts) are the ones written through the local.
       const key = emit(def.path as never).replace(/\s+/g, '');
-      if (!after.some(s => [...traverseAST(s)].some(m => nextLinkOn(m, def.name)))) {
+      // A link off `this` keeps to the evidence too: the member function's own `this` is no
+      // local a NextLink call proves the original held the link apart from.
+      const nextLink = after.some(s => [...traverseAST(s)].some(m => nextLinkOn(m, def.name)));
+      if (!nextLink || (root === 'this' && !def.cast)) {
         const k = heldStores(defNode, def, key, after, opts);
         if (k) { changed = true; opts.onSite?.({ function: fname, name: def.name, uses: k }); }
         continue;

@@ -88,7 +88,7 @@
 import { NodeKind } from '../../../ast/kinds.js';
 import type {
   ASTNode, AssignExpr, BinaryExpr, CallExpr, CompoundStmt, DeclStmt, Expression, ExprStmt, FunctionDecl,
-  Identifier, IfStmt, ParenExpr, ReturnStmt, Statement, UnaryExpr, VariableDecl, CStyleCastExpr, ParameterDecl,
+  Identifier, IfStmt, MemberExpr, ParenExpr, ReturnStmt, Statement, UnaryExpr, VariableDecl, CStyleCastExpr, ParameterDecl,
 } from '../../../ast/nodes.js';
 import { traverseAST, getChildren } from '../../../ast/visitor.js';
 import { createTransformer, updateNode, cloneNode, type Transformer } from '../../transformer.js';
@@ -783,6 +783,8 @@ function unitOf(e: ASTNode, ctx: Ctx, free: ReadonlySet<ASTNode>): Unit {
       }
       case NodeKind.MemberExpr: {
         const m = n as unknown as { object: Expression; isArrow: boolean };
+        // An array member as a value decays to its address: nothing is read.
+        if (arrayMember(n as MemberExpr, ctx)) { address(n as Expression); return; }
         if (m.isArrow) { through(n); value(m.object); } else object(m.object);
         return;
       }
@@ -818,6 +820,16 @@ function unitOf(e: ASTNode, ctx: Ctx, free: ReadonlySet<ASTNode>): Unit {
   };
   value(e);
   return u;
+}
+
+/** Whether `m` names a member declared as an array, by the aggregates' layouts. */
+function arrayMember(m: MemberExpr, ctx: Ctx): boolean {
+  const R = ctx.regions;
+  if (!R || m.member.kind !== NodeKind.Identifier) return false;
+  const o = typeOf(m.object, ctx.typing, R);
+  const agg = m.isArrow ? R.pointee(o) : o && o.stars === 0 ? R.aggregate(o.base) : null;
+  const f = agg ? R.field(agg, (m.member as Identifier).name) : undefined;
+  return !!f && f.type.includes('[');
 }
 
 /**

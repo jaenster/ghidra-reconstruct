@@ -298,12 +298,12 @@ const WORD_INTEGERS: Readonly<Record<string, 'u' | 's'>> = {
   int: 's', int32_t: 's', long: 's', LONG: 's', BOOL: 's', intptr_t: 's', 'unsigned int': 'u', 'unsigned long': 'u',
 };
 
-function spellingOf(t: TypeNode): string {
+export function spellingOf(t: TypeNode): string {
   try { return emit(t as never).replace(/\s+/g, ' ').replace(/\s*\*/g, '*').trim(); } catch { return ''; }
 }
 
 /** 'ptr' | 'int' | 'enum' | null, from a type's spelling; an unknown name is not guessed at. */
-function wordClass(spelling: string): 'ptr' | 'int' | 'enum' | null {
+export function wordClass(spelling: string): 'ptr' | 'int' | 'enum' | null {
   if (spelling.endsWith('*')) return 'ptr';
   if (WORD_INTEGERS[spelling]) return 'int';
   if (/^e[A-Z]\w*$/.test(spelling)) return 'enum';
@@ -316,7 +316,7 @@ function canonicalWord(t: string): string {
   return c ? `word:${c}` : t;
 }
 
-function sameType(a: string, b: string): boolean {
+export function sameType(a: string, b: string): boolean {
   if (a === b) return true;
   const ca = WORD_INTEGERS[a], cb = WORD_INTEGERS[b];
   return ca !== undefined && ca === cb;
@@ -332,7 +332,7 @@ function storedValue(rhs: Expression, paramType: string): Expression {
 }
 
 /** The type an expression evidently has, or null. */
-function evidentType(e: Expression, o: ReusedParamSlotOptions, localTypes: ReadonlyMap<string, TypeNode>): TypeNode | null {
+export function evidentType(e: Expression, o: ReusedParamSlotOptions, localTypes: ReadonlyMap<string, TypeNode>): TypeNode | null {
   const x = unwrapParens(e);
   if (x.kind === NodeKind.CStyleCastExpr) return (x as CStyleCastExpr).type;
   if (x.kind === NodeKind.Identifier) return localTypes.get((x as Identifier).name) ?? null;
@@ -356,7 +356,7 @@ function evidentType(e: Expression, o: ReusedParamSlotOptions, localTypes: Reado
  * Ghidra prints a 0 stored into an enum-typed parameter's slot as `MISSILE_Arrow`): it votes
  * for no type.
  */
-function isConstantStore(e: Expression, enumConstants: ReadonlySet<string>, localTypes: ReadonlyMap<string, TypeNode>): boolean {
+export function isConstantStore(e: Expression, enumConstants: ReadonlySet<string>, localTypes: ReadonlyMap<string, TypeNode>): boolean {
   let x = unwrapParens(e);
   if (x.kind === NodeKind.UnaryExpr && (x as UnaryExpr).operator === '-') x = unwrapParens((x as UnaryExpr).operand);
   if (x.kind === NodeKind.IntegerLiteral) return true;
@@ -368,7 +368,7 @@ function isConstantStore(e: Expression, enumConstants: ReadonlySet<string>, loca
  * the type where the type is a program struct (`D2RoomStrc *` -> pRoom, `D2MissilesTxt *`
  * -> pMissilesTxt), and from the parameter whose slot it shares otherwise.
  */
-function valueLocalName(type: string, param: string, taken: ReadonlySet<string>): string {
+export function valueLocalName(type: string, param: string, taken: ReadonlySet<string>): string {
   const typed = /^(?:struct )?D2(\w+?)(?:Strc)?\*$/.exec(type);
   const stem = param.replace(/^(?:p+|n|dw|b|e|sz|w|by|f)(?=[A-Z])/, '');
   const cap = stem.charAt(0).toUpperCase() + stem.slice(1);

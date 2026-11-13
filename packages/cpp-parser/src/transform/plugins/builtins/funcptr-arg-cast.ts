@@ -112,6 +112,17 @@ export interface FuncPtrArgCastOptions extends PluginOptions {
    */
   zeroArityCallbackSlots?: Record<string, Record<number, string>>;
   /**
+   * Callable name → slot → the callback type in parts, for a slot whose callee
+   * discards what the callback returns (the compiler's array iterators drop the
+   * EAX a constructor returns). Cast into when the function's parameters match
+   * the slot's in number and convention and every one is a pointer as the slot's
+   * is: then only the return type or the pointee types differ, and neither
+   * changes how the call travels.
+   */
+  discardedReturnCallbackCasts?: Record<string, Record<number, {
+    returnType: string; paramTypes: string[]; convention?: string;
+  }>>;
+  /**
    * The namespace segments enclosing the body being transformed, outermost
    * first. A body writes `fpDraw = Draw;` with the bare name, and twelve
    * `Draw`s exist across `D2Client::Forms::*` — so the bare name is ambiguous
@@ -375,6 +386,10 @@ function buildTransformer(options: FuncPtrArgCastOptions): Transformer {
   const zeroArityCastsFor = (callee: string) =>
     zeroArityCasts[callee] ?? zeroArityCasts[bareOf(callee)];
 
+  const discardedReturnCasts = options.discardedReturnCallbackCasts ?? {};
+  const discardedReturnCastsFor = (callee: string) =>
+    discardedReturnCasts[callee] ?? discardedReturnCasts[bareOf(callee)];
+
   const signatureFor = (fn: string, model?: string): string | undefined => {
     // A name that also denotes data is not proof of a function.
     if (variableNames.has(bareOf(fn))) return undefined;
@@ -558,6 +573,45 @@ function buildTransformer(options: FuncPtrArgCastOptions): Transformer {
         if (castChanged) {
           return updateNode(call, { arguments: castArgs } as Partial<CallExpr>);
         }
+      }
+
+      // A constructor handed to the compiler's array iterator: its return value is
+      // dropped, so a prototype that returns the object still fits the slot through
+      // a cast. Only a function whose parameters travel as the slot's do.
+      const discarded = discardedReturnCastsFor(callee);
+      if (discarded) {
+        let castChanged = false;
+        const castArgs = call.arguments.map((arg, i) => {
+          const spec = discarded[i];
+          if (!spec) return arg;
+          const argFn = functionArgName(arg);
+          if (!argFn) return arg;
+          const actual = signatureFor(argFn, modelArgName(arg));
+          const lookup = modelArgName(arg) ?? argFn;
+          const params = scopedLookup(functionParamTypes, lookup, enclosingSegments)
+            ?? scopedLookup(functionParamTypes, argFn, enclosingSegments);
+          const ret = scopedLookup(functionReturnTypes, lookup, enclosingSegments)
+            ?? scopedLookup(functionReturnTypes, argFn, enclosingSegments);
+          if (actual === undefined || !params || ret === undefined) return arg;
+          if (params.length !== spec.paramTypes.length || arityOf(actual) !== spec.paramTypes.length) return arg;
+          const isPointer = (t: string) => /\*\s*(const\s*)?$/.test(t.trim());
+          if (params.some((t, k) => isPointer(t) !== isPointer(spec.paramTypes[k]))) return arg;
+          const own = scopedLookup(functionConventions, lookup, enclosingSegments)
+            ?? scopedLookup(functionConventions, argFn, enclosingSegments);
+          const specConvention = spec.convention === '__cdecl' ? '' : (spec.convention ?? '');
+          if (own === undefined || own !== specConvention) return arg;
+          const norm = (t: string) => t.replace(/\s+/g, '');
+          if (norm(ret) === norm(spec.returnType)
+            && params.every((t, k) => norm(t) === norm(spec.paramTypes[k]))) return arg;
+          const castType = functionPointerTypeFromSpellings(spec.returnType, spec.paramTypes, spec.convention);
+          if (!castType) return arg;
+          castChanged = true;
+          return Expr.cast(castType, selectOverload(arg)) as Expression;
+        });
+        if (castChanged) {
+          return updateNode(call, { arguments: castArgs } as Partial<CallExpr>);
+        }
+        return undefined;
       }
 
       const slots = slotsFor(callee);

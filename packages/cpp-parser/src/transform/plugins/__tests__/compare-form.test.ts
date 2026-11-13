@@ -83,10 +83,16 @@ describe('compare-form', () => {
     assert.match(out, /\(uint8_t\)\(?c\)? <= 0/);
   });
 
-  it('leaves a pointer operand alone', () => {
-    const out = run('void f(int *p) { if (p != 0) {} }', [{ text: '!=', fp: ['v:p', 'c:0'] }],
-      [dec({ ord: 0, text: '!=', fp: ['v:p', 'c:0'], op: '>', delta: 0, k: 0, unsigned: true })]);
-    assert.match(out, /p != 0/);
+  // FILETOOLS_ExtractFilename 00404010: `TEST EAX,EAX; JBE` on `pSep != (char *)0x0`.
+  it('writes a pointer zero test as the unsigned (uintptr_t)p > 0', () => {
+    const site = { text: '!=', fp: ['v:p', 'c:0'] as [string, string] };
+    const d = dec({ ord: 0, ...site, op: '>', delta: 0, k: 0, unsigned: true });
+    assert.match(run('void f(int *p) { if (p != 0) {} }', [site], [d]), /\(uintptr_t\)p > 0/);
+    assert.match(run('void f(char *p) { if (p != (char *)0x0) {} }', [site], [d]), /\(uintptr_t\)p > 0/);
+    const eq = dec({ ord: 0, text: '==', fp: ['v:p', 'c:0'], op: '<=', delta: 0, k: 0, unsigned: true });
+    assert.match(run('void f(char *p) { if (p == NULL) {} }', [{ text: '==', fp: ['v:p', 'c:0'] }], [eq]), /\(uintptr_t\)p <= 0/);
+    // A pointer compared with anything but a null constant is left alone.
+    assert.match(run('void f(char *p, char *q) { if (p != q) {} }', [site], [d]), /p != q/);
   });
 
   it('keeps the base, digit case and suffix of a stepped literal', () => {
@@ -414,8 +420,9 @@ describe('compare-form: value forms the flag readers show', () => {
     const opts = { sites, decisions: d, structFields: { H: { a: 'uint16_t', b: 'uint16_t', c: 'uint32_t' } } } as CompareFormOptions;
     const go = (code: string) => emit(createCompareFormTransformer(opts)(parse(code)) as AnyNode).replace(/\s+/g, ' ');
     assert.match(go('int f(H* h) { return (uint)h->a + (uint)h->b < 0x101; }'), /return h->a \+ h->b <= 0x100;/);
-    // A 32-bit addend could be negative as an int: left as printed.
-    assert.match(go('int f(H* h) { return (uint)h->a + (uint)h->c < 0x101; }'), /< 0x101/);
+    // A 32-bit addend could be negative as an int: the sum keeps its casts, and only the
+    // constant steps, which within 0..0x7fffffff means the same in either domain.
+    assert.match(go('int f(H* h) { return (uint)h->a + (uint)h->c < 0x101; }'), /return \(uint\)h->a \+ \(uint\)h->c <= 0x100;/);
   });
 
   it('computes what the printed form computed', { skip: !hasNativeGpp() }, () => {
@@ -424,6 +431,82 @@ describe('compare-form: value forms the flag readers show', () => {
     assert.ok(!ret.includes('!='), ret);
     const out = compileAndRun(`#include <cstdio>\nbool ph(int b) { return b != 0; }\n${ret}`,
       'int bad = 0; const int v[] = {0, 1, -1, 2, 0x7fffffff, (int)0x80000000}; for (int b : v) { if (ph(b) != h(b)) bad++; } printf("%d\\n", bad);');
+    assert.strictEqual(out.trim(), '0');
+  });
+});
+
+describe('compare-form: steps the instructions prove in either domain', () => {
+  const one = (code: string, site: Site, d: CompareFormDecision, extra: Partial<CompareFormOptions> = {}) =>
+    emit(createCompareFormTransformer({ sites: [site], decisions: [d], ...extra } as CompareFormOptions)(parse(code)) as AnyNode)
+      .replace(/\s+/g, ' ').trim();
+
+  // UpdateAnimSpeed 00623f50: `CMP EAX,0x7fff; JL` on `0x7ffe < nVelocityPct`, an INT_LESS
+  // over a uint32 that is no proven zero-extended sum.
+  it('an unproven zext sum still takes the constant step, casts kept', () => {
+    const site: Site = { text: '<', fp: ['c:7ffe', 'v:n'] };
+    const d = dec({ ord: 0, ...site, op: '>=', swap: true, delta: 1, k: 0x7ffe, signed: true, zextSum: true });
+    assert.match(one('void f(uint n) { if (0x7ffe < n) {} }', site, d), /if \(n >= 0x7fff\)/);
+    // Never across zero, where the two domains disagree.
+    const z = dec({ ord: 0, text: '<', fp: ['c:ffffffff', 'v:n'], op: '>=', swap: true, delta: 1, k: 0xffffffff, signed: true, zextSum: true });
+    assert.match(one('void f(uint n) { if (-1 < n) {} }', { text: '<', fp: ['c:ffffffff', 'v:n'] }, z), /-1 < n/);
+  });
+
+  // SMemDestroy 00412240 / UTF16_CalculateUTF8Length 006c7030.
+  it('an unsigned step past INT_MAX only on an unsigned operand and a hex or U literal', () => {
+    const site: Site = { text: '<', fp: ['c:7fffffff', 'v:u'] };
+    const d = dec({ ord: 0, ...site, op: '>=', swap: true, delta: 1, k: 0x7fffffff, signed: false });
+    assert.match(one('void f(uint32_t u) { if (0x7fffffff < u) {} }', site, d), /u >= 0x80000000/);
+    assert.match(one('void f(int u) { if (0x7fffffff < u) {} }', site, d), /0x7fffffff < u/);
+    assert.match(one('void f(uint32_t u) { if (2147483647 < u) {} }', site, d), /2147483647 < u/);
+    const down = dec({ ord: 0, text: '<', fp: ['v:u', 'c:80000000'], op: '<=', delta: -1, k: 0x80000000, signed: false });
+    assert.match(one('void f(uint32_t u) { if (u < 0x80000000) {} }', { text: '<', fp: ['v:u', 'c:80000000'] }, down), /u <= 0x7fffffff/);
+  });
+
+  // LIGHTMAP_ApplyStaticLightWithShadow 00474d70: `-1 < nYBuffer - 0x20`.
+  it('a signed step crosses zero on arithmetic of signed operands, not of an unsigned one', () => {
+    const site: Site = { text: '<', fp: ['c:ffffffff', 'e'] };
+    const d = dec({ ord: 0, ...site, op: '>=', swap: true, delta: 1, k: 0xffffffff, signed: true });
+    assert.match(one('void f(int y) { if (-1 < y - 0x20) {} }', site, d), /y - 0x20 >= 0/);
+    assert.match(one('void f(int y, uint w) { if (-1 < y + w) {} }', site, d), /-1 < y \+ w/);
+  });
+
+  it('two operands below the sign bit by their form compare as the signed Jcc does', () => {
+    const site: Site = { text: '<', fp: ['e', 'e'] };
+    const d = dec({ ord: 0, ...site, keep: true, signed: true, zextPair: true });
+    const masked = one('void f(uint32_t a, uint32_t b) { if ((a >> 0xe & 7) < (b >> 0xe & 7)) {} }', site, d);
+    assert.match(masked, /\(a >> 0xe & 7\) < \(b >> 0xe & 7\)/);
+    // The machine facts are recorded, so compare-signedness makes it signed.
+    const signed = emit(createCompareSignednessTransformer({})(createCompareFormTransformer({ sites: [site], decisions: [d] } as CompareFormOptions)(
+      parse('void f(uint32_t a, uint32_t b) { if ((a >> 0xe & 7) < (b >> 0xe & 7)) {} }'))) as AnyNode).replace(/\s+/g, ' ');
+    assert.match(signed, /\(int32_t\)\(a >> 0xe & 7\) < \(int32_t\)\(b >> 0xe & 7\)/);
+    // A plain unsigned word is not proven: no facts, no cast.
+    const plain = emit(createCompareSignednessTransformer({})(createCompareFormTransformer({ sites: [site], decisions: [d] } as CompareFormOptions)(
+      parse('void f(uint32_t a, uint32_t b) { if (a < b) {} }'))) as AnyNode);
+    assert.doesNotMatch(plain, /int32_t\)/);
+  });
+
+  it('a pointer zero test only on an operand that names storage', () => {
+    const site: Site = { text: '!=', fp: ['e', 'c:0'] };
+    const d = dec({ ord: 0, ...site, op: '>', delta: 0, k: 0, unsigned: true });
+    assert.match(one('void f(S *s) { if (s->p != (char *)0x0) {} }', site, d, { structFields: { S: { p: 'char *' } } }), /\(uintptr_t\)s->p > 0/);
+    assert.doesNotMatch(one('void f(char *q, int n) { if ((char *)(n = (int)q) != (char *)0x0) {} }', site, d), /uintptr_t/);
+    const copy: Site = { text: '!=', fp: ['v:p', 'c:0'] };
+    const dc = dec({ ord: 0, ...copy, op: '>', delta: 0, k: 0, unsigned: true });
+    assert.doesNotMatch(one('void f(char *p, int n) { while (p = (char *)n, p != (char *)0x0) { n--; } }', copy, dc), /uintptr_t/);
+  });
+
+  it('computes what the printed forms computed', { skip: !hasNativeGpp() }, () => {
+    const out = compileAndRun('#include <cstdio>\n#include <cstdint>',
+      'int bad = 0; const uint32_t v[] = {0u, 1u, 0x7ffeu, 0x7fffu, 0x7fffffffu, 0x80000000u, 0xc0000005u, 0xc0000006u, 0xffffffffu};' +
+      ' for (uint32_t u : v) { int y = (int)u;' +
+      ' if ((0x7fffffff < u) != (u >= 0x80000000)) bad++;' +
+      ' if ((u < 0x80000000) != (u <= 0x7fffffff)) bad++;' +
+      ' if ((u < 0xc0000006) != (u <= 0xc0000005)) bad++;' +
+      ' if ((0x7ffe < u) != (u >= 0x7fff)) bad++;' +
+      ' if ((-1 < y - 0x20) != (y - 0x20 >= 0) && y > (int)0x80000020) bad++;' +
+      ' if (((u >> 0xe & 7) < (u >> 3 & 7)) != ((int32_t)(u >> 0xe & 7) < (int32_t)(u >> 3 & 7))) bad++;' +
+      ' void *p = (void *)(uintptr_t)u; if ((p != 0) != ((uintptr_t)p > 0)) bad++; }' +
+      ' printf("%d\\n", bad);');
     assert.strictEqual(out.trim(), '0');
   });
 });
