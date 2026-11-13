@@ -477,10 +477,10 @@ interface Usage {
 
 /**
  * Templates d2_platform.h defines that dereference their pointer argument: D2_SeedRoll
- * reads and stores both words of the seed. It is instantiated in the calling file, so the
+ * and D2_SeedRollLimited read and store both words of the seed. It is instantiated in the calling file, so the
  * argument's pointee must be complete there; the header itself cannot include the type.
  */
-const POINTEE_READING_TEMPLATES = new Set(['D2_SeedRoll']);
+const POINTEE_READING_TEMPLATES = new Set(['D2_SeedRoll', 'D2_SeedRollLimited']);
 
 /**
  * The struct types a file needs complete. A function declaration's by-value parameter
