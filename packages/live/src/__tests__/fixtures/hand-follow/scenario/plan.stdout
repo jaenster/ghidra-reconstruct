@@ -1,0 +1,9 @@
+exit 0
+inventory 2790a8fbee over 6bfcd897fb: 10 hunks
+maps: 2 function placements, 2 renames (2 tracked), 0 merged files
+actions: follow-file 1, move-fn 2, review 1, stay 6
+git-mv.sh: 2 renames
+lift.patch: 2 hunks in 1 files
+review.tsv: 3 rows
+conflicts: 1
+  3 map path(s) differ from the tree only in case, respelled: source/c/Crlf.cpp -> Source/C/Crlf.cpp, source/c/Gamma.cpp -> Source/C/Gamma.cpp, source/c/Gamma.h -> Source/C/Gamma.h

@@ -426,6 +426,9 @@ export class ModuleGraph {
         ownedTypeNames: mod.ownedTypes.map(t => t.name),
         functionNames: mod.functions.map(f => f.name),
         globalAddresses: mod.globals.map(g => g.address),
+        ...(mod.units && mod.units.length > 1
+          ? { units: mod.units.map(u => ({ unitName: u.unitName, implPath: u.implPath, functionNames: u.functions.map(f => f.name) })) }
+          : {}),
       });
     }
 

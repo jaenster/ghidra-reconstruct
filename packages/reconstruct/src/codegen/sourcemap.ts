@@ -29,6 +29,8 @@ export function generateSourceMap(
    *  listed only when it does: it is a carved function of its own in the
    *  binary, and without its entry nothing pairs the forwarder with its address. */
   definesThunk?: (func: ExtractedFunction) => boolean,
+  /** The file defining a function whose body is not in `filePath` (an inline host's header). */
+  definedIn?: (func: ExtractedFunction) => string | undefined,
 ): SourceMap {
   const functionMappings: FunctionMapping[] = [];
 
@@ -46,6 +48,9 @@ export function generateSourceMap(
     if (func.namespace) {
       mapping.namespace = func.namespace;
     }
+
+    const elsewhere = definedIn?.(func);
+    if (elsewhere) mapping.definedIn = elsewhere;
 
     // If we have decompiled code, try to extract line mappings
     if (func.decompiled) {

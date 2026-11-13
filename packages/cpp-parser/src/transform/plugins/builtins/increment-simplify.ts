@@ -4,8 +4,8 @@
  * Transforms verbose self-assignment patterns to compact operators.
  *
  * Transforms:
- * - x = x + 1   →  x++
- * - x = x - 1   →  x--
+ * - x = x + 1   →  ++x, or x++ where the value is discarded (see step-form.ts)
+ * - x = x - 1   →  --x, or x--
  * - x = x + n   →  x += n  (when n != 1)
  * - x = x - n   →  x -= n  (when n != 1)
  * - x = x * n   →  x *= n
@@ -26,7 +26,6 @@ import type {
   AssignOperator,
   BinaryExpr,
   BinaryOperator,
-  PostfixExpr,
   UnaryExpr,
   IntegerLiteralExpr,
   Identifier,
@@ -36,6 +35,7 @@ import type {
 import { createTransformer, type Transformer } from '../../transformer.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
 import { emit } from '../../../emit/index.js';
+import { stepExpr, settlingSteps } from './step-form.js';
 
 // ============================================
 // HELPERS
@@ -127,24 +127,6 @@ function isValidLValue(expr: Expression): boolean {
 }
 
 /**
- * Create a postfix increment/decrement expression
- */
-function createPostfixExpr(
-  operand: Expression,
-  operator: '++' | '--',
-  original: ASTNode
-): PostfixExpr {
-  return {
-    kind: NodeKind.PostfixExpr,
-    operator,
-    operand,
-    location: original.location,
-    leadingTrivia: original.leadingTrivia || [],
-    trailingTrivia: original.trailingTrivia || [],
-  };
-}
-
-/**
  * Create a compound assignment expression
  */
 function createCompoundAssignExpr(
@@ -171,7 +153,7 @@ function createCompoundAssignExpr(
 export interface IncrementSimplifyOptions extends PluginOptions {
   /** Only transform simple identifiers, not complex expressions like a->b */
   simpleOnly?: boolean;
-  /** Convert x = x + 1 to x++ even in expression context (default: true) */
+  /** Convert x = x + 1 to a step (++x; x++ where the value is discarded) (default: true) */
   usePostfix?: boolean;
 }
 
@@ -180,8 +162,9 @@ export interface IncrementSimplifyOptions extends PluginOptions {
  */
 function createIncrementSimplifyTransformer(options: IncrementSimplifyOptions = {}): Transformer {
   const { simpleOnly = false, usePostfix = true } = options;
+  const made = new WeakSet<ASTNode>();
 
-  return createTransformer({
+  return settlingSteps(made, createTransformer({
     visitNode(node: ASTNode): ASTNode | undefined {
       // Only process assignment expressions
       if (node.kind !== NodeKind.AssignExpr) {
@@ -230,25 +213,25 @@ function createIncrementSimplifyTransformer(options: IncrementSimplifyOptions = 
       // Special case: x = x + 1 or x = x - 1 → x++ or x--
       if (usePostfix) {
         if (op === '+' && isOne(binRight)) {
-          return createPostfixExpr(left, '++', node);
+          return stepExpr(left, '++', node, made);
         }
         if (op === '-' && isOne(binRight)) {
-          return createPostfixExpr(left, '--', node);
+          return stepExpr(left, '--', node, made);
         }
         // x = x + -1 → x--
         if (op === '+' && isMinusOne(binRight)) {
-          return createPostfixExpr(left, '--', node);
+          return stepExpr(left, '--', node, made);
         }
         // x = x - -1 → x++
         if (op === '-' && isMinusOne(binRight)) {
-          return createPostfixExpr(left, '++', node);
+          return stepExpr(left, '++', node, made);
         }
       }
 
       // General case: x = x op y → x op= y
       return createCompoundAssignExpr(left, compoundOp, binRight, node);
     },
-  });
+  }));
 }
 
 // ============================================

@@ -6,6 +6,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert';
 
 import { replacePrngWithMacro } from '../codegen/impl.js';
+import { generatePlatformHeader } from '../codegen/platform-types.js';
 
 describe('replacePrngWithMacro', () => {
   it('replaces member access via -> (pRoomEx->sSeed)', () => {
@@ -79,5 +80,28 @@ describe('replacePrngWithMacro', () => {
     const result = replacePrngWithMacro(input);
     assert.ok(result.startsWith('if (x) { DVar1 = D2_SEED_NEXT(pUnit->sSeed);'));
     assert.ok(result.endsWith('foo(); }'));
+  });
+});
+
+describe('D2_SeedRoll in d2_platform.h', () => {
+  it('stores the high word, then the low word, and returns the low word', () => {
+    const header = generatePlatformHeader({ seedType: true });
+    const at = header.indexOf('static D2_SEED_ROLL_INLINE uint32_t D2_SeedRoll(TSeed* pSeed)');
+    assert.ok(at >= 0, 'D2_SeedRoll not emitted');
+    const body = header.slice(at, header.indexOf('\n}', at));
+    const high = body.indexOf('pSeed->nSeedHigh = (uint32_t)(lNext >> 32);');
+    const low = body.indexOf('pSeed->nSeedLow = (uint32_t)lNext;');
+    assert.ok(high > 0 && low > high, body);
+    assert.match(body, /\(uint64_t\)\(uint32_t\)pSeed->nSeedLow \* 0x6ac690c5u \+ \(uint64_t\)\(uint32_t\)pSeed->nSeedHigh/);
+    assert.match(body, /return \(uint32_t\)lNext;/);
+  });
+
+  it('is forced inline under both compilers', () => {
+    const header = generatePlatformHeader({ seedType: true });
+    assert.match(header, /#if defined\(_MSC_VER\)\n#define D2_SEED_ROLL_INLINE __forceinline\n#else\n#define D2_SEED_ROLL_INLINE inline __attribute__\(\(always_inline\)\)\n#endif/);
+  });
+
+  it('is not emitted for a binary without the seed type', () => {
+    assert.ok(!generatePlatformHeader({ seedType: false }).includes('D2_SeedRoll'));
   });
 });

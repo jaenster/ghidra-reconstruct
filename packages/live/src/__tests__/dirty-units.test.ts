@@ -66,6 +66,19 @@ describe('selectDirtyUnits', { skip: SKIP, timeout: 300_000 }, () => {
     assert.strictEqual(r.units, null, 'no previous cache must mean a full re-emit');
   });
 
+  it('re-emits everything when a function moves to another namespace', () => {
+    const target = functions.find(f => f.namespace && f.decompiled)!;
+    const moved = functions.map(f => (f.address === target.address ? { ...f, namespace: 'Elsewhere::Unit' } : f));
+    const r = select(moved);
+    assert.strictEqual(r.units, null, `a namespace move must re-emit everything, got ${r.reason}`);
+    assert.match(r.reason, /moved to another namespace/);
+  });
+
+  it('a cache without namespaces does not count every function as moved', () => {
+    const old: SymbolHashCache = { ...baseline, functions: Object.fromEntries(Object.entries(baseline.functions).map(([k, v]) => [k, { hash: v.hash, name: v.name }])) };
+    assert.deepStrictEqual(select(functions, dataTypes, globals, old).units, []);
+  });
+
   it('marks the owning unit dirty when a function body changes', () => {
     const target = functions.find(f => f.namespace && f.decompiled)!;
     assert.ok(target, 'need a namespaced function with a body');

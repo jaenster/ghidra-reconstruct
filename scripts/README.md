@@ -16,3 +16,12 @@ commits `regen: pending-msg`, and (if a cross-compiler is present) reports the
 D2Common/D2Game compile-error count. Override `CXX` / `MODULES` for other targets.
 
 Restart `start-daemon.sh` after committing new Ghidra changes (forces a fresh checkout).
+
+## hand-follow
+    pnpm hand-follow inventory --base source/regen --head source/modified -o OUT   # run in the redivivus tree
+
+Carries source/modified's hand delta through regens that move functions between files, keyed
+by each function's `// 1.14d:` marker. Subcommands `inventory`, `plan`, `reapply`, `audit`,
+`simulate`; the usage is in `packages/live/src/hand-follow/cli.ts`. It replaces redivivus
+`tools/hand-follow.py` with byte-identical outputs (golden tests in
+`packages/live/src/__tests__/hand-follow.test.ts`).

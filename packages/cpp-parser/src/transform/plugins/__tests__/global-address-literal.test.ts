@@ -1625,5 +1625,55 @@ describe('globalAddressLiteralPlugin', () => {
       assert.ok(out.includes('0xf71733f'), out);
     });
   });
-});
 
+  // RENDERER_D3D_RenderWallTileWithPerspective @006b8950: a cursor that starts two
+  // elements into gaD3DPerspectiveStripVertices[15] (0x20 each) and advances three per
+  // step stops at CMP ESI,0x971670 - element 17, two past the end, which is 0x40 into
+  // the next global gaD3DPerspectiveVertices. The bound belongs to the walked array.
+  describe('a bound one cursor step past the end of the walked array', () => {
+    const STRIP: GlobalAddressLiteralOptions = {
+      globalAddresses: { gaStrip: 0x971450, gaNext: 0x971630 },
+      globalSizes: { gaStrip: 0x1e0, gaNext: 0x80 },
+      globalElementSizes: { gaStrip: 0x20, gaNext: 0x20 },
+      imageBase: '0x400000',
+    };
+    const walk = (advance: string) => `
+      void f() {
+        D2D3DVertexStrc* pfVertexOuter;
+        pfVertexOuter = gaStrip + 2;
+        do {
+          pfVertexOuter[-1].fX = 1.0;
+          ${advance}
+        } while ((int)pfVertexOuter < 0x971670);
+      }`;
+
+    it('anchors the bound on the walked array, not the global it lands in', () => {
+      const out = run(walk('pfVertexOuter = pfVertexOuter + 3;'), STRIP);
+      assert.ok(out.includes('(char*)&gaStrip + sizeof(gaStrip) + 64'), out);
+      assert.ok(!out.includes('gaNext'), out);
+      assert.ok(!out.includes('0x971670'), out);
+    });
+
+    it('reads the step from a compound advance too', () => {
+      const out = run(walk('pfVertexOuter += 3;'), STRIP);
+      assert.ok(out.includes('(char*)&gaStrip + sizeof(gaStrip) + 64'), out);
+    });
+
+    it('keeps the one-element window for a cursor that steps one element', () => {
+      // Two elements past the end with a step of one: not this walk's end.
+      const out = run(walk('pfVertexOuter++;'), STRIP);
+      assert.ok(!out.includes('sizeof(gaStrip)'), out);
+    });
+
+    it('keeps the one-element window when the cursor is written any other way', () => {
+      const out = run(walk('pfVertexOuter = pfVertexOuter + 3; pfVertexOuter = g();'), STRIP);
+      assert.ok(!out.includes('sizeof(gaStrip)'), out);
+    });
+
+    it('reaches no further than one step past the end', () => {
+      // Element 18 is three past the end: beyond any stop of a three-element step.
+      const out = run(walk('pfVertexOuter += 3;').replace('0x971670', '0x971690'), STRIP);
+      assert.ok(!out.includes('sizeof(gaStrip)'), out);
+    });
+  });
+});

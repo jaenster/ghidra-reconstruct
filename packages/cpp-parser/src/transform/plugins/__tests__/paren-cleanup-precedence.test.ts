@@ -2,7 +2,7 @@
  * Precedence-aware redundant parenthesis removal tests.
  *
  * The emitter's `emitParenExpr` is now transparent: it emits the inner
- * expression directly (except for CommaExpr). The existing precedence
+ * expression directly (except for the comma operator). The existing precedence
  * logic in `emitExprWithPrecedence` / `emitBinaryExpr` re-adds parens
  * where semantically needed. Right-child associativity is handled by
  * passing `precedence - 1` for the right operand.
@@ -12,7 +12,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert';
 import { parse } from '../../../parser/index.js';
 import { emit } from '../../../emit/index.js';
-import type { AnyNode } from '../../../ast/nodes.js';
+import type { AnyNode, CallExpr, ExprStmt, FunctionDecl } from '../../../ast/nodes.js';
 import { redundantParenCleanupPlugin } from '../builtins/redundant-paren-cleanup.js';
 
 function transformCode(code: string): string {
@@ -310,8 +310,11 @@ describe('Paren cleanup: function arguments', () => {
     // foo((a, b)) — the parens distinguish "two args" from "comma expression"
     const input = 'void f(int a, int b) { foo((a, b)); }';
     const result = transformCode(input);
-    // Should keep parens around comma expression
-    assert.ok(result.includes('foo'));
+    assert.match(result, /foo\(\(a , b\)\)/);
+    const reparsed = parse(result);
+    const fn = reparsed.declarations[0] as FunctionDecl;
+    const call = (fn.body!.statements[0] as ExprStmt).expression as CallExpr;
+    assert.strictEqual(call.arguments.length, 1);
   });
 });
 

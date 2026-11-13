@@ -31,7 +31,7 @@
  */
 
 import type { ChangeEvent } from './events.js';
-import { expandChangedTypes } from './dirty-units.js';
+import { expandChangedTypes, moduleUnits } from './dirty-units.js';
 import type { loadBuildInfo } from './dirty-units.js';
 import type { ExtractedDataType } from '@ghidra-mcp/reconstruct';
 
@@ -313,10 +313,15 @@ export function predictUnits(
     return { units: null, files: [], symbols, note: 'no buildinfo; a real run would re-emit everything' };
   }
   const changed = new Set<string>([...symbols, ...expandChangedTypes(typeNames, dataTypes)]);
-  const hit = buildInfo.modules.filter(m =>
-    (m.functionNames ?? []).some(n => changed.has(n)) ||
-    (m.ownedTypeNames ?? []).some(n => changed.has(n)) ||
-    (m.deps ?? []).some(d => changed.has(d.symbol)));
+  const hit: Array<{ unitName: string; implPath: string }> = [];
+  for (const m of buildInfo.modules) {
+    const whole =
+      (m.ownedTypeNames ?? []).some(n => changed.has(n)) ||
+      (m.deps ?? []).some(d => changed.has(d.symbol));
+    for (const u of moduleUnits(m)) {
+      if (whole || u.functionNames.some(n => changed.has(n))) hit.push(u);
+    }
+  }
   return {
     units: [...new Set(hit.map(m => m.unitName))].sort(),
     files: [...new Set(hit.map(m => m.implPath))].sort(),

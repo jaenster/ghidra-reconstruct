@@ -97,7 +97,7 @@ function commentBody(text: string): string {
 function exempt(file: SourceFile): boolean {
   const p = file.path;
   return p === PLATFORM_HEADER || p.endsWith(`/${PLATFORM_HEADER}`) ||
-    p.startsWith('support/') || p.includes('/support/');
+    p.startsWith('Redivivus/') || p.startsWith('support/') || p.includes('/support/');
 }
 
 /** Every function name the tree DECLARES outside the platform header - a real function, not notation. */

@@ -5,8 +5,8 @@
  * canonical C++ forms.
  *
  * Transforms:
- * - i = i + 1  →  i++
- * - i = i - 1  →  i--
+ * - i = i + 1  →  ++i, or i++ where the value is discarded (see step-form.ts)
+ * - i = i - 1  →  --i, or i--
  * - i = i + N  →  i += N
  * - i = i - N  →  i -= N
  * - while loops with init/update → for loops (future)
@@ -38,6 +38,7 @@ import {
   type Transformer,
 } from '../../transformer.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
+import { stepExpr, settlingSteps } from './step-form.js';
 
 // ============================================
 // HELPERS
@@ -79,11 +80,13 @@ function getIntValue(expr: Expression): bigint | null {
 // ============================================
 
 /**
- * Transform i = i + 1 to i++ and i = i - 1 to i--
+ * Transform i = i + 1 to ++i and i = i - 1 to --i, the postfix form where the value is
+ * discarded (an assignment's value is the new one: step-form.ts)
  * Also handles i = i + N to i += N
  */
 function createIncrementTransformer(): Transformer {
-  return createKindTransformer(NodeKind.AssignExpr, (node) => {
+  const made = new WeakSet<ASTNode>();
+  return settlingSteps(made, createKindTransformer(NodeKind.AssignExpr, (node) => {
     const assign = node as AssignExpr;
 
     // Only handle simple assignment
@@ -110,15 +113,8 @@ function createIncrementTransformer(): Transformer {
         const intValue = getIntValue(otherOperand);
 
         if (intValue === 1n) {
-          // i = 1 + i → i++
-          return {
-            kind: NodeKind.PostfixExpr,
-            operator: '++',
-            operand: assignTarget,
-            location: assign.location,
-            leadingTrivia: assign.leadingTrivia,
-            trailingTrivia: assign.trailingTrivia,
-          } as PostfixExpr;
+          // i = 1 + i → ++i (i++ where the value is discarded)
+          return stepExpr(assignTarget, '++', assign, made);
         }
 
         if (intValue !== null) {
@@ -137,16 +133,8 @@ function createIncrementTransformer(): Transformer {
     const intValue = getIntValue(otherOperand);
 
     if (intValue === 1n) {
-      // i = i + 1 → i++ or i = i - 1 → i--
-      const op = binary.operator === '+' ? '++' : '--';
-      return {
-        kind: NodeKind.PostfixExpr,
-        operator: op,
-        operand: assignTarget,
-        location: assign.location,
-        leadingTrivia: assign.leadingTrivia,
-        trailingTrivia: assign.trailingTrivia,
-      } as PostfixExpr;
+      // i = i + 1 → ++i or i = i - 1 → --i (postfix where the value is discarded)
+      return stepExpr(assignTarget, binary.operator === '+' ? '++' : '--', assign, made);
     }
 
     if (intValue !== null || otherOperand.kind === NodeKind.Identifier) {
@@ -159,7 +147,7 @@ function createIncrementTransformer(): Transformer {
     }
 
     return undefined;
-  });
+  }));
 }
 
 // ============================================

@@ -7,6 +7,8 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import type { ProjectConfig } from './schema.js';
+import { validateModuleLibraries } from '../modules/module-libraries.js';
+import { isModuleModel, validateModules } from '../modules/module-model.js';
 
 const CURRENT_VERSION = 1;
 
@@ -263,23 +265,40 @@ function validate(config: ProjectConfig, source: string): void {
     });
   }
 
+  if (config.macDataPairs !== undefined && (typeof config.macDataPairs !== 'string' || config.macDataPairs === '')) {
+    throw new Error(`${source}: "macDataPairs" must be a non-empty path`);
+  }
+
   // Validate modules
   if (config.modules) {
     if (typeof config.modules !== 'object' || Array.isArray(config.modules)) {
       throw new Error(`${source}: "modules" must be an object`);
     }
-    for (const [name, mod] of Object.entries(config.modules)) {
-      if (!Array.isArray(mod.namespaces) || mod.namespaces.length === 0) {
-        throw new Error(
-          `${source}: modules.${name} must have a non-empty "namespaces" array`
-        );
+    if (isModuleModel(config.modules)) {
+      const problems = validateModules(config.modules);
+      if (problems.length > 0) throw new Error(`${source}: ${problems.join('; ')}`);
+      if (config.moduleLibraries !== undefined) {
+        throw new Error(`${source}: "moduleLibraries" is read from "modules"; remove it`);
       }
-      if (mod.dependencies !== undefined && !Array.isArray(mod.dependencies)) {
-        throw new Error(
-          `${source}: modules.${name} "dependencies" must be an array`
-        );
+    } else {
+      for (const [name, mod] of Object.entries(config.modules)) {
+        if (!Array.isArray(mod.namespaces) || mod.namespaces.length === 0) {
+          throw new Error(
+            `${source}: modules.${name} must have a non-empty "namespaces" array`
+          );
+        }
+        if (mod.dependencies !== undefined && !Array.isArray(mod.dependencies)) {
+          throw new Error(
+            `${source}: modules.${name} "dependencies" must be an array`
+          );
+        }
       }
     }
+  }
+
+  if (config.moduleLibraries !== undefined) {
+    const problems = validateModuleLibraries(config.moduleLibraries);
+    if (problems.length > 0) throw new Error(`${source}: ${problems.join('; ')}`);
   }
 
   // Validate autoMethodConversion

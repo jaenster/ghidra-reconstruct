@@ -249,6 +249,7 @@ export {
   createRotatedForLoopTransformer,
   type RotatedForLoopOptions,
 } from './builtins/rotated-for-loop.js';
+export { postStridedCountedLoopPlugin } from './builtins/post-strided-counted-loop.js';
 
 // ============================================
 // BUILT-IN PLUGINS: REDUNDANT PAREN CLEANUP
@@ -418,6 +419,11 @@ export {
 } from './builtins/shared-tail-join.js';
 
 export {
+  selectArgumentPlugin,
+  type SelectArgumentOptions,
+} from './builtins/select-argument.js';
+
+export {
   inPlaceOperandPlugin,
   type InPlaceOperandOptions,
 } from './builtins/in-place-operand.js';
@@ -539,10 +545,13 @@ export {
 
 export {
   applyVc8Forms,
+  definitionOf,
   parseVc8Form,
   type Vc8Form,
   type Vc8FormSite,
   type Vc8FormOptions,
+  type Vc8Accessor,
+  type Vc8FormTables,
 } from './builtins/vc8-form.js';
 
 export {
@@ -557,10 +566,28 @@ export {
 } from './builtins/new-result-temp.js';
 
 export {
+  loopCopySinkPlugin,
+  createLoopCopySinkTransformer,
+  type LoopCopySinkOptions,
+} from './builtins/loop-copy-sink.js';
+
+export {
+  paramSlotLocalPlugin,
+  createParamSlotLocalTransformer,
+  type ParamSlotLocalOptions,
+} from './builtins/param-slot-local.js';
+
+export {
   joinStoreTempPlugin,
   createJoinStoreTempTransformer,
   type JoinStoreTempOptions,
 } from './builtins/join-store-temp.js';
+
+export {
+  stormTagWordPlugin,
+  createStormTagWordTransformer,
+  type StormTagWordOptions,
+} from './builtins/storm-tag-word.js';
 
 export {
   stormNextLinkPlugin,
@@ -615,6 +642,7 @@ export {
 
 export {
   switchChainPlugin,
+  switchChainLatePlugin,
   type SwitchChainOptions,
 } from './builtins/switch-chain.js';
 
@@ -713,6 +741,11 @@ export {
 } from './builtins/prng-temp-collapse.js';
 
 export {
+  seedRollStepPlugin,
+  type SeedRollStepOptions,
+} from './builtins/seed-roll-step.js';
+
+export {
   seedProductFoldPlugin,
   foldSeedProducts,
 } from './builtins/seed-product-fold.js';
@@ -741,6 +774,7 @@ export { biasedTableIndexPlugin } from './builtins/biased-table-index.js';
 export { indexBaseBeforeObjectPlugin, createIndexBaseBeforeObjectTransformer } from './builtins/index-base-before-object.js';
 export { foldedAddressRebasePlugin, type FoldedAddress, type FoldedAddressRebaseOptions } from './builtins/folded-address-rebase.js';
 export { globalDistanceIndexPlugin, type GlobalDistanceIndexOptions } from './builtins/global-distance-index.js';
+export { compilerLiteralPlugin, createCompilerLiteralTransformer, type CompilerLiteralOptions } from './builtins/compiler-literal.js';
 export { exactFloatConstantPlugin, createExactFloatConstantTransformer, significantDigits, exactDecimal, type ExactFloatConstantOptions } from './builtins/exact-float-constant.js';
 export { globalRunClearPlugin, globalRunMembers, globalRunSpan, type GlobalRunClearOptions, type GlobalRunMember } from './builtins/global-run-clear.js';
 export { immediateNotAddressPlugin, type ImmediateNotAddressOptions } from './builtins/immediate-not-address.js';
@@ -836,6 +870,7 @@ import { addressRunBoundPlugin } from './builtins/address-run-bound.js';
 import { prngTransformPlugin } from './builtins/prng-transform.js';
 import { seedProductFoldPlugin } from './builtins/seed-product-fold.js';
 import { prngTempCollapsePlugin } from './builtins/prng-temp-collapse.js';
+import { seedRollStepPlugin } from './builtins/seed-roll-step.js';
 import { bitfieldAccessPlugin } from './builtins/bitfield-access.js';
 import { scalarPieceArithmeticPlugin } from './builtins/scalar-piece-arithmetic.js';
 export { scalarPieceArithmeticPlugin } from './builtins/scalar-piece-arithmetic.js';
@@ -848,6 +883,7 @@ import { foldedAddressRebasePlugin } from './builtins/folded-address-rebase.js';
 import { globalDistanceIndexPlugin } from './builtins/global-distance-index.js';
 import { globalRunClearPlugin } from './builtins/global-run-clear.js';
 import { exactFloatConstantPlugin } from './builtins/exact-float-constant.js';
+import { compilerLiteralPlugin } from './builtins/compiler-literal.js';
 import { immediateNotAddressPlugin } from './builtins/immediate-not-address.js';
 import { importAddressForwarderPlugin } from './builtins/import-address-forwarder.js';
 import { unsignedRangeComparePlugin } from './builtins/unsigned-range-compare.js';
@@ -890,6 +926,7 @@ import { rangeReadInlinePlugin } from './builtins/range-read-inline.js';
 import { guardCopySinkPlugin } from './builtins/guard-copy-sink.js';
 import { memberCopyAssignPlugin } from './builtins/member-copy-assign.js';
 import { sharedTailJoinPlugin } from './builtins/shared-tail-join.js';
+import { selectArgumentPlugin } from './builtins/select-argument.js';
 import { inPlaceOperandPlugin } from './builtins/in-place-operand.js';
 import { tailWalkRereadPlugin } from './builtins/tail-walk-reread.js';
 import { rotatedStepWhilePlugin } from './builtins/rotated-step-while.js';
@@ -914,14 +951,18 @@ import { recordNullFoldPlugin } from './builtins/record-null-fold.js';
 import { armConstantCallPlugin } from './builtins/arm-constant-call.js';
 import { fieldPointerFoldPlugin } from './builtins/field-pointer-fold.js';
 import { newResultTempPlugin } from './builtins/new-result-temp.js';
+import { loopCopySinkPlugin } from './builtins/loop-copy-sink.js';
+import { paramSlotLocalPlugin } from './builtins/param-slot-local.js';
 import { joinStoreTempPlugin } from './builtins/join-store-temp.js';
 import { stormNextLinkPlugin } from './builtins/storm-next-link.js';
+import { stormTagWordPlugin } from './builtins/storm-tag-word.js';
 import { paramCheckBlockPlugin } from './builtins/param-check-block.js';
 import { inlinedCallRestorePlugin } from './builtins/inlined-call-restore.js';
 import { guardedCallRestorePlugin } from './builtins/guarded-call-restore.js';
-import { switchChainPlugin } from './builtins/switch-chain.js';
+import { switchChainPlugin, switchChainLatePlugin } from './builtins/switch-chain.js';
 import { caseLayoutPlugin } from './builtins/case-layout.js';
 import { jumpTableCasePlugin } from './builtins/jump-table-case.js';
+import { narrowCompareWidenPlugin } from './builtins/narrow-compare-widen.js';
 import { declOrderFixPlugin } from './builtins/decl-order-fix.js';
 import { declScopeSinkPlugin } from './builtins/decl-scope-sink.js';
 import { phiNodeTernaryPlugin } from './builtins/phi-node-ternary.js';
@@ -967,6 +1008,7 @@ import { callArgCastPlugin } from './builtins/call-arg-cast.js';
 import { pointerCompareCastPlugin } from './builtins/pointer-compare-cast.js';
 import { sizelessPointerArithPlugin } from './builtins/sizeless-pointer-arith.js';
 import { sehNativePlugin } from './builtins/seh-native.js';
+import { ehStateGuardPlugin } from './builtins/eh-state-guard.js';
 import { returnCastPlugin } from './builtins/return-cast.js';
 export { returnCastPlugin, type ReturnCastOptions } from './builtins/return-cast.js';
 import { floatPointerBitcastPlugin } from './builtins/float-pointer-bitcast.js';
@@ -983,8 +1025,26 @@ export { callArgCastPlugin } from './builtins/call-arg-cast.js';
 export { pointerCompareCastPlugin } from './builtins/pointer-compare-cast.js';
 export { sizelessPointerArithPlugin, type SizelessPointerArithOptions } from './builtins/sizeless-pointer-arith.js';
 export { sehNativePlugin, SEH_NATIVE_CONDITION } from './builtins/seh-native.js';
+export { ehStateGuardPlugin, type EhStateGuardOptions } from './builtins/eh-state-guard.js';
 export { floatPointerBitcastPlugin } from './builtins/float-pointer-bitcast.js';
 export { narrowCastThroughUintptrPlugin } from './builtins/narrow-cast-through-uintptr.js';
+import { unionValueMemberPlugin } from './builtins/union-value-member.js';
+export { unionValueMemberPlugin, createUnionValueMemberTransformer, type UnionValueMemberOptions } from './builtins/union-value-member.js';
+import { contextRegisterFieldPlugin } from './builtins/context-register-field.js';
+export {
+  contextRegisterFieldPlugin, createContextRegisterFieldTransformer, CONTEXT_FIELD_SUPPORT_LINES,
+  X86_CONTEXT_FIELDS, getContextRegisterFieldCount, resetContextRegisterFieldCount,
+  type ContextRegisterFieldOptions,
+} from './builtins/context-register-field.js';
+import { pointerWordCastPlugin } from './builtins/pointer-word-cast.js';
+import { sdkHandleConstantPlugin } from './builtins/sdk-handle-constant.js';
+export {
+  sdkHandleConstantPlugin, createSdkHandleConstantTransformer, getSdkHandleConstantCount, resetSdkHandleConstantCount,
+} from './builtins/sdk-handle-constant.js';
+export {
+  pointerWordCastPlugin, createPointerWordCastTransformer, getPointerWordCastStats, resetPointerWordCastStats,
+  pointerWordFor, type PointerWordCastOptions, type PointerWordCastStats,
+} from './builtins/pointer-word-cast.js';
 export { assignCastPlugin } from './builtins/assign-cast.js';
 export { unprototypedCallCastPlugin, type UnprototypedCallCastOptions, type UnprototypedFuncPtr } from './builtins/unprototyped-call-cast.js';
 import { charArrayDwordAssignPlugin } from './builtins/char-array-dword-assign.js';
@@ -1010,7 +1070,9 @@ export { stackFrameAddressPlugin, stackNameOffset, type StackFrameAddressOptions
 import { shadowedTypeQualifyPlugin } from './builtins/shadowed-type-qualify.js';
 export { shadowedTypeQualifyPlugin, type ShadowedTypeQualifyOptions } from './builtins/shadowed-type-qualify.js';
 import { functionShadowedGlobalPlugin } from './builtins/function-shadowed-global.js';
+import { localShadowedGlobalPlugin } from './builtins/local-shadowed-global.js';
 import { globalAliasResolvePlugin } from './builtins/global-alias-resolve.js';
+import { tebFieldAccessPlugin } from './builtins/teb-field-access.js';
 import { sehLoweringPlugin } from './builtins/seh-lowering.js';
 import { baseClassAccessPlugin } from './builtins/base-class-access.js';
 export { baseClassAccessPlugin, type BaseClassAccessOptions } from './builtins/base-class-access.js';
@@ -1018,11 +1080,15 @@ import { memberCallPlugin } from './builtins/member-call.js';
 export { memberCallPlugin, memberCalls, type MemberCallOptions, type MemberCallModel, type MemberCalls } from './builtins/member-call.js';
 export { sehLoweringPlugin, type SehLoweringOptions, type SehLoweringScope } from './builtins/seh-lowering.js';
 export { globalAliasResolvePlugin, type GlobalAliasResolveOptions } from './builtins/global-alias-resolve.js';
+export { tebFieldAccessPlugin, tebFieldExpression, type TebFieldAccessOptions, type TebField } from './builtins/teb-field-access.js';
 export { functionShadowedGlobalPlugin, type FunctionShadowedGlobalOptions } from './builtins/function-shadowed-global.js';
+export { localShadowedGlobalPlugin, type LocalShadowedGlobalOptions, type ShadowedGlobalFact } from './builtins/local-shadowed-global.js';
 import { arrayGlobalAddressOfPlugin } from './builtins/array-global-address-of.js';
 export { arrayGlobalAddressOfPlugin } from './builtins/array-global-address-of.js';
 import { charLiteralEscapePlugin } from './builtins/char-literal-escape.js';
 export { charLiteralEscapePlugin } from './builtins/char-literal-escape.js';
+import { signBitTestPlugin } from './builtins/sign-bit-test.js';
+export { signBitTestPlugin, createSignBitTestTransformer } from './builtins/sign-bit-test.js';
 export { getGotoCleanupStats, resetGotoCleanupStats } from './builtins/goto-cleanup/index.js';
 export type { GotoCleanupStats } from './builtins/goto-cleanup/index.js';
 import { frameGroupLocalsPlugin } from './builtins/frame-group-locals.js';
@@ -1033,8 +1099,11 @@ export {
 } from './builtins/ghidra-warning-facts.js';
 export { frameGroupLocalsPlugin, frameTypeLayout, type FrameGroupLocalsOptions, type EscapeDecision, type RunTruncation, type TypeLayout as FrameTypeLayout } from './builtins/frame-group-locals.js';
 import { stridedAccessPlugin } from './builtins/strided-access.js';
+import { postStridedCountedLoopPlugin } from './builtins/post-strided-counted-loop.js';
 import { reusedParamSlotPlugin } from './builtins/reused-param-slot.js';
 export { reusedParamSlotPlugin, splitReusedParameterSlots, type ReusedParamSlotOptions } from './builtins/reused-param-slot.js';
+import { splitLivesPlugin } from './builtins/split-lives.js';
+export { splitLivesPlugin, splitLives, type SplitLivesOptions } from './builtins/split-lives.js';
 export { stridedAccessPlugin, rewriteStridedAccesses, type StridedAccessOptions, type StructLayoutField } from './builtins/strided-access.js';
 import { allocMacrosPlugin } from './builtins/alloc-macros.js';
 export {
@@ -1060,10 +1129,11 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   adjShiftedPointerPlugin,     // Correctness: ADJ(p) on a shifted pointer -> (Container*)((char*)p - k), its containing record (priority 11)
   deadOutSlotStorePlugin,      // Correctness: a PUSH-reg slot store the next call overwrites through &local before any read -> dropped (priority 12.5)
   reusedParamSlotPlugin,       // Correctness: a dead parameter slot reused for a function pointer -> a funcdef local (priority 14)
+  splitLivesPlugin,            // Correctness: values VC8 kept in one slot, merged into one variable -> a local per later value (priority 14.2)
   threeByteAccessPlugin,       // Correctness: *(uint3 *)p → d2_load24(p), exactly three bytes (priority 14)
   scalarPieceArithmeticPlugin, // Matching: a scalar local's x._N_M_ pieces as shifts and masks on the local (priority 14.5)
   typeNormalizePlugin,         // Cleanup: uint → uint32_t, undefined4 → auto/uint32_t (priority 15)
-  pointerCastNormalizePlugin, // Cleanup: (int)&expr → (uintptr_t)&expr (priority 16)
+  pointerCastNormalizePlugin, // Cleanup: (int)&expr → (intptr_t)&expr, (uint32_t)&expr → (uintptr_t)&expr (priority 16)
   pseudoOpLowerPlugin,        // Cleanup: SUB/CONCAT/ZEXT/SEXT/CARRY/SBORROW → exact C++ (priority 20)
   sunkStoreHoistPlugin,       // Correctness: a stack element store sunk past a read through its address -> back before the read (priority 21)
   fourccLiteralPlugin,        // Cleanup: (char[4])L'\x...' → "abcd" (priority 25)
@@ -1122,6 +1192,8 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   recordNullFoldPlugin,       // Matching: a null guard before a record lookup through the pointer goes into its condition (priority 60.56)
   fieldPointerFoldPlugin,     // Matching: a field-pointer temporary goes; the field updated in place or the record held (priority 62.5)
   newResultTempPlugin,        // Matching: an allocation constructed in place gets a temporary; the result assigned after (priority 62.6)
+  loopCopySinkPlugin,         // Matching: a loop-carried copy placed mid-body moves to the end of the body (priority 62.7)
+  paramSlotLocalPlugin,       // Matching: a local packed into a loaded parameter's slot gets its own variable back (priority 940)
   joinStoreTempPlugin,        // Matching: a member every arm stores into is stored once after the join, through a temporary (priority 970)
   pointeeClearMemsetPlugin,   // Matching: zero stores to every member of *P the original makes from one register become the memset (priority 975)
   memberCopyAssignPlugin,     // Matching: piecewise copies of every byte of *P into a same-typed object are the struct assignment (priority 975.5)
@@ -1141,6 +1213,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   returnCopySplitPlugin,      // Matching: an else-if chain whose first arm falls into a constant return writes the return in that arm (priority 989.975)
   returnCopyJoinPlugin,       // Matching: an arm and a guard returning one constant before another final return become an else-if join (priority 989.98)
   sharedTailJoinPlugin,       // Matching: an arm ending in the statements after it becomes an if/else, the tail written once (priority 989.981)
+  selectArgumentPlugin,       // Matching: a local set to one of two constants and read once by a call -> the select in the argument (priority 989.983)
   strlenDifferencePlugin,     // Matching: an inlined strlen scan's difference from its start is the length (priority 989.985)
   boolSelectFormPlugin,       // Matching: a materialised comparison spelled for the original's setcc or neg/sbb, from the compare sites (priority 989.99)
   registerStoreSelectPlugin,  // Matching: two stores of one lvalue whose constant the original stores from a register become a select (priority 989.992)
@@ -1155,8 +1228,10 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   guardedCallRestorePlugin,   // Matching: a call where an inlined helper left its assertion and its value (priority 987.5)
   branchLayoutPlugin,         // Control-flow: if arms ordered as the original's addresses show (priority 988)
   caseLayoutPlugin,           // Control-flow: jump-table case groups ordered as the original's addresses show (priority 989)
+  narrowCompareWidenPlugin,   // Matching: a byte/word local the original compares in a whole register becomes 32-bit (priority 989.985)
   jumpTableCasePlugin,        // Matching: a jump table's last case the decompiler folded into the code after the switch (priority 989.5)
   switchChainPlugin,          // Control-flow: if-chain the original counts down by subtraction -> switch (priority 44)
+  switchChainLatePlugin,      // Control-flow: the same once more after arm-constant-call (priority 59.45)
   declOrderFixPlugin,         // Cleanup: reorder merged decls to respect initializer deps (priority 61)
   declScopeSinkPlugin,        // Cleanup: sink decls into single-use scope (priority 62)
   phiNodeTernaryPlugin,       // Cleanup: int x; if(c){x=a;}else{x=b;} → int x = c?a:b; (priority 63)
@@ -1175,11 +1250,14 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   ternarySimplifyPlugin,      // Boolean cleanup
   funcPtrLiteralPlugin,        // Cleanup: 0x5011f0 → FunctionName (priority 95)
   globalAddressLiteralPlugin,  // Correctness: a folded global address (incl. ~&g) → the symbol (priority 68)
+  compilerLiteralPlugin,       // Correctness: a pooled string literal's label → the literal (priority 70)
   addressRunBoundPlugin,  // Correctness: a loop bound that is another global's address → a distance from the one being walked (priority 69)
   stridedAccessPlugin,    // Correctness: a strength-reduced byte offset / n*sizeof(T) interior constant -> T[i].f (priority 69.5)
+  postStridedCountedLoopPlugin, // Fidelity: after the byte counter folds, recover a guarded counted for loop (priority 69.6)
   seedProductFoldPlugin,      // A seed step printed as a named product (priority 79)
   prngTransformPlugin,        // Pattern detection: PRNG (priority 80)
   prngTempCollapsePlugin,     // Cleanup: collapse PRNG temp variables (priority 85)
+  seedRollStepPlugin,         // Matching: a seed step written back into its seed is the roll call (priority 619.5)
   voidReturnCleanupPlugin,    // Cleanup: trailing return; in void functions (priority 90)
   undefinedGotoLabelPlugin,   // Control-flow: define dropped Ghidra goto targets (priority 95)
   underscoreStorageAliasPlugin, // Declaration: bind `_<global>` to the global and `_<crt>(` to the CRT name (priority 599)
@@ -1203,9 +1281,15 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   arithIdiomsPlugin,          // Matching: division/remainder/64-bit helper idioms -> the operator (priority 619)
   pow2RemainderPlugin,        // Matching: VC8's signed remainder by 2^k (and; jns; dec; or; inc) -> x % 2^k (priority 51)
   narrowCastThroughUintptrPlugin, // Type: route a pointer->narrow-integer cast through uintptr_t (priority 620)
+  unionValueMemberPlugin,         // Type: Ghidra's ((T*)value).member of a slot union -> (M)value (priority 6)
+  contextRegisterFieldPlugin,     // Portability: x86-only CONTEXT registers through platform-header accessors, the member access itself on x86 (priority 996)
+  stormTagWordPlugin,             // Portability: a Storm link's sign-tagged word in an intptr_t local, (intptr_t)p link offsets, T** back-link slots (priority 994.6)
+  pointerWordCastPlugin,          // Portability: address arithmetic through int -> (char*)p + K / intptr_t / uintptr_t, same value and type (priority 995)
+  sdkHandleConstantPlugin,        // Portability: (HKEY)0x80000001 -> HKEY_CURRENT_USER, a loader's (LPCSTR)id -> MAKEINTRESOURCEA(id) (priority 994)
   assignCastPlugin,           // Type: cast an assigned value to its slot's declared type (priority 615)
   overloadPinCastPlugin,      // Type: exact type of the shared-name member whose address the body takes (priority 627)
   unprototypedCallCastPlugin, // Type: give a FARPROC call the parameter list C left unspecified (priority 622)
+  ehStateGuardPlugin,         // C++ EH: a one-state frame as the local guard object VC8 builds it for (priority 988)
   sehNativePlugin,            // SEH: native __try/__except/__finally beside each D2SehScope lowering, under _MSC_VER (priority 989)
   sizelessPointerArithPlugin, // Type: void*/function-pointer arithmetic as byte arithmetic on uint8_t* (priority 626)
   baseClassAccessPlugin,      // Structs: p->super_B.m -> p->m, &p->super_B -> p, f((B*)derived) -> f(derived) for real base classes (priority 625)
@@ -1218,13 +1302,16 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   enclosingNamespaceStripPlugin, // Cleanup: drop the enclosing namespace prefix from a reference (priority 900, last)
   functionNameReconcilePlugin, // Cleanup: respell a reference with the declaration's name+namespace (priority 20)
   globalAliasResolvePlugin,   // Cleanup: respell a secondary Ghidra label with its address's primary label (priority 19)
+  tebFieldAccessPlugin,       // Cleanup: a thread-environment-block label as that field of NtCurrentTeb() (priority 20)
   sehLoweringPlugin,          // Correctness: an EH3 __try/__except frame -> a D2SehScope on fs:[0] (priority 680)
   thisParamRewritePlugin,     // Cleanup: __thiscall `this` → the free function's param name (priority 46)
   stackFrameAddressPlugin,    // Cleanup: `&stack0xNNNN` → the frame slot that owns it (priority 520)
   shadowedTypeQualifyPlugin,  // Cleanup: (Draw**)x → (::Draw**)x when a same-named namespace shadows the type (priority 47)
   functionShadowedGlobalPlugin,  // Cleanup: bare x → ::x when a same-named function hides the root-scope global (priority 49)
+  localShadowedGlobalPlugin,     // Correctness: a global token a same-named parameter or local hides → ::x, from the markup (priority -1)
   arrayGlobalAddressOfPlugin, // Cleanup: &X_ARRAY_<hex> → X_ARRAY_<hex> (priority 46)
   charLiteralEscapePlugin,    // Cleanup: '²' → '\xb2' (priority 46)
+  signBitTestPlugin,          // Matching: byte and key-state sign predicates become bit masks (priority 989.995)
   memoryPatternsPlugin,       // Pattern detection (late)
   frameGroupLocalsPlugin,     // Correctness: a contiguous frame run whose first slot's address escapes -> one struct-typed local (priority 950)
   warningCommentStripPlugin,  // Cleanup: drop Ghidra WARNING comments; warnings.tsv carries them (priority 990, last)

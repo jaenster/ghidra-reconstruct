@@ -16,8 +16,9 @@
  * Compiled as printed, VC8 keeps c and t in registers of their own; the original computes
  * the value from x at the test (`mov eax, ecx; lea ecx, [eax-1]; and ecx, eax; jnz`).
  *
- * `c = E(x); while (true) { t = c; if (!t) break; x = t; c = E(t); }` becomes
- * `while (E(x)) { x = E(x); }` when
+ * `c = E(x); while (true) { t = c; if (!t) break; x = t; c = E(t); }`, or the same loop with
+ * the copy and its test folded into the condition (`while (t = c) { x = t; c = E(t); }`, as
+ * comma-expand keeps Ghidra's `while (t = c, t != 0)`), becomes `while (E(x)) { x = E(x); }` when
  *   - x, c and t are distinct plain names, c and t locals whose address is never taken and
  *     which are named nowhere else in the function but in declarations without a value
  *     (dropped with them);
@@ -33,7 +34,7 @@
 
 import { NodeKind } from '../../../ast/kinds.js';
 import type {
-  ASTNode, AssignExpr, BinaryExpr, BoolLiteralExpr, CompoundStmt, DeclStmt, Expression, ExprStmt,
+  ASTNode, AssignExpr, BinaryExpr, BoolLiteralExpr, CompoundStmt, CStyleCastExpr, DeclStmt, Expression, ExprStmt,
   FunctionDecl, Identifier, IfStmt, MemberExpr, ParameterDecl, ParenExpr, Statement, UnaryExpr,
   VariableDecl, WhileStmt,
 } from '../../../ast/nodes.js';
@@ -107,6 +108,30 @@ function breakTest(s: Statement): string | null {
   return null;
 }
 
+function isZero(e: Expression): boolean {
+  let u = unwrap(e);
+  while (u.kind === NodeKind.CStyleCastExpr) u = unwrap((u as CStyleCastExpr).expression);
+  if (u.kind === NodeKind.IntegerLiteral) return (u as unknown as { value: bigint }).value === 0n;
+  return u.kind === NodeKind.NullptrLiteral || (u.kind === NodeKind.Identifier && (u as Identifier).name === 'NULL');
+}
+
+/**
+ * The folded condition `(t = c)`, `(t = c) != 0` or `0 != (t = c)` (comma-expand keeps
+ * `while (t = c, t != 0)` as one): the copy `t = c`, which the loop leaves on when t is zero.
+ */
+function copyTest(cond: Expression): { x: string; e: Expression } | null {
+  let c = unwrap(cond);
+  if (c.kind === NodeKind.BinaryExpr && (c as BinaryExpr).operator === '!=') {
+    const b = c as BinaryExpr;
+    if (isZero(b.right)) c = unwrap(b.left);
+    else if (isZero(b.left)) c = unwrap(b.right);
+    else return null;
+  }
+  if (c.kind !== NodeKind.AssignExpr || (c as AssignExpr).operator !== '=') return null;
+  const x = name((c as AssignExpr).left);
+  return x ? { x, e: unwrap((c as AssignExpr).right) } : null;
+}
+
 /** E with every name `from` replaced by `to`. */
 function rename(e: Expression, from: string, to: string): Expression {
   const c = cloneNode(e) as Expression;
@@ -165,10 +190,18 @@ function createCopiedTestWhileTransformer(options: CopiedTestWhileOptions = {}):
           const init = assignment(list[i]);
           if (!init || list[i + 1].kind !== NodeKind.WhileStmt) continue;
           const w = list[i + 1] as WhileStmt;
-          if (!isTrue(w.condition) || w.body.kind !== NodeKind.CompoundStmt) continue;
+          if (w.body.kind !== NodeKind.CompoundStmt) continue;
           const bs = (w.body as CompoundStmt).statements;
-          if (bs.length !== 4) continue;
-          const copy = assignment(bs[0]); const t = breakTest(bs[1]); const step = assignment(bs[2]); const next = assignment(bs[3]);
+          // The copy and its test as guards of `while (true)`, or folded into the condition.
+          let copy: { x: string; e: Expression } | null; let t: string | null; let rest: Statement[];
+          if (isTrue(w.condition)) {
+            if (bs.length !== 4) continue;
+            copy = assignment(bs[0]); t = breakTest(bs[1]); rest = bs.slice(2);
+          } else {
+            if (bs.length !== 2) continue;
+            copy = copyTest(w.condition); t = copy?.x ?? null; rest = bs;
+          }
+          const step = assignment(rest[0]); const next = assignment(rest[1]);
           if (!copy || !t || !step || !next) continue;
           const c = init.x;
           if (copy.x !== t || name(copy.e) !== c || name(step.e) !== t || next.x !== c) continue;

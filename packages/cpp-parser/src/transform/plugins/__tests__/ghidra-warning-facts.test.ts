@@ -133,7 +133,9 @@ describe('warningCommentStripPlugin', () => {
       const p = allBuiltinPlugins.find(x => x.id === id)!;
       assert.ok(p.priority < warningCommentStripPlugin.priority, id);
     }
-    const max = Math.max(...allBuiltinPlugins.filter(p => p !== warningCommentStripPlugin).map(p => p.priority));
+    // The after-source-forms stage is a separate pipeline that runs after this one.
+    const max = Math.max(...allBuiltinPlugins
+      .filter(p => p !== warningCommentStripPlugin && !p.afterSourceForms).map(p => p.priority));
     assert.ok(warningCommentStripPlugin.priority > max);
   });
 

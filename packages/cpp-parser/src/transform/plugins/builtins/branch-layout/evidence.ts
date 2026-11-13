@@ -169,6 +169,8 @@ export class LayoutReader {
    */
   private readonly firstIf = new Map<number, string>();
   private readonly switchLines = new Map<number, number>();
+  /** Line -> how many placed ifs' placed conditions print on it. */
+  private readonly condLines = new Map<number, number>();
   /** Line -> the placed ifs that start on it, in pre-order. */
   private readonly ifsAt = new Map<number, IfStmt[]>();
   /** Line -> how many statement ranges claim it. */
@@ -206,6 +208,8 @@ export class LayoutReader {
         const at = this.ifsAt.get(l);
         if (at) at.push(n as IfStmt); else this.ifsAt.set(l, [n as IfStmt]);
         if (!this.firstIf.has(l)) this.firstIf.set(l, emit((n as IfStmt).condition as AnyNode));
+        const c = (n as IfStmt).condition;
+        if (placed(c)) for (let k = c.location.start.line; k <= c.location.end.line; k++) this.condLines.set(k, (this.condLines.get(k) ?? 0) + 1);
       }
       if (n.kind === NodeKind.SwitchStmt && placed(n)) {
         const l = n.location.start.line;
@@ -358,11 +362,18 @@ export class LayoutReader {
    * line (a copied if, another if there). A one-line `if (c) stmt;` shares its line with its
    * arm, so the arm's tokens count too; the caller checks the number it expects.
    */
-  conditionTests(ifs: IfStmt): readonly EqualityTest[] | null {
+  conditionTests(ifs: IfStmt, split = false): readonly EqualityTest[] | null {
     const c: Expression = ifs.condition;
     if (!this.ev.tests || !placed(ifs) || !placed(c)) return null;
-    const first = ifs.location.start.line;
-    if (this.ifLines.get(first) !== 1) return null;
+    let first = ifs.location.start.line;
+    if (this.ifLines.get(first) !== 1) {
+      // `split`: an if a pass split off a decompiled `&&` keeps that if's line
+      // (comma-expand's `if (a && (x = e, x != 0))` -> `if (a) { x = e; if (x != 0) .. }`);
+      // its own condition's lines are its tests' when no other if's condition prints there.
+      if (!split) return null;
+      first = c.location.start.line;
+      for (let l = first; l <= c.location.end.line; l++) if (this.condLines.get(l) !== 1) return null;
+    }
     const out: EqualityTest[] = [];
     for (let l = first; l <= c.location.end.line; l++) out.push(...(this.ev.tests.get(l) ?? []));
     return out;
