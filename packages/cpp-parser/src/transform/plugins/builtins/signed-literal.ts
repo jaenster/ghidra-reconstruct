@@ -28,6 +28,7 @@ import type {
   IntegerLiteralExpr,
   ParameterDecl,
   ParenExpr,
+  SubscriptExpr,
   TypeNode,
   UnaryExpr,
   VariableDecl,
@@ -213,7 +214,8 @@ function undoDoubleNegative(node: ASTNode): ASTNode | undefined {
  */
 function foldReSignedNegation(
   node: ASTNode,
-  originalValue: WeakMap<ASTNode, { value: bigint; bits: 32 | 64 }>
+  originalValue: WeakMap<ASTNode, { value: bigint; bits: 32 | 64 }>,
+  wideFolds: WeakSet<ASTNode>
 ): ASTNode | undefined {
   if (node.kind !== NodeKind.UnaryExpr) return undefined;
   const u = node as UnaryExpr;
@@ -238,6 +240,7 @@ function foldReSignedNegation(
       leadingTrivia: u.leadingTrivia || [],
       trailingTrivia: u.trailingTrivia || [],
     };
+    if (origin.bits === 64) wideFolds.add(literal);
     return literal;
   }
 
@@ -249,7 +252,46 @@ function foldReSignedNegation(
     leadingTrivia: u.leadingTrivia || [],
     trailingTrivia: u.trailingTrivia || [],
   };
+  if (origin.bits === 64) wideFolds.add(paren);
   return paren;
+}
+
+/** The value of a literal or a parenthesised `-literal`, as this pass writes them. */
+function signedValue(node: ASTNode): bigint | null {
+  if (node.kind === NodeKind.IntegerLiteral) return (node as IntegerLiteralExpr).value;
+  if (node.kind === NodeKind.ParenExpr) return signedValue((node as ParenExpr).expression);
+  if (node.kind === NodeKind.UnaryExpr && (node as UnaryExpr).operator === '-') {
+    const v = signedValue((node as UnaryExpr).operand);
+    return v === null ? null : -v;
+  }
+  return null;
+}
+
+/**
+ * A subscript whose index is a negation folded in 64 bits, read back as the 32-bit offset it is.
+ *
+ * Ghidra prints a negative byte offset off a 32-bit pointer as the negation of a 64-bit
+ * constant: SFILE_ShiftSectorTable 004156a0 writes `pDstExtra[-0xffffffff00000008]` for
+ * `[ebx-8]`. Folded in 64 bits that is `pDstExtra[4294967288]`, which only lands on the
+ * right byte because a 32-bit pointer wraps; a 64-bit build indexes 4 GB past it. A subscript
+ * index is a ptrdiff_t, 32 bits on this target, so the offset meant is the folded value read
+ * as a signed 32-bit number: `pDstExtra[-8]`, the same address on a 32-bit build.
+ */
+function narrowSubscriptIndex(node: ASTNode, wideFolds: WeakSet<ASTNode>): ASTNode | undefined {
+  if (node.kind !== NodeKind.SubscriptExpr) return undefined;
+  const s = node as SubscriptExpr;
+  if (!wideFolds.has(s.index)) return undefined;
+  const v = signedValue(s.index);
+  if (v === null) return undefined;
+  const narrow = BigInt.asIntN(32, v);
+  if (narrow === v) return undefined;
+  const index: Expression = narrow < 0n
+    ? createNegativeLiteral(narrow, s.index)
+    : {
+      kind: NodeKind.IntegerLiteral, value: narrow, suffix: '', base: 10, raw: narrow.toString(),
+      location: s.index.location, leadingTrivia: s.index.leadingTrivia || [], trailingTrivia: s.index.trailingTrivia || [],
+    } as IntegerLiteralExpr;
+  return { ...s, index } as SubscriptExpr;
 }
 
 /**
@@ -340,11 +382,18 @@ function createSignedLiteralCleanup(options: SignedLiteralOptions): Transformer 
   // Nodes this pass re-signed, against the unsigned value they were written
   // with. Lets the enclosing minus, visited afterwards, recover the original.
   const reSigned = new WeakMap<ASTNode, { value: bigint; bits: 32 | 64 }>();
+  // Negations folded in 64 bits, for a subscript to read back in 32.
+  const wideFolds = new WeakSet<ASTNode>();
   let keep = new WeakSet<object>();
 
   const inner = createTransformer({
     visitNode(node) {
-      const folded = foldReSignedNegation(node, reSigned);
+      const index = narrowSubscriptIndex(node, wideFolds);
+      if (index) {
+        return index;
+      }
+
+      const folded = foldReSignedNegation(node, reSigned, wideFolds);
       if (folded) {
         return folded;
       }

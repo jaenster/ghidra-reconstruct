@@ -17,6 +17,22 @@ describe('signedLiteralPlugin', () => {
     return emit(result as AnyNode).trim();
   }
 
+  describe('a subscript index negated in 64 bits', () => {
+    it('reads SFILE_ShiftSectorTable 004156a0 back as the 32-bit offset, not a wrapped addend', () => {
+      // `[ebx-8]` printed as the negation of a 64-bit constant; folded in 64 bits it was
+      // `pDstExtra[4294967288]`, right on a 32-bit build only because the pointer wraps.
+      const output = transformCode('void foo(unsigned char* pDstExtra) { pDstExtra[-0xffffffff00000008] = 0; pDstExtra[-0xffffffff00000001] = 0; }');
+      assert.ok(output.includes('pDstExtra[-8] = 0;'), output);
+      assert.ok(output.includes('pDstExtra[-1] = 0;'), output);
+      assert.ok(!output.includes('4294967'), output);
+    });
+
+    it('keeps a 64-bit negation that is no subscript index', () => {
+      const output = transformCode('void foo(long long x) { long long y = x + -0xffffffff00000008; }');
+      assert.ok(output.includes('4294967288'), output);
+    });
+  });
+
   describe("Ghidra's double negative on a constant", () => {
     it('rewrites --2147483648 to a single negation', () => {
       const output = transformCode('void foo() { int x = --2147483648; }');
