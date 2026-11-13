@@ -565,6 +565,30 @@ function rewriteFunction(fn: FunctionDecl, options: CopyCoalesceOptions): Functi
   return changed ? cur : undefined;
 }
 
+/**
+ * Fold local `a` into `b` (or into the one variable it copies) on the same proof, for the
+ * vc8form `coalesce` form: the function with the fold made, or why it is refused. The
+ * form runs after frame-group-locals, so a local a callee reaches by offset is a group
+ * member by then and no identifier; one whose own address escapes is still refused.
+ */
+export function coalesceLocal(fn: FunctionDecl, a: string, b?: string): FunctionDecl | string {
+  if (!fn.body) return 'no body';
+  if (unmodelled(fn)) return 'control the graph does not model (SEH, try, setjmp, asm)';
+  const { vars, all } = variables(fn);
+  if (!vars.has(a)) return `${a} is not a local declared once, plain, of a foldable type`;
+  const members = frameMembers(fn, { slots: [] });
+  if (!members) return 'a frame position named by offset';
+  const pairs = copyPairs(fn).filter(p => p.a === a && (b === undefined || p.b === b) && vars.has(p.b));
+  if (pairs.length === 0) return `no copy into ${a}${b ? ` from ${b}` : ''}`;
+  if (pairs.length > 1) return `${a} copies more than one variable`;
+  const pointers = new Set<string>();
+  for (const [n, v] of vars) if ((v.type as unknown as { kind: NodeKind }).kind === NodeKind.PointerType) pointers.add(n);
+  const flow = buildFunctionFlow(fn.body.statements, all, { shortCircuitConditions: true, pointers });
+  const proof = provable(fn, vars, members, flow, a, pairs[0].b);
+  if (!proof) return `${a} == ${pairs[0].b} is not proven at every read`;
+  return fold(fn, a, pairs[0].b, vars.get(a)!.decl!, proof.drops) ?? 'a copy could not be dropped in place';
+}
+
 function createCopyCoalesceTransformer(options: CopyCoalesceOptions = {}): Transformer {
   return createTransformer({
     visitFunctionDecl(node: FunctionDecl): ASTNode | undefined {
@@ -578,7 +602,9 @@ export const copyCoalescePlugin: TransformPlugin = {
   name: 'Copy Coalesce',
   description: 'A local that only ever holds a copy of another variable\'s current value is folded into it, on a dataflow proof',
   version: '2.0.0',
-  defaultEnabled: true,
+  // Tree-wide the fold also costs MATCHes VC8 made from the second register; the vc8form
+  // `coalesce` form applies it per function, where a compile has shown it pays.
+  defaultEnabled: false,
   // After loop-copy-sink (62.7), which moves a loop-carried copy rather than folding it.
   priority: 62.75,
   tags: ['matching'],

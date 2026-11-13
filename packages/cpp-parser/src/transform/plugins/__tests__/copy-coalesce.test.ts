@@ -12,6 +12,8 @@ import { emit } from '../../../emit/index.js';
 import type { AnyNode } from '../../../ast/nodes.js';
 import { createCopyCoalesceTransformer, type CopyCoalesceOptions } from '../builtins/copy-coalesce.js';
 import { compileAndRun, hasNativeGpp } from '../../../testing/native-cpp.js';
+import type { TranslationUnit } from '../../../ast/nodes.js';
+import { applyVc8Forms, parseVc8Form, type Vc8FormSite } from '../builtins/vc8-form.js';
 
 const flat = (s: string) => s.replace(/\s+/g, ' ').trim();
 const run = (code: string, o: CopyCoalesceOptions = {}) => flat(emit(createCopyCoalesceTransformer(o)(parse(code)) as AnyNode));
@@ -225,5 +227,22 @@ describe('copy-coalesce', () => {
   it('a read in `b = e(a)` is read before the store', () => {
     assert.strictEqual(run('int f(int n) { int m; m = n; n = m + 1; return n; }'), 'int f(int n) { n = n + 1; return n; }');
     agrees('', 'int f(int n) { int m; m = n; n = m + 1; return n; }', 'printf("%d\\n", f(41));');
+  });
+
+  it('the vc8form coalesce form: the same fold, per function', () => {
+    const form = (tag: string, code: string) => {
+      const sites: Vc8FormSite[] = [];
+      const tu = applyVc8Forms(parse(code) as TranslationUnit, [{ form: parseVc8Form(tag)!, tag }], x => sites.push(x));
+      return { out: flat(emit(tu as AnyNode)), site: sites[0] };
+    };
+    assert.deepStrictEqual(parseVc8Form('coalesce(pUnitSaved,pUnit)'), { op: 'coalesce', name: 'pUnitSaved', from: 'pUnit' });
+    assert.deepStrictEqual(parseVc8Form('coalesce(m)'), { op: 'coalesce', name: 'm' });
+    const ok = form('coalesce(m)', 'int f(int n) { int m = n; g(m); return m + 1; }');
+    assert.strictEqual(ok.site.applied, true);
+    assert.strictEqual(ok.out, 'int f(int n) { g(n); return n + 1; }');
+    const drop = form('coalesce(nParentDepth)', DROP);
+    assert.strictEqual(drop.site.applied, false);
+    assert.strictEqual(drop.out, flat(emit(parse(DROP) as AnyNode)));
+    assert.strictEqual(form('coalesce(m,k)', 'int f(int n, int k) { int m = n; return m; }').site.applied, false);
   });
 });
