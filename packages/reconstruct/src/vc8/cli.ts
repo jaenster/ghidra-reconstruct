@@ -21,7 +21,8 @@
 import { createInterface } from 'node:readline';
 import { resolve } from 'node:path';
 import { loadQuarantine, loadTree, mirror, readSource } from './tree.js';
-import { functionAt, ptrCallStats, translate } from './translate.js';
+import { writeFileSync } from 'node:fs';
+import { argNestSites, functionAt, ptrCallStats, translate } from './translate.js';
 
 function usage(): never {
   process.stderr.write('usage: cli.ts <tree> <out-dir|-> [--quarantine <tsv>] [--serve]\n');
@@ -47,6 +48,11 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
       process.stdout.write(`vc8_translate: ${written} written, ${kept} unchanged\n`);
       process.stderr.write(`vc8_translate: pointer-field calls ${ptrCallStats.byStruct} by struct, ` +
         `${ptrCallStats.byName} by field name (struct not known)\n`);
+      if (argNestSites) {
+        const rows = Object.entries(argNestSites).flatMap(([rel, list]) =>
+          list.map(x => `${rel}\t${x.line}\t${x.callee}\t${x.nested}\n`));
+        writeFileSync(process.env.VC8_ARGNEST_SITES!, rows.join(''));
+      }
     } catch (e) {
       process.stderr.write(`${(e as Error).message}\n`);
       return 1;

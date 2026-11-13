@@ -40,6 +40,16 @@ import {
 } from './syntax.js';
 import { heads, listInitAt, packedAttr, resolveCall, thiscallPtrAt, type TreeState } from './facts.js';
 import { expressionStruct, functionVariables } from './types.js';
+import { argNestPass, type ArgNestMode, type ArgNestSite } from './argnest.js';
+
+/** VC8_ARGNEST (`values`, `calls`, `off`) overrides which temporaries argnest.ts nests, for an A/B measurement. */
+function argNestMode(): ArgNestMode {
+  const m = process.env.VC8_ARGNEST;
+  return m === 'off' || m === 'calls' || m === 'values' ? m : 'values';
+}
+
+/** With VC8_ARGNEST_SITES set, the nested calls per file, for the CLI to report. */
+export const argNestSites: Record<string, ArgNestSite[]> | null = process.env.VC8_ARGNEST_SITES ? {} : null;
 
 export const PLATFORM_H = 'Source/D2Headers/d2_platform.h';
 
@@ -822,6 +832,7 @@ export function quarantineBodies(text: string, lines: Iterable<number>): string 
 /** One file's translation. `rel` is its path in the tree, forward slashes. */
 export function translate(text: string, rel: string, state: TreeState, quarantine?: Iterable<number>): string {
   let s = syntaxPass(text, rel.endsWith('.h'));
+  if (!rel.endsWith('.h')) s = argNestPass(s, state, argNestMode(), argNestSites ? (argNestSites[rel] = []) : undefined);
   s = thiscallPass(s, state);
   s = stripThiscallPass(s);
   s = conventionPass(s);
