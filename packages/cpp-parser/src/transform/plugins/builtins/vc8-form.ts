@@ -34,6 +34,10 @@
  *                        plain copy V2 = V1 goes. Refused unless V1's old value is dead
  *                        on every path, including loop backedges, and V2's declaration
  *                        dominates every use. Neither variable may escape.
+ *   coalesce(A[,B])      local A, which only ever holds a copy of B, is folded into B: its
+ *                        reads read B and its copies go (copy-coalesce's proof). Refused
+ *                        unless A == B holds at every read of A on every path, neither is
+ *                        written any other way there, and neither's address is taken.
  *   cache(E,N,T[,@A])    a new local `T N = E;` before the statement storing A, or the
  *                        if/while/switch testing A (default: before the first statement
  *                        that evaluates E, in the innermost block holding every E), and
@@ -332,11 +336,13 @@ import { selectPairedArguments, SelectRefused, type SelectArgumentOptions } from
 import { createExprShape } from './expr-shape.js';
 import { localTypesOf } from './compare-form.js';
 import { calleeName, scopedLookup } from './call-arg-cast.js';
+import { coalesceLocal } from './copy-coalesce.js';
 
 export type Vc8Form =
   | { op: 'seq'; targets: string[]; index?: number }
   | { op: 'fold'; name: string }
   | { op: 'join'; into: string; from: string }
+  | { op: 'coalesce'; name: string; from?: string }
   | { op: 'cache'; expr: string; name: string; type?: string; anchor?: string; count?: number }
   | { op: 'own'; name: string; type: string; rename?: string }
   | { op: 'guards'; split: number; index: number }
@@ -423,7 +429,7 @@ export interface Vc8FormOptions {
   selectTables?: Vc8FormTables;
 }
 
-const OPS = new Set(['seq', 'fold', 'join', 'cache', 'own', 'guards', 'merge-guards', 'retval', 'width', 'boolflag', 'retwiden', 'arms',
+const OPS = new Set(['seq', 'fold', 'join', 'coalesce', 'cache', 'own', 'guards', 'merge-guards', 'retval', 'width', 'boolflag', 'retwiden', 'arms',
   'nest', 'merge-tail', 'tailguard', 'tailcopy', 'continue', 'dup', 'tarms', 'zero', 'nonzero', 'bool', 'cmp', 'swap', 'ifsel', 'clamp', 'split', 'select', 'decl', 'unselect', 'tsel', 'hoist',
   'nestcall', 'fill', 'elems', 'copy', 'shift', 'ptrwalk', 'rowptr', 'acc', 'retvar', 'onecall', 'roundup', 'swmerge', 'switch', 'dec', 'opas', 'range', 'castout', 'signbit']);
 
@@ -463,6 +469,8 @@ export function parseVc8Form(text: string): Vc8Form | undefined {
       return args.length >= 2 && (n === 0 || n >= 1) ? { op: 'seq', targets: args, ...(n ? { index: n } : {}) } : undefined;
     }
     case 'fold': return args.length === 1 && !anchor ? { op: 'fold', name: args[0] } : undefined;
+    case 'coalesce': return (args.length === 1 || args.length === 2) && !anchor && args.every(a => /^[A-Za-z_]\w*$/.test(a))
+      ? { op: 'coalesce', name: args[0], ...(args[1] ? { from: args[1] } : {}) } : undefined;
     case 'join': return args.length === 2 && !anchor && args.every(a => /^[A-Za-z_]\w*$/.test(a)) && args[0] !== args[1]
       ? { op: 'join', into: args[0], from: args[1] } : undefined;
     case 'cache':
@@ -1108,6 +1116,13 @@ function removeDecl(fn: FunctionDecl, v: string): void {
 }
 
 /** Join one measured value lifetime back into the signed word that produced it. */
+/** copy-coalesce's proven fold of local `name` into the variable it copies (`from`). */
+function doCoalesce(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'coalesce' }>): void {
+  const r = coalesceLocal(fn, f.name, f.from);
+  if (typeof r === 'string') refuse(r);
+  fn.body = (r as FunctionDecl).body;
+}
+
 function doJoin(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'join' }>): void {
   const body = fn.body as CompoundStmt;
   const target = body.statements
@@ -4300,7 +4315,7 @@ function opasShift(fn: FunctionDecl, u: OpasUpdate, matches: (e: Expression, u: 
 }
 
 const APPLY: { [K in Vc8Form['op']]: (fn: FunctionDecl, f: Extract<Vc8Form, { op: K }>) => void } = {
-  seq: doSeq, fold: doFold, join: doJoin, cache: doCache, own: doOwn, guards: doGuards, 'merge-guards': doMergeGuards,
+  seq: doSeq, fold: doFold, join: doJoin, coalesce: doCoalesce, cache: doCache, own: doOwn, guards: doGuards, 'merge-guards': doMergeGuards,
   retval: doRetval, width: doWidth, boolflag: doBoolflag, retwiden: doRetwiden, arms: doArms,
   nest: doNest, 'merge-tail': doMergeTail, tailguard: doTailguard, tailcopy: doTailcopy, continue: doContinue, dup: doDup, tarms: doTarms, zero: doZero, nonzero: doNonzero,
   bool: doBool,
