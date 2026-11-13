@@ -237,7 +237,13 @@ function sites(c: Ctx, maxAnchors: number): string[] {
     out.add(`fold(${v})`);
     out.add(`ifsel(${v})`);
     if (declarable(vars.get(v))) out.add(`split(${v},${vars.get(v)},${v}_2)`);
-    for (const t of casts.get(v) ?? []) { if (declarable(t) && !t.endsWith('*')) out.add(`width(${v},${t})`); if (declarable(t)) out.add(`own(${v},${t})`); }
+    for (const t of casts.get(v) ?? []) {
+      if (declarable(t) && !t.endsWith('*')) out.add(`width(${v},${t})`);
+      // `live` only where own refuses a read initializer: listed after the plain form, a
+      // live body equal to the plain one is the same candidate and goes. permute.ts keeps
+      // a `live` tag on a MATCH alone.
+      if (declarable(t)) { out.add(`own(${v},${t})`); out.add(`own(${v},${t},live)`); }
+    }
   }
   // boolflag: a bool local; retwiden: a narrow integer local stored from a call (the forms refuse the rest).
   const NARROW = new Set(['char', 'unsigned char', 'signed char', 'uint8_t', 'int8_t', 'BYTE', 'byte', 'short', 'short int', 'unsigned short',

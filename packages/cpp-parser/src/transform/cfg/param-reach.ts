@@ -333,6 +333,24 @@ export function funcdefOutWidth(name: string, index: number): number | null {
 }
 
 /**
+ * Platform calls (no body in the model) whose pointer argument at a position the SDK
+ * documents as written whole on every call before anything reads it: `WriteFile` and
+ * `ReadFile` zero `*lpNumberOfBytes...` "before doing any work or error checking". An
+ * `_Out_` parameter the call leaves untouched when it fails (CreateThread's `lpThreadId`)
+ * is not one. Matched on the bare name.
+ */
+const PLATFORM_OUT: Readonly<Record<string, Readonly<Record<number, number>>>> = {
+  WriteFile: { 3: 4 },
+  ReadFile: { 3: 4 },
+};
+
+/** The bytes platform call `name` stores through argument `index` on every call before reading, or null. */
+export function platformOutWidth(name: string, index: number): number | null {
+  const t = PLATFORM_OUT[name.replace(/^.*::/, '')];
+  return t && Object.prototype.hasOwnProperty.call(t, index) ? t[index] : null;
+}
+
+/**
  * The bytes each pointer argument after a literal `scanf` format receives, in order; null
  * when the format is not one string literal or holds a conversion that sizes nothing.
  * A `%*` conversion is matched and assigned nowhere, `%%` matches a percent sign.
