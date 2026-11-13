@@ -3835,6 +3835,21 @@ function transformDecompiledCode(
       perPluginOptions['register-alias-param'] = { aliases: enclosing.registerAliases };
     }
 
+    // A local a callee may reach through a neighbour's address is not folded away: the
+    // frame, and the callee reach frame-group-locals is given.
+    if (enclosing?.stackSlots) {
+      const paramReach = context?.funcPtrArgCasts?.paramReach;
+      perPluginOptions['copy-coalesce'] = {
+        slots: enclosing.stackSlots,
+        ...(paramReach ? {
+          argReach: (callee: string, index: number, argCount: number) => paramReach.argReach(callee, index, argCount),
+          computedArgReach: (callee: Expression, index: number, argCount: number) => paramReach.argReachThrough(callee, index, argCount),
+          bodyReach: (body: ASTNode, name: string, type: string, opts: { include: (use: ASTNode) => boolean }) =>
+            paramReach.bodyReach(body, name, type, opts),
+        } : {}),
+      };
+    }
+
     if (enclosing?.stackSlots && enclosing.stackSlots.length > 0) {
       perPluginOptions['stack-frame-address'] = {
         slots: enclosing.stackSlots,
