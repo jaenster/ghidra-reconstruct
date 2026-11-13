@@ -176,10 +176,14 @@ export function soleUserUnit(uses: MemberUses, address: string): string | undefi
 }
 
 /**
- * The members defined as COMDATs: every function naming one is defined in the
- * member's own unit, no datum holds it, and a function of that unit that is not
- * itself a COMDAT reaches it, so the compiler still emits it. `unitOf` is the
- * final unit of every function.
+ * The members defined as COMDATs: no datum holds it, a function of its own unit names
+ * it, and a function of that unit that is not itself a COMDAT reaches it, so the
+ * compiler still emits it there. Functions of other units may name it too: in the
+ * original every object that called a template member compiled its own COMDAT copy,
+ * so the callers in its own unit kept their registers across the call as for any
+ * call the linker may redirect (TSExplicitList<SGAMEDATA>::UnlinkAll 0044f8e0, whose
+ * Destructor callers 0044fbe0 sit in another unit). `unitOf` is the final unit of
+ * every function.
  */
 export function comdatMembers(uses: MemberUses, members: Iterable<string>, unitOf: (address: string) => string | undefined): Set<string> {
   const marked = new Set<string>();
@@ -188,7 +192,7 @@ export function comdatMembers(uses: MemberUses, members: Iterable<string>, unitO
     const refs = uses.referrers.get(m);
     const unit = unitOf(m);
     if (!refs || refs.size === 0 || !unit) continue;
-    if ([...refs].every(r => unitOf(r) === unit)) marked.add(m);
+    if ([...refs].some(r => unitOf(r) === unit)) marked.add(m);
   }
   // Forward edges, referrer -> member, to walk from the units' non-COMDAT functions.
   const calls = new Map<string, string[]>();
@@ -197,15 +201,17 @@ export function comdatMembers(uses: MemberUses, members: Iterable<string>, unitO
     list.push(m);
     calls.set(r, list);
   }
+  // A member is emitted only where its own unit reaches it: walk from each unit's
+  // non-COMDAT functions into the marked members of that same unit.
   for (let changed = true; changed;) {
     changed = false;
     const reached = new Set<string>();
-    const stack = [...uses.referrers.values()].flatMap(s => [...s]).filter(r => !marked.has(r));
-    for (const r of stack) reached.add(r);
+    const stack = [...new Set([...uses.referrers.values()].flatMap(s => [...s]))].filter(r => !marked.has(r));
     while (stack.length > 0) {
       const r = stack.pop()!;
+      const unit = unitOf(r);
       for (const m of calls.get(r) ?? []) {
-        if (marked.has(m) && !reached.has(m)) { reached.add(m); stack.push(m); }
+        if (marked.has(m) && !reached.has(m) && unitOf(m) === unit) { reached.add(m); stack.push(m); }
       }
     }
     for (const m of [...marked]) if (!reached.has(m)) { marked.delete(m); changed = true; }

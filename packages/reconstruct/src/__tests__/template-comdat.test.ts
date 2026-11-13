@@ -74,7 +74,7 @@ function caller(ns: string, name: string, address: string, body: string): Extrac
 }
 
 function model() {
-  const dataTypes: ExtractedDataType[] = ['ELEM', 'PEER', 'HELD'].flatMap(el => [
+  const dataTypes: ExtractedDataType[] = ['ELEM', 'PEER', 'HELD', 'SPLIT'].flatMap(el => [
     { kind: 'STRUCTURE', name: el, category: '/', size: 8, fields: [
       { name: 'm_link', dataType: `TSLink<${el}>`, offset: 0, size: 8 },
     ] } as ExtractedDataType,
@@ -103,6 +103,12 @@ function model() {
     // HELD's Clear is held by a datum as well.
     member('HELD', 'Clear', '00401200'),
     caller('Mod::Fourth', 'Purge', '00401240', call('HELD', '&gHeldList', 'Clear')),
+    // SPLIT's UnlinkAll is named by a member of its own unit and by another unit: its
+    // own unit still compiles it as the COMDAT its callers there saw.
+    member('SPLIT', 'UnlinkAll', '00401300'),
+    { ...member('SPLIT', 'ChangeLinkOffset', '00401340'),
+      decompiled: `void __thiscall\n${LIST('SPLIT')}::ChangeLinkOffset(${LIST('SPLIT')} *this)\n\n{\n${call('SPLIT', 'this')}\n  return;\n}\n` },
+    caller('Mod::Fifth', 'Drop', '00401380', call('SPLIT', '&gSplitList')),
   ];
   const list = (name: string, el: string, address: string) => ({
     name, address, dataType: LIST(el), size: 12, namespace: null, isInitialized: false, xrefCount: 1,
@@ -112,6 +118,7 @@ function model() {
     list('gElemList', 'ELEM', '00500000'),
     list('gPeerList', 'PEER', '00500010'),
     list('gHeldList', 'HELD', '00500020'),
+    list('gSplitList', 'SPLIT', '00500030'),
     {
       name: 'vftable', address: '00500100', dataType: 'pointer[1]', size: 4, namespace: LIST('HELD'),
       isInitialized: true, xrefCount: 0, referencingFunctions: [], scope: 'global',
@@ -119,8 +126,8 @@ function model() {
     },
   ] as unknown as AnalyzedDataSymbol[];
   const namespaces: ExtractedNamespace[] = [
-    ...['File', 'Other', 'Third', 'Fourth'].map(n => ({ name: n, fullPath: `Mod::${n}`, isClass: false, functionCount: 1 })),
-    ...['ELEM', 'PEER', 'HELD'].map(el => ({ name: LIST(el), fullPath: LIST(el), isClass: false, functionCount: 1 })),
+    ...['File', 'Other', 'Third', 'Fourth', 'Fifth'].map(n => ({ name: n, fullPath: `Mod::${n}`, isClass: false, functionCount: 1 })),
+    ...['ELEM', 'PEER', 'HELD', 'SPLIT'].map(el => ({ name: LIST(el), fullPath: LIST(el), isClass: false, functionCount: 1 })),
   ];
   return { dataTypes, functions, globals, namespaces };
 }
@@ -157,6 +164,11 @@ describe('template members as COMDATs', () => {
     assert.match(file('Mod/stpl_PEER.cpp'), /\ntemplate<> void TSList<PEER, TSGetLink<PEER>>::UnlinkAll\(\) \{/);
     assert.match(file('Mod/stpl_HELD.cpp'), /\ntemplate<> void __thiscall TSList<HELD, TSGetLink<HELD>>::Clear\(/);
     assert.doesNotMatch(file('Storm/H/stpl.h'), /inline void TSList<(PEER|HELD)/);
+  });
+
+  it('marks a member its own unit calls a COMDAT even when another unit names it too', () => {
+    assert.match(file('Mod/stpl_SPLIT.cpp'), /\ntemplate<> __attribute__\(\(noinline\)\) inline void TSList<SPLIT, TSGetLink<SPLIT>>::UnlinkAll\(\) \{/);
+    assert.match(file('Mod/stpl_SPLIT.cpp'), /\ntemplate<> void TSList<SPLIT, TSGetLink<SPLIT>>::ChangeLinkOffset\(\) \{/);
   });
 
   it('keys each member in its unit\'s statics, with whether it is a COMDAT', () => {
