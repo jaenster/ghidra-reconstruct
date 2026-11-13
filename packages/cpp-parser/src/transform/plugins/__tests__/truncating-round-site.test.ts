@@ -5,7 +5,7 @@ import { emit } from '../../../emit/index.js';
 import type { AnyNode, ASTNode } from '../../../ast/nodes.js';
 import { createTruncatingRoundSiteTransformer, type TruncatingRoundSiteOptions } from '../builtins/truncating-round-site.js';
 import { pseudoOpLowerPlugin } from '../builtins/pseudo-op-lower.js';
-import { compileAndRun, hasNativeGpp } from '../../../testing/native-cpp.js';
+import { compileAndRun, hasNativeGpp, testToolchain } from '../../../testing/native-cpp.js';
 import { readFileSync } from 'node:fs';
 
 const flat = (s: string) => s.replace(/\s+/g, ' ').trim();
@@ -55,7 +55,11 @@ describe('native-proven truncating ROUND', () => {
     const code = 'int f(double x) { return (int)ROUND(x); }';
     assert.equal(run(run(code, fact), fact), run(code, fact));
   });
-  it('agrees with native FISTP in four caller rounding modes', { skip: !hasNativeGpp() }, () => {
+  it('agrees with native FISTP in four caller rounding modes', { skip: !hasNativeGpp() }, t => {
+    if (testToolchain()?.name === 'host' && !['ia32', 'x64'].includes(process.arch)) {
+      t.skip('the native FISTP reference uses x86 inline assembly');
+      return;
+    }
     const functions = ([['int', 4], ['long long', 8]] as const).flatMap(([type, width]) =>
       [true, false].map(corrected => run(
         `${type} ${corrected ? 'correct' : 'old'}${width * 8}(double x) { return (${type})ROUND(x); }`,
