@@ -1219,6 +1219,30 @@ export function splitLives(fn: FunctionDecl, o: SplitLivesOptions): Statement[] 
         readNodes.push(n.id);
       }
       if (unreached) { report(`${v}: refused: a read no definition reaches`); continue; }
+      // A store that only an out-parameter call sees initialises the word that call is
+      // handed: `pAiParam = (T)pAiParam->nDistanceToTarget; Find(.., &pAiParam, ..);` (the
+      // original stores the field into the slot, 005e7d60 `mov [ebp+8], ecx` before the
+      // `lea ecx, [ebp+8]`). Such a store is read by no read node, and every definition
+      // reaching the call is one: it is the call's in-value, one life with what the call
+      // leaves there, not a dead store left on the parameter.
+      // Only a store of another type's value - converted to v's (`(T)x`) - or a literal: one
+      // of v's own type (`pAiParam = pDVar1;`) is what the merged variable already holds,
+      // and joining it would keep the life in v.
+      const readDefs = new Set<number>();
+      for (const n of readNodes) for (const d of flow.reaching(n, v)) readDefs.add(d);
+      const foreignStore = (d: number): boolean => {
+        const w = writes.get(d);
+        if (w?.kind !== 'assign' || w.nested || readDefs.has(d)) return false;
+        const rhs = unwrapParens((w.expr as AssignExpr).right);
+        if (literalOf(rhs)) return true;
+        return rhs.kind === NodeKind.CStyleCastExpr && sameType(spellingOf((rhs as CStyleCastExpr).type), dt);
+      };
+      for (const [id, w] of writes) {
+        if (w.kind !== 'out' || w.readsBefore) continue;
+        const reach = [...flow.reaching(id, v)];
+        if (reach.length === 0 || !reach.every(foreignStore)) continue;
+        for (const d of reach) uf.union(d, id);
+      }
       const webs = new Map<number, Web>();
       const webOf = (d: number): Web => {
         const r = uf.find(d);
