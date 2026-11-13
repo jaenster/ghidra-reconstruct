@@ -24,9 +24,11 @@ uint64_t WordViews(Region *p, uint32_t next) {
 export function harness(before: string, after: string): string {
   return `#include <cstdint>
 #include <cstdio>
+#pragma pack(push, 1)
 struct Sub { uint8_t aComponentVariants[16]; };
 struct Region { uint16_t nClassId; uint8_t nRarity, pad; Sub aArray[3]; };
-static_assert(sizeof(Region) == 52, "live region size");
+#pragma pack(pop)
+static_assert(sizeof(Region) == 52 && alignof(Region) == 1, "live packed region layout");
 enum Difficulty { Normal, Nightmare, Hell };
 static uintptr_t seen;
 static unsigned seenCount;
