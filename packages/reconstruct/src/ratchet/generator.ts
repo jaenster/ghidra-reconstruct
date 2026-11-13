@@ -51,6 +51,7 @@ export function applyRatchetToProject(project: ReconstructedProject, options: Re
   for (const [p, f] of project.files) texts.set(p, f.content);
   texts.set(GLOBALS_INDEX_FILE, globalsText);
   const index = SymbolIndex.build(memoryTree(texts));
+  index.addParamStorage([...project.sourceMaps.values()].flatMap(m => m.functions ?? []));
   const releases = new Set(store.releases().map(r => r.address));
   for (const m of project.sourceMaps.values()) {
     for (const f of m.functions ?? []) if (f.ratchet === 'release') releases.add(normalizeAddress(f.address));

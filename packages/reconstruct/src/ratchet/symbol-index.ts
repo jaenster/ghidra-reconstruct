@@ -30,6 +30,14 @@ import {
 
 export const GLOBALS_INDEX_FILE = 'Source/globals/globals.addr.tsv';
 
+/**
+ * The suffix of a function's extern entry, `<name>_Extern` (codegen/header.ts
+ * EXTERN_ENTRY_SUFFIX): a forwarder with the function's own parameters and no address,
+ * defined beside a file-static function for hand-written callers. A name with it denotes
+ * the function it forwards to, so a hand file's call through it follows that function.
+ */
+export const EXTERN_ENTRY_SUFFIX = '_Extern';
+
 export interface FnInfo {
   address: string;
   /** Emitted qualified name, `D2Game::UNIT::SUnitDmg::DAMAGE_AwardKillExperience`. */
@@ -45,12 +53,21 @@ export interface FnInfo {
   paramTypes?: string[];
   ret?: TypeRef;
   retText?: string;
+  /**
+   * Ghidra's storage of each parameter (`ECX:4`, `Stack[0x8]:4`), from the source map, when
+   * the map's parameter names are the emitted ones: what identifies a parameter through a
+   * re-order (params.ts).
+   */
+  storage?: string[];
 }
+
+/** What a source map says about one function's parameters (codegen/sourcemap.ts). */
+export interface MappedParams { address: string; paramStorage?: Array<[string, string]> }
 
 export interface GlobalInfo { address: string; qname: string; type?: TypeRef }
 
 export type Resolved =
-  | { k: 'fn'; a: string[] }
+  | { k: 'fn'; a: string[]; x?: true }
   | { k: 'gl'; a: string }
   | { k: 'en'; e: string; v: string }
   | { k: 'ty'; q: string };
@@ -118,7 +135,34 @@ export class SymbolIndex {
     }
     const g = tree.read(GLOBALS_INDEX_FILE);
     if (g) ix.addGlobalsTsv(g);
+    // Parameter storage rides in the source maps beside the units.
+    const maps: MappedParams[] = [];
+    for (const f of files) {
+      if (!f.endsWith('.map')) continue;
+      const text = tree.read(f);
+      if (!text || !text.includes('"paramStorage"')) continue;
+      try {
+        const m = JSON.parse(text) as { functions?: MappedParams[] };
+        maps.push(...(m.functions ?? []));
+      } catch { /* not a source map */ }
+    }
+    ix.addParamStorage(maps);
     return ix;
+  }
+
+  /**
+   * Attach the parameter storage the source maps carry. A function gets it only when the
+   * map's parameter names are exactly the ones its emitted signature has, so a storage list
+   * never lands on parameters it was not written for.
+   */
+  addParamStorage(functions: Iterable<MappedParams>): void {
+    for (const f of functions) {
+      if (!f.paramStorage || !f.address) continue;
+      const info = this.fnByAddr.get(f.address.toLowerCase().replace(/^0x/u, '').padStart(8, '0'));
+      if (!info?.params || info.params.length !== f.paramStorage.length) continue;
+      if (!f.paramStorage.every(([n], k) => n === info.params![k])) continue;
+      info.storage = f.paramStorage.map(([, st]) => st);
+    }
   }
 
   private addDefinitions(file: string, text: string): void {
@@ -228,6 +272,10 @@ export class SymbolIndex {
       const q = [...p, ...parts].join('::');
       const fn = this.fnByQname.get(q);
       if (fn) return { k: 'fn', a: [...fn] };
+      if (q.endsWith(EXTERN_ENTRY_SUFFIX)) {
+        const target = this.fnByQname.get(q.slice(0, -EXTERN_ENTRY_SUFFIX.length));
+        if (target && target.length === 1) return { k: 'fn', a: [...target], x: true };
+      }
       const gl = this.glByQname.get(q);
       if (gl) return { k: 'gl', a: gl };
       const en = this.enumConsts.get(q);
@@ -250,7 +298,8 @@ export class SymbolIndex {
     switch (r.k) {
       case 'fn': {
         const names = new Set(r.a.map(a => this.fnByAddr.get(a)?.qname));
-        return names.size === 1 ? [...names][0] : undefined;
+        const q = names.size === 1 ? [...names][0] : undefined;
+        return q && r.x ? `${q}${EXTERN_ENTRY_SUFFIX}` : q;
       }
       case 'gl': return this.glByAddr.get(r.a)?.qname;
       case 'en': {
@@ -268,7 +317,7 @@ export function sameResolved(a: Resolved | undefined, b: Resolved | undefined): 
   switch (a.k) {
     case 'fn': {
       const bb = b as typeof a;
-      return a.a.length === bb.a.length && a.a.every(x => bb.a.includes(x));
+      return !!a.x === !!bb.x && a.a.length === bb.a.length && a.a.every(x => bb.a.includes(x));
     }
     case 'gl': return a.a === (b as typeof a).a;
     case 'en': return a.e === (b as typeof a).e && a.v === (b as typeof a).v;

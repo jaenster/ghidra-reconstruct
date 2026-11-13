@@ -4,14 +4,15 @@
  * Every site of the stored text has the binding it was captured with. Under the new index
  * each binding is spelled again: a function or global by its address's current name, a field
  * by the name at its (struct, offset), an enum constant by its value, a parameter by its
- * position in the current signature. A call whose callee's parameter list changed has its
- * arguments re-ordered by parameter name. The edits are spliced into the stored text at the
+ * identity in the current signature (storage and name, params.ts). A call whose callee's
+ * parameter list changed has its arguments re-ordered by the callee's parameter identity. The edits are spliced into the stored text at the
  * parser's locations, so everything that is not a reference stays byte for byte.
  *
  * Anything that cannot be spelled - an address no longer a function, a field offset gone, a
  * type gone, the enclosing function's arity changed, a callee that gained a parameter - makes
  * the whole body unresolvable, with the reasons; the caller falls back to the new body.
  */
+import { isIdentity, matchParams, paramIds, type ParamId } from './params.js';
 import { bindingKey, typeRefString, type Binding, type SiteScan } from './refs.js';
 import { sameResolved, type Resolved, type SymbolIndex } from './symbol-index.js';
 
@@ -21,6 +22,11 @@ export interface RewriteContext {
   scope: string[];
   /** The current signature's parameter names, in order. */
   params: string[];
+  /**
+   * Where each parameter of the stored signature is in the current one (params.ts
+   * matchParams). Without it a parameter keeps its position and the arity must not change.
+   */
+  paramMap?: number[];
   /** Spellings the fresh generator output uses, by binding key: preferred when they resolve. */
   preferred?: Map<string, string>;
   /** A scope per site, where sites sit in different namespaces (a whole hand file). */
@@ -56,7 +62,7 @@ function minimalSpelling(index: SymbolIndex, qname: string, want: Resolved, scop
 
 function resolvedOf(b: Binding): Resolved | undefined {
   switch (b.k) {
-    case 'fn': return { k: 'fn', a: b.a };
+    case 'fn': return b.x ? { k: 'fn', a: b.a, x: true } : { k: 'fn', a: b.a };
     case 'gl': return { k: 'gl', a: b.a };
     case 'en': return { k: 'en', e: b.e, v: b.v };
     case 'ty': return { k: 'ty', q: b.q };
@@ -97,7 +103,7 @@ export function rewriteBody(text: string, scan: SiteScan, bindings: Array<Bindin
           errors.push(`arity changed: ${scan.params.length} -> ${ctx.params.length} parameters`);
           return;
         }
-        spelled = ctx.params[b.i];
+        spelled = ctx.params[ctx.paramMap ? ctx.paramMap[b.i] : b.i];
         if (!spelled) { errors.push(`parameter ${b.i} has no name now`); return; }
         break;
       }
@@ -143,11 +149,11 @@ export function rewriteBody(text: string, scan: SiteScan, bindings: Array<Bindin
           const now = index.fnByAddr.get(b.a[0]);
           if (b.rt !== undefined && now?.retText !== undefined && now.retText !== b.rt) { errors.push(`callee ${old} returns ${now.retText}, was ${b.rt}`); return; }
           if (b.pt && now?.paramTypes && b.p && now.params) {
-            // Compared by parameter name where the names allow it, else by position.
-            const byName = now.params.every(n => n && b.p!.includes(n));
-            for (let j = 0; j < now.paramTypes.length; j++) {
-              const k = byName ? b.p.indexOf(now.params[j]) : j;
-              if (k >= 0 && k < b.pt.length && b.pt[k] !== now.paramTypes[j]) { errors.push(`callee ${old} parameter ${now.params[j] || j} retyped: ${b.pt[k]} -> ${now.paramTypes[j]}`); return; }
+            // Compared parameter by parameter, wherever each one is now.
+            const m = b.p.length === now.params.length ? matchParams(paramIds(b.p, b.ps), paramIds(now.params, now.storage)) : undefined;
+            for (let k = 0; k < b.pt.length; k++) {
+              const j = m && 'map' in m ? m.map[k] : k;
+              if (j < now.paramTypes.length && b.pt[k] !== now.paramTypes[j]) { errors.push(`callee ${old} parameter ${now.params[j] || j} retyped: ${b.pt[k]} -> ${now.paramTypes[j]}`); return; }
             }
           }
         }
@@ -182,13 +188,17 @@ export function rewriteBody(text: string, scan: SiteScan, bindings: Array<Bindin
       edits.push({ start: site.start, end: site.end, text: spelled });
       renames.push(`${old} -> ${spelled}`);
     }
-    // A callee whose parameters changed: re-order the arguments by name.
-    if (b.k === 'fn' && site.call && b.p && b.a.length === 1) {
-      const now = index.fnByAddr.get(b.a[0])?.params;
-      if (now && !(now.length === b.p.length && now.every((n, k) => n === b.p![k]))) {
-        const order = argumentOrder(b.p, now, site.call.pure);
+    // A callee whose parameters changed: re-order the arguments by parameter identity.
+    if (b.k === 'fn' && (site.call || site.called) && b.p && b.a.length === 1) {
+      const nowFn = index.fnByAddr.get(b.a[0]);
+      const now = nowFn?.params;
+      if (now && !(now.length === b.p.length && now.every((n, k) => n === b.p![k]) && sameStorage(b.ps, nowFn.storage))) {
+        const pure = site.call?.pure ?? b.p.map(() => false);
+        const order = argumentOrder(paramIds(b.p, b.ps), paramIds(now, nowFn.storage), pure);
         if (typeof order === 'string') { errors.push(`call to ${old}: ${order}`); return; }
-        if (order) {
+        if (order && !site.call) { errors.push(`call to ${old}: its parameters moved (${b.p.join(', ')} -> ${now.join(', ')}) but its argument list cannot be delimited`); return; }
+        if (order && site.call.args.length !== b.p.length) { errors.push(`call to ${old}: ${site.call.args.length} arguments for ${b.p.length} parameters (${b.p.join(', ')} -> ${now.join(', ')})`); return; }
+        if (order && site.call) {
           edits.push({ start: site.call.open, end: site.call.close, call: { args: site.call.args, order } });
           renames.push(`${old}(${b.p.join(', ')}) -> (${now.join(', ')})`);
         }
@@ -199,24 +209,46 @@ export function rewriteBody(text: string, scan: SiteScan, bindings: Array<Bindin
   return { text: render(text, edits, scan.bodyStart, scan.bodyEnd), errors: [...new Set(errors)], renames };
 }
 
+function sameStorage(a: string[] | undefined, b: string[] | undefined): boolean {
+  return !a || !b || (a.length === b.length && a.every((x, k) => x === b[k]));
+}
+
 /**
  * New argument positions for a callee whose parameters went from `before` to `after`:
- * undefined when nothing moves, a message when it cannot be decided.
+ * `order[j]` is the old argument that goes to parameter j. Undefined when nothing moves,
+ * a message when it cannot be decided. Same arity: each parameter by its identity
+ * (params.ts). Fewer parameters: the ones that went are found by name, and their
+ * arguments are dropped only when they have no side effect.
  */
-export function argumentOrder(before: string[], after: string[], pure: boolean[]): number[] | string | undefined {
-  if (before.includes('...') || after.includes('...')) return before.length === after.length ? undefined : 'variadic parameter list changed';
-  const named = (l: string[]) => l.every(n => n !== '') && new Set(l).size === l.length;
-  if (named(before) && named(after) && after.every(n => before.includes(n))) {
-    const order = after.map(n => before.indexOf(n));
-    for (let k = 0; k < before.length; k++) {
-      if (!order.includes(k) && pure[k] === false) return `argument ${k} (${before[k]}) is dropped but has a side effect`;
-    }
-    if (order.length === before.length && order.every((v, k) => v === k)) return undefined;
+export function argumentOrder(before: ParamId[], after: ParamId[], pure: boolean[]): number[] | string | undefined {
+  const bn = before.map(p => p.name);
+  const an = after.map(p => p.name);
+  if (bn.includes('...') || an.includes('...')) return before.length === after.length ? undefined : 'variadic parameter list changed';
+  if (before.length === after.length) {
+    const m = matchParams(before, after);
+    if ('error' in m) return m.error;
+    if (isIdentity(m.map)) return undefined;
+    const order: number[] = new Array(after.length);
+    m.map.forEach((j, i) => { order[j] = i; });
     return order;
   }
-  if (before.length === after.length) return undefined;
-  const gained = after.filter(n => !before.includes(n));
-  return `parameters ${before.join(', ')} -> ${after.join(', ')}${gained.length ? ` (new: ${gained.join(', ')})` : ''}`;
+  const named = (l: string[]) => l.every(n => n !== '') && new Set(l).size === l.length;
+  if (after.length < before.length && named(bn) && named(an) && an.every(n => bn.includes(n))) {
+    const order = an.map(n => bn.indexOf(n));
+    // A kept parameter whose storage is known on both sides must have kept it.
+    for (let j = 0; j < after.length; j++) {
+      const was = before[order[j]];
+      if (was.storage && after[j].storage && was.storage !== after[j].storage && !/^Stack\[/u.test(was.storage)) {
+        return `parameter ${an[j]} moved from ${was.storage} to ${after[j].storage} while parameters went`;
+      }
+    }
+    for (let k = 0; k < before.length; k++) {
+      if (!order.includes(k) && pure[k] === false) return `argument ${k} (${bn[k]}) is dropped but has a side effect`;
+    }
+    return order;
+  }
+  const gained = an.filter(n => !bn.includes(n));
+  return `parameters ${bn.join(', ')} -> ${an.join(', ')}${gained.length ? ` (new: ${gained.join(', ')})` : ''}`;
 }
 
 function render(text: string, edits: Edit[], from: number, to: number): string {
@@ -227,8 +259,17 @@ function render(text: string, edits: Edit[], from: number, to: number): string {
     if (e.start < pos) continue; // nested in an edit already rendered
     out += text.slice(pos, e.start);
     if (e.call) {
-      const parts = e.call.order.map(k => render(text, edits, e.call!.args[k][0], e.call!.args[k][1]));
-      out += `(${parts.join(', ')})`;
+      // Re-ordered, the arguments move and the text between them (line breaks, alignment)
+      // stays where it was; with one dropped, the list is written plainly.
+      const args = e.call.args;
+      const parts = e.call.order.map(k => render(text, edits, args[k][0], args[k][1]));
+      if (parts.length !== args.length || args.length === 0) out += `(${parts.join(', ')})`;
+      else {
+        const seps = args.slice(1).map((a, k) => text.slice(args[k][1], a[0]));
+        out += text.slice(e.start, args[0][0]);
+        parts.forEach((p, k) => { out += k > 0 ? `${seps[k - 1] ?? ', '}${p}` : p; });
+        out += text.slice(args[args.length - 1][1], e.end);
+      }
     } else out += e.text ?? '';
     pos = e.end;
   }

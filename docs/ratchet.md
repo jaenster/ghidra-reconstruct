@@ -47,12 +47,13 @@ caller's bytes follow the callee's shape: deploy 1163 lost `0057eab0` because it
 `0057e860` changed. A member body is kept as captured:
 
 - `text`: the whole definition as emitted (`source/modified` at the evidence commit);
-- `scope`, `params`, `paramTypes`, `ret`: what it was printed against;
+- `scope`, `params`, `paramStorage`, `paramTypes`, `ret`: what it was printed against
+  (`paramStorage` when the tree's source maps carried it, see "Parameter identity");
 - `bindings`: for every reference site in the body (a name, a member, a type), what it denotes
   independently of its spelling: a function or global by address, a field by (struct, offset), an
-  enum constant by (enum, value), a type by name, a parameter by position. A callee binding also
-  carries the callee's parameter names and types and its return type; a field or global binding
-  its type;
+  enum constant by (enum, value), a type by name, a parameter by its position when captured (which
+  `params`/`paramStorage` turn into an identity). A callee binding also carries the callee's
+  parameter names, storage and types and its return type; a field or global binding its type;
 - `siteHash`: proves the parser re-finds the same sites in `text` later.
 
 Sites are found on the parse of the body (cpp-parser), numbered in walk order; edits are spliced
@@ -69,12 +70,13 @@ the same. Only `match` records apply there; pins never enter `source/regen`. Per
 2. Different: the stored body is printed under the current index: a function by its address's
    current qualified name (as deeply qualified as before when that resolves, else the spelling the
    fresh body uses, else the shortest that resolves), a field by the name at its offset, a
-   parameter by position in the current signature; a call whose callee's parameters were renamed
-   or re-ordered gets its arguments re-ordered by name. The body replaces the fresh one; the
-   signature and comments stay fresh.
+   parameter by its identity in the current signature; a call whose callee's parameters were
+   re-ordered gets its arguments re-ordered by the callee's parameter identity. The body replaces
+   the fresh one; the signature and comments stay fresh.
 3. Not printable: a symbol gone, a field offset gone, a type gone, the function's arity or a
-   parameter or return type changed, a callee, field or global retyped, a callee that gained a
-   parameter or would drop an argument with a side effect. Then the fresh body stays, the stored
+   parameter or return type changed, a parameter whose identity is ambiguous (its own or a
+   callee's), a callee, field or global retyped, a callee that gained a parameter or would drop
+   an argument with a side effect. Then the fresh body stays, the stored
    one is kept under `#if 0` right above it with the reason, and the function is reported. The
    regen never fails for it.
 
@@ -98,12 +100,43 @@ rest of the file and a pinned body is never merged as text. A pin that cannot be
 reported and kept under `#if 0` beside the generated body. Then the hand-written files
 (`Redivivus/`, `support/`) follow the regen: their references are bound under the tree before the
 merge and re-spelled under the regen (a moved function re-qualified, a renamed field renamed, a
-callee whose parameters changed called with its arguments re-ordered by name and side-effect-free
-dropped arguments removed, the header that now declares a moved function included next to the
-old one). Hand files use macros the parser does not know, so they are read as tokens: qualified
-names, and unqualified names only where they are called. What cannot be followed is listed; the
-rest of the file is still followed. Conflicts outside pinned functions are left as markers, as
-before.
+callee whose parameters changed called with its arguments re-ordered by parameter identity and
+side-effect-free dropped arguments removed, the header that now declares a moved function
+included next to the old one). Hand files use macros the parser does not know, so they are read
+as tokens: qualified names, and unqualified names only where they are called. An argument list is
+re-ordered only where tokens delimit it: balanced brackets split at top-level commas, no
+preprocessor line inside it, no `<` before a top-level comma and a `>` after it (`f(a < b, c > d)`
+may be one template argument). Such a call to a re-ordered callee is reported and left as
+written, and so is a re-ordered function whose address a hand file takes. What cannot be
+followed is listed; the rest of the file is still followed. Conflicts outside pinned functions
+are left as markers, as before.
+
+A call through an extern entry follows its function. `<name>_Extern` is the forwarder the
+generator emits beside a file-static function for hand-written callers
+(codegen/file-static-functions.ts): VC8 gives a static function its own register convention,
+which no caller in another unit can use, so a hand file calls the entry and the static keeps
+its convention. The entry has the function's parameters and is re-emitted with them every regen,
+so its definition follows a re-order by itself; it has no `// 1.14d:` address, so the index binds
+the name to the function it forwards to, `<name>` in the same scope. A rename of the function
+renames the entry, and a re-order of its parameters re-orders the hand file's arguments (1165:
+`d2_control.cpp` called `PLRMODES_CanInterruptCurrentMode_Extern` and
+`SKILLS_CastSkillClient_Extern` with the v2096 order, and the link gate failed until df5778550).
+
+## Parameter identity
+
+A parameter is identified by Ghidra's storage (`ECX:4`, `Stack[0x8]:4`) and its name, never by
+its position (`ratchet/params.ts`). The generator writes each function's parameters with their
+storage into its source map (`paramStorage`); the index attaches them only when the names are the
+emitted ones. Storage is what the binary fixes, so it decides; the name decides where storage is
+unknown (records captured before maps carried it) or changed. A stack slot counts only while the
+stack layout is the same on both sides, since a register parameter moving to the stack shifts
+every slot after it. Where storage and name disagree (the value in EAX was `nMousePosY`, now
+`nMousePosY` is in ECX) the edit is either a re-order or a correction of which name sits on which
+value, and the record is reported unresolved rather than guessed. A parameter that kept neither
+keeps its position, unless another parameter's identity claims it.
+
+Why: Game.exe v2097 (1165) swapped the two `int32_t` register parameters of 004a4a10; bound by
+position, its kept body read `nMousePosX` where the original reads `nMousePosY`.
 
 ## Pins: hand edits without merge pain
 

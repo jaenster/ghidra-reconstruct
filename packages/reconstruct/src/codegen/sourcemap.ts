@@ -6,6 +6,8 @@
  */
 
 import { vc8formBodyHash } from './vc8form-spec.js';
+import { declaredParameters } from './header.js';
+import { signatureParameters } from './templates/index.js';
 import type {
   ExtractedFunction,
   SourceMap,
@@ -82,6 +84,8 @@ export function generateSourceMap(
     // What the ratchet records with a body, and its escape hatch (docs/ratchet.md).
     if (func.decompiled) mapping.dh = vc8formBodyHash(func.decompiled);
     if (func.tags?.some(t => t.type === 'ratchet' && t.data === 'release')) mapping.ratchet = 'release';
+    const storage = parameterStorage(func);
+    if (storage) mapping.paramStorage = storage;
 
     functionMappings.push(mapping);
   }
@@ -92,6 +96,19 @@ export function generateSourceMap(
     binary: binaryName,
     functions: functionMappings,
   };
+}
+
+/**
+ * Each declared parameter's name with Ghidra's storage for it: what identifies a parameter
+ * when Ghidra re-orders them (ratchet/params.ts). Only when every parameter has storage.
+ */
+export function parameterStorage(func: ExtractedFunction): Array<[string, string]> | undefined {
+  if (func.hasVarArgs) return undefined;
+  const sig = signatureParameters(func);
+  if (sig.length === 0 || !sig.every(p => typeof p.storage === 'string' && p.storage !== '')) return undefined;
+  const names = declaredParameters(func);
+  if (names.length !== sig.length) return undefined;
+  return names.map((p, k) => [p.name, sig[k].storage!] as [string, string]);
 }
 
 /**

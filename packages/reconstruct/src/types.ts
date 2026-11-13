@@ -647,6 +647,11 @@ export interface FunctionMapping {
   dh?: string;
   /** `release` when the function carries the Ghidra tag `ratchet:release` (docs/ratchet.md). */
   ratchet?: 'release';
+  /**
+   * Each parameter's emitted name and Ghidra storage (`ECX:4`, `Stack[0x8]:4`): the ratchet
+   * follows a parameter through a re-order by it (ratchet/params.ts).
+   */
+  paramStorage?: Array<[string, string]>;
 }
 
 export interface LineMapping {
