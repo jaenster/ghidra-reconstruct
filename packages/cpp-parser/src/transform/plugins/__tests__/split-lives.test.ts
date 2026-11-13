@@ -802,7 +802,7 @@ describe('split-lives', () => {
   it('a number in a pointer compares with another number without converting either; &p[1].f is p plus the bytes', () => {
     const out = run(INTERIOR, interiorO);
     has(out, 'if (nDiff != gnLimit)');
-    has(out, 'return nSum + nDiff + 0xc + n;');
+    has(out, 'return nSum + (nDiff + 0xc + n);');
   });
 
   it('an element address through a pointer does not take the pointer\'s own address', () => {

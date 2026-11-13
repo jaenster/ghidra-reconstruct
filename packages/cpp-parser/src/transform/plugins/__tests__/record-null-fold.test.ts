@@ -66,7 +66,7 @@ describe('record-null-fold', () => {
     const t = recordNullFoldPlugin.createTransformer({ branchLayout: layout(SITE, [2, 9]), onSite: e => sites.push(`${e.pointer}:${e.record}`) });
     const out = flat(emit(t(tu as never) as AnyNode));
     assert.deepStrictEqual(sites, ['pUnit:pTxt']);
-    assert.ok(out.includes('Rec* pTxt = pUnit && (nId = pUnit->nClassId) >= 0'), out);
+    assert.ok(out.includes('Rec* pTxt = pUnit && ((nId = pUnit->nClassId) >= 0'), out);
   });
 
   it('changes nothing without the facts', () => {
