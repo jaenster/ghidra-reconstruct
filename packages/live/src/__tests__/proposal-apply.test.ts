@@ -120,7 +120,7 @@ function runSetPrototype(signature: string, current: string[]): string[] {
     writeFileSync(join(dir, 'Harness.java'), h);
     const files = ['Harness.java', ...['lang/Register', 'symbol/SourceType', 'data/DataType', 'data/VoidDataType', 'listing/Program', 'listing/VariableStorage', 'listing/Parameter', 'listing/ParameterImpl', 'listing/ReturnParameterImpl', 'listing/Function'].map((f) => `ghidra/program/model/${f}.java`)];
     execFileSync('javac', ['-nowarn', '-d', dir, ...files.map((f) => join(dir, f))], { cwd: dir, stdio: 'pipe' });
-    return execFileSync('java', ['-cp', dir, 'Harness', signature, ...current], { encoding: 'utf8' }).trim().split('\n');
+    return execFileSync('java', ['-cp', dir, 'Harness', signature, ...current], { encoding: 'utf8' }).trim().split(/\r?\n/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -163,7 +163,7 @@ function runVc8formCheck(changed: string[]): string[] {
       .replace('/*CHECK*/', line('if (!DRY) { int nStale = 0;'));
     writeFileSync(join(dir, 'VcHarness.java'), h);
     execFileSync('javac', ['-nowarn', '-d', dir, join(dir, 'VcHarness.java')], { cwd: dir, stdio: 'pipe' });
-    return execFileSync('java', ['-cp', dir, 'VcHarness', ...changed], { encoding: 'utf8' }).trim().split('\n');
+    return execFileSync('java', ['-cp', dir, 'VcHarness', ...changed], { encoding: 'utf8' }).trim().split(/\r?\n/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
