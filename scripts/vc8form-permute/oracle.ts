@@ -14,8 +14,9 @@ import { encodeFile } from './text.js';
 
 export class CheckoutChanged extends Error {}
 
-/** start -> [status, similarity (as judged, 4 places), register-only, calls] */
-export type Judged = Map<number, { st: string; sim: number; simText: string; reg: boolean; calls: string[] }>;
+/** start -> [status, similarity (as judged, 4 places), register-only, calls, our frame and the
+ * original's (`sub esp, N`; undefined from an oracle-zig that does not report them)] */
+export type Judged = Map<number, { st: string; sim: number; simText: string; reg: boolean; calls: string[]; fo?: number; fr?: number }>;
 
 export class Oracle {
   readonly root: string;
@@ -79,7 +80,7 @@ export class Oracle {
   async judge(tu: string, obj: string | null): Promise<Judged> {
     const r = await this.ask({ tu, obj });
     const out: Judged = new Map();
-    for (const [s, st, sim, reg, calls] of r.fns) out.set(s, { st, sim: Number(sim), simText: sim, reg, calls });
+    for (const [s, st, sim, reg, calls, fo, fr] of r.fns) out.set(s, { st, sim: Number(sim), simText: sim, reg, calls, fo, fr });
     return out;
   }
 
