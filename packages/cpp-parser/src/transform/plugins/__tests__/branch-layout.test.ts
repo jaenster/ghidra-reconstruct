@@ -1257,3 +1257,98 @@ describe('early-return - the return copies a nest would merge', () => {
     for (const line of compileAndRun(prelude, main).trim().split('\n')) assert.strictEqual(line, '1 1');
   });
 });
+
+describe('branchLayoutPlugin - a value set and tested under a test, failure first', () => {
+  // NPCMENU_TalkOptionCallback 004b6c70: `test [bInteracting]; je 1d; call Find; test eax;
+  // jne 49; 1d: <failure tail>; ret; 49: <success>`. The first test jumps to the tail its
+  // second test falls into: the source tested an inlined getter once,
+  // `p = bInteracting ? Find() : 0; if (!p) { tail } success`.
+  const lines = (decl: string, set: string, cond = 'a') => [
+    'int f(int a, int b) {',
+    decl,
+    `[if 0x7 0x0,0x7] if (${cond}) {`,
+    `[0x9,0x14] ${set}`,
+    '[if 0x1b 0x19,0x1b] if (p) {',
+    '[0x49] A(*p);',
+    '[0x50] return 1;',
+    '}',
+    '}',
+    '[0x1d] B(b);',
+    '[0x46] return 0;',
+    '}',
+  ];
+  const edges = (outerTarget = 0x1d) => [
+    { line: 3, ord: 0, keyword: 'if' as const, jcc: 0x7, target: outerTarget, fall: 0x9, fallLines: [4], takenLines: [10] },
+    { line: 5, ord: 0, keyword: 'if' as const, jcc: 0x1b, target: 0x49, fall: 0x1d, fallLines: [10], takenLines: [6] },
+  ];
+  function runEdges(src: string[], e = edges()): { out: string; sites: string[] } {
+    const { code, ev } = fixture(src);
+    const sites: string[] = [];
+    const t = branchLayoutPlugin.createTransformer({ branchLayout: { ...ev, edges: e }, onSite: x => sites.push(x.rule) });
+    return { out: flat(emit(t(parse(code)) as AnyNode)), sites };
+  }
+
+  it('selects the value under the test and tests it once, the failing tail first', () => {
+    const { out, sites } = runEdges(lines('int* p;', 'p = G(a);'));
+    assert.deepStrictEqual(sites, ['getter']);
+    assert.ok(out.includes('int* p; p = a ? G(a) : 0; if (!p) { B(b); return 0; } A(*p); return 1; }'), out);
+  });
+
+  it('moves a declaration the arm holds out with the getter', () => {
+    const { out, sites } = runEdges(lines('', 'int* p = G(a);'));
+    assert.deepStrictEqual(sites, ['getter']);
+    assert.ok(out.includes('int* p = a ? G(a) : 0; if (!p) { B(b); return 0; } A(*p); return 1; }'), out);
+  });
+
+  it('selects under an && condition as a whole', () => {
+    const { out, sites } = runEdges(lines('int* p;', 'p = G(a);', 'a && b'));
+    assert.deepStrictEqual(sites, ['getter']);
+    assert.ok(out.includes('p = a && b ? G(a) : 0; if (!p) {'), out);
+  });
+
+  it('leaves the nest where the first test jumps past the tail', () => {
+    const { out, sites } = runEdges(lines('int* p;', 'p = G(a);'), edges(0x5d));
+    assert.deepStrictEqual(sites, []);
+    assert.ok(out.includes('if (a) { p = G(a); if (p) { A(*p); return 1; } } B(b); return 0;'), out);
+  });
+
+  it('leaves the nest where the tail reads the value', () => {
+    const { sites } = runEdges(lines('int* p;', 'p = G(a);').map(l => l.replace('B(b)', 'B(p != 0)')));
+    assert.deepStrictEqual(sites, []);
+  });
+
+  it('leaves the nest where the tested arm falls through', () => {
+    const { sites } = runEdges(lines('int* p;', 'p = G(a);').map(l => l.replace('[0x50] return 1;', '')));
+    assert.deepStrictEqual(sites, []);
+  });
+
+  it('leaves a test that is not of the value set in the arm', () => {
+    const { sites } = runEdges(lines('int* p; int* q;', 'q = G(a);'));
+    assert.deepStrictEqual(sites, []);
+  });
+
+  it('is idempotent', () => {
+    const { code, ev } = fixture(lines('int* p;', 'p = G(a);'));
+    const t = branchLayoutPlugin.createTransformer({ branchLayout: { ...ev, edges: edges() } });
+    const once = t(parse(code));
+    assert.strictEqual(flat(emit(t(once) as AnyNode)), flat(emit(once as AnyNode)));
+  });
+
+  it('computes what the nest computes', { skip: native.skip }, () => {
+    const { code, ev } = fixture(lines('int* p;', 'p = G(a);'));
+    const t = branchLayoutPlugin.createTransformer({ branchLayout: { ...ev, edges: edges() } });
+    const after = emit(t(parse(code)) as AnyNode).replace('int f(', 'int g(');
+    const prelude = [
+      'static int gLog = 0; static int gCell = 5;',
+      'static int* G(int a) { gLog = gLog * 10 + 1; return a > 1 ? &gCell : 0; }',
+      'static void A(int v) { gLog = gLog * 10 + 2 + v; } static void B(int v) { gLog = gLog * 10 + 3 + v; }',
+      code, after,
+    ].join('\n');
+    const main = ['0', '1', '2'].flatMap(a => ['0', '1'].map(b =>
+      `{ gLog = 0; int r = f(${a}, ${b}); int l = gLog; gLog = 0; int s = g(${a}, ${b}); printf("%d %d %d %d\\n", r, l, s, gLog); }`)).join('\n');
+    for (const line of compileAndRun(prelude, main).trim().split('\n')) {
+      const [r, l, s, m] = line.split(' ');
+      assert.strictEqual(`${s} ${m}`, `${r} ${l}`, line);
+    }
+  });
+});
