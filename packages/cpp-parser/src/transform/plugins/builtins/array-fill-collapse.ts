@@ -131,10 +131,28 @@ function matchZeroFill(s: Statement): { base: Expression; idx: number } | null {
   }
   if (lhs.kind !== NodeKind.SubscriptExpr) return null;
   const sub = lhs as SubscriptExpr;
-  const idxNode = unwrap(sub.index);
-  if (idxNode.kind !== NodeKind.IntegerLiteral) return null;
+  const idx = literalIndex(sub.index);
+  if (idx === null) return null;
   if (!isSafeBase(sub.array)) return null;
-  return { base: sub.array, idx: Number((idxNode as IntegerLiteralExpr).value) };
+  return { base: sub.array, idx };
+}
+
+/** A constant subscript: `k`, or `-k` for a byte before the pointer (`pDstExtra[-8]`, 004156a0). */
+function literalIndex(e: Expression): number | null {
+  const u = unwrap(e);
+  if (u.kind === NodeKind.IntegerLiteral) return Number((u as IntegerLiteralExpr).value);
+  if (u.kind === NodeKind.UnaryExpr && (u as UnaryExpr).operator === '-') {
+    const k = unwrap((u as UnaryExpr).operand);
+    if (k.kind === NodeKind.IntegerLiteral) return -Number((k as IntegerLiteralExpr).value);
+  }
+  return null;
+}
+
+/** `base + k`, or `base - k` for a negative k: the subtraction, never a wrapped addend. */
+function offsetFrom(base: Expression, k: number): Expression {
+  return k < 0
+    ? Expr.binary(cloneNode(base), '-', Expr.intLiteral(-k))
+    : Expr.binary(cloneNode(base), '+', Expr.intLiteral(k));
 }
 
 /** `*p = ...;`: the run's first element written through the pointer. */
@@ -149,7 +167,7 @@ function makeMemset(base: Expression, startIdx: number, count: number, model: St
   const dest =
     startIdx === 0
       ? cloneNode(base)
-      : Expr.binary(cloneNode(base), '+', Expr.intLiteral(startIdx));
+      : offsetFrom(base, startIdx);
   const size = Expr.binary(
     Expr.intLiteral(count),
     '*',
@@ -173,7 +191,7 @@ function isCharZeroStore(st: Statement): boolean {
 
 /** *(uint32_t*)<base>[+start] = 0; */
 function makeDwordStore(base: Expression, startIdx: number, model: Statement): ExprStmt {
-  const at = startIdx === 0 ? cloneNode(base) : Expr.paren(Expr.binary(cloneNode(base), '+', Expr.intLiteral(startIdx)));
+  const at = startIdx === 0 ? cloneNode(base) : Expr.paren(offsetFrom(base, startIdx));
   const target = Expr.unary('*', Expr.cast(Type.pointer(Type.typedef('uint32_t')), at));
   return {
     kind: NodeKind.ExprStmt,
@@ -245,12 +263,15 @@ function collapseBlock(block: CompoundStmt, scope?: FillScope, ev?: AccessOrderE
   while (i < s.length) {
     const m = matchZeroFill(s[i]);
     if (m) {
-      // Extend the run: same base, consecutive ascending indices.
+      // Extend the run: same base, consecutive ascending indices. A run before the pointer
+      // ends at it: the stores below and from the base stay two fills, as they compiled when
+      // the offset below still printed as a wrapped addend (SFILE_ShiftSectorTable 004156a0;
+      // one 16-byte fill there costs VC8 three identical bytes).
       let j = i + 1;
       let lastIdx = m.idx;
       while (j < s.length) {
         const m2 = matchZeroFill(s[j]);
-        if (!m2 || m2.idx !== lastIdx + 1 || !nodesEqual(m2.base, m.base)) break;
+        if (!m2 || m2.idx !== lastIdx + 1 || m2.idx === 0 || !nodesEqual(m2.base, m.base)) break;
         lastIdx = m2.idx;
         j++;
       }
