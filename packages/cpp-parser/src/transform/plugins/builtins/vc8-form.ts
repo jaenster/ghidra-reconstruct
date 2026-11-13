@@ -51,7 +51,9 @@
  *   own(V,T[,N])         V's initializer is a dead copy Ghidra merged into it: V is
  *                        declared as a T of its own (named N), without it; a cast of V or
  *                        &V to T or T* goes, and the declaration moves onto V's first
- *                        store when that is a plain store in the same block.
+ *                        store when that is a plain store in the same block. Refused when
+ *                        the initializer can be read: a path reaches a read of V, or a
+ *                        call handed &V that is not known to store all of V first.
  *   guards(K[,i])        the i-th early return guarded by `!(c1 && ... && cn)` (or
  *                        `!c1 || ... || !cn`) becomes two: c1..cK, then the rest.
  *   merge-guards([i])    the i-th pair of adjacent early returns of one value becomes one
@@ -337,6 +339,7 @@ import { createExprShape } from './expr-shape.js';
 import { localTypesOf } from './compare-form.js';
 import { calleeName, scopedLookup } from './call-arg-cast.js';
 import { coalesceLocal } from './copy-coalesce.js';
+import { initializerIsDead } from './store-liveness.js';
 
 export type Vc8Form =
   | { op: 'seq'; targets: string[]; index?: number }
@@ -410,7 +413,16 @@ export interface Vc8Accessor {
 }
 
 /** The tables vc8-form reads: select-argument's, and the accessors `acc` writes. */
-export type Vc8FormTables = SelectArgumentOptions & { accessors?: Vc8Accessor[] };
+export type Vc8FormTables = SelectArgumentOptions & {
+  accessors?: Vc8Accessor[];
+  /**
+   * Bytes a callee stores through argument `index` (a non-null `&local`) on every path
+   * before reading it, or null: `own` drops an initializer only a call like that sees.
+   */
+  outParamWidth?: (callee: string, index: number) => number | null;
+  /** Bytes a value of the spelled type occupies, or null. */
+  typeSize?: (spelling: string) => number | null;
+};
 
 export interface Vc8FormSite {
   form: Vc8Form;
@@ -1351,6 +1363,11 @@ function doOwn(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'own' }>): void {
       const init = unparen(d.initializer as Expression);
       const simple = (e: Expression): boolean => { e = unparen(e); return isId(e) || e.kind === NodeKind.IntegerLiteral || e.kind === NodeKind.NullptrLiteral || (e.kind === NodeKind.CStyleCastExpr && simple((e as CStyleCastExpr).expression)); };
       if (!simple(init)) refuse(`${f.name}'s initializer has effects`);
+      // The form says the value is a dead copy; dropping one something reads changes what
+      // the program computes, whatever the tag claims.
+      const width = selectTables?.typeSize?.(text(d.type));
+      const out = selectTables?.outParamWidth && width ? { outWidth: selectTables.outParamWidth, width } : undefined;
+      if (!initializerIsDead(fn.body!, b, k, f.name, out)) refuse(`${f.name}'s initializer is read`);
     }
     d.initializer = null;
     d.type = parseType(f.type);

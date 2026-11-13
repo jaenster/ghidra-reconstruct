@@ -4412,6 +4412,10 @@ function transformDecompiledCode(
         selectTables: {
           ...(perPluginOptions['select-argument'] as SelectArgumentOptions | undefined),
           accessors: context?.accessorTwins,
+          ...(context?.funcPtrArgCasts?.outParams ? {
+            outParamWidth: (callee: string, index: number) => context.funcPtrArgCasts!.outParams!.outParamWidthDocumented(callee, index),
+            typeSize: (spelling: string) => context.funcPtrArgCasts!.outParams!.typeSize(spelling),
+          } : {}),
         },
         onSite: s => {
           if (s.applied) for (const d of s.prefix ?? []) if (!vc8Prefix.includes(d)) vc8Prefix.push(d);

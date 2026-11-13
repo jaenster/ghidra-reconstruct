@@ -3,18 +3,22 @@ import assert from 'node:assert';
 import { parse } from '../../../parser/index.js';
 import { emit } from '../../../emit/index.js';
 import type { AnyNode, TranslationUnit } from '../../../ast/nodes.js';
-import { applyVc8Forms, parseVc8Form, type Vc8FormSite } from '../builtins/vc8-form.js';
+import { applyVc8Forms, parseVc8Form, type Vc8FormSite, type Vc8FormTables } from '../builtins/vc8-form.js';
 
 const flat = (s: string) => s.replace(/\s+/g, ' ').trim();
 
 function run(lines: string[], ...forms: string[]): { out: string; sites: Vc8FormSite[] } {
+  return runWith(undefined, lines, ...forms);
+}
+
+function runWith(tables: Vc8FormTables | undefined, lines: string[], ...forms: string[]): { out: string; sites: Vc8FormSite[] } {
   const sites: Vc8FormSite[] = [];
   const parsed = forms.map(f => {
     const form = parseVc8Form(f);
     assert.ok(form, `parses: ${f}`);
     return { form: form!, tag: f };
   });
-  const tu = applyVc8Forms(parse(lines.join('\n')) as TranslationUnit, parsed, s => sites.push(s));
+  const tu = applyVc8Forms(parse(lines.join('\n')) as TranslationUnit, parsed, s => sites.push(s), tables);
   return { out: flat(emit(tu as AnyNode)), sites };
 }
 
@@ -351,7 +355,7 @@ describe('vc8-form: own', () => {
   });
   // BNDOWNLOAD_WriteFileWithTimestamp 0051e440: the out slot of WriteFile, named apart.
   it('renames and keeps the declaration when no store follows', () => {
-    const { out, sites } = run([
+    const { out, sites } = runWith(outOnly({ WriteFile: 1 }), [
       'void f(LPCSTR pThis, HANDLE h) {',
       '  LPCSTR szCopy = pThis;',
       '  WriteFile(h, (LPDWORD)&szCopy);',
@@ -364,7 +368,84 @@ describe('vc8-form: own', () => {
     const { sites } = run(['void f() {', '  int v = g();', '  v = 0;', '}'], 'own(v,int)');
     assert.strictEqual(sites[0].applied, false);
   });
+  // The form claims the initializer is a dead copy; one that is read stays, whatever the tag says.
+  describe('an initializer something reads', () => {
+    const refused = (r: { out: string; sites: Vc8FormSite[] }, kept: RegExp) => {
+      assert.strictEqual(r.sites[0].applied, false);
+      assert.match(r.sites[0].why ?? '', /initializer is read/);
+      assert.match(r.out, kept);
+    };
+    // ITEMMODE_ConsumeItemAndRemove 00561e70 once the push's copy is gone: the 0 is what
+    // ITEM_SetServerSideFlag ORs its flag into.
+    it('keeps it when &v reaches a call that reads through it', () => {
+      refused(runWith(outOnly({}), [
+        'void f(Unit* pUnit) {',
+        '  uint32_t eFlags = 0;',
+        '  SetFlag(&eFlags, 0x20, 1);',
+        '  Send(pUnit, eFlags);',
+        '}',
+      ], 'own(eFlags,uint32_t)'), /uint32_t eFlags = 0; SetFlag\(&eFlags, 0x20, 1\);/);
+    });
+    it('keeps it when the call is not known to write v first, or is not told at all', () => {
+      const lines = ['void f(Item* pItem) {', '  uint32_t n = (uint32_t)pItem;', '  Load("k", (int32_t*)&n);', '  Use(n);', '}'];
+      refused(run(lines, 'own(n,uint32_t)'), /uint32_t n = \(uint32_t\)pItem;/);
+      refused(runWith(outOnly({ Load: 0 }), lines, 'own(n,uint32_t)'), /uint32_t n = \(uint32_t\)pItem;/);
+    });
+    it('keeps it when an out-parameter call writes fewer bytes than v holds', () => {
+      refused(runWith({ outParamWidth: (c, i) => c === 'Get' && i === 0 ? 2 : null, typeSize: () => 4 },
+        ['void f(int p) {', '  int v = p;', '  Get(&v);', '  Use(v);', '}'], 'own(v,int)'), /int v = p;/);
+    });
+    it('keeps it when the out-parameter call takes another argument with effects', () => {
+      refused(runWith(outOnly({ Get: 0 }), ['void f(int p) {', '  int v = p;', '  Get(&v, g());', '  Use(v);', '}'], 'own(v,int)'), /int v = p;/);
+    });
+    // SUNITNPC_GetActCappedLevel 00576890: the copy of nLevel is what two early returns give back.
+    it('keeps it when a path reads v before the first store', () => {
+      refused(run([
+        'int f(Game* pGame, int nLevel) {',
+        '  int nEffective = nLevel;',
+        '  if (pGame->nDifficulty) {',
+        '    return nEffective;',
+        '  }',
+        '  nEffective = 12;',
+        '  return nEffective;',
+        '}',
+      ], 'own(nEffective,int)'), /int nEffective = nLevel;/);
+    });
+    // SERVER_SEND_MercExperience 0057e860: the level the loop steps from.
+    it('keeps it when the first store reads v', () => {
+      refused(run(['void f(int nMercLevel) {', '  int nLevel = nMercLevel;', '  nLevel = nLevel + 1;', '  Use(nLevel);', '}'], 'own(nLevel,int)'),
+        /int nLevel = nMercLevel;/);
+    });
+    it('keeps it when only one arm overwrites v', () => {
+      refused(run(['void f(int p, int c) {', '  int v = p;', '  if (c) {', '    v = 0;', '  }', '  Use(v);', '}'], 'own(v,int)'), /int v = p;/);
+    });
+    it('keeps it inside a loop that takes the address on another pass round', () => {
+      refused(runWith(outOnly({ Get: 0 }), [
+        'void f(int p) {',
+        '  int* q;',
+        '  while (p) {',
+        '    int v = p;',
+        '    Get(&v);',
+        '    q = &v;',
+        '    Use(*q);',
+        '  }',
+        '}',
+      ], 'own(v,int)'), /int v = p;/);
+    });
+    it('still drops it where every path overwrites v first, through a call or a store', () => {
+      const a = runWith(outOnly({ Get: 0 }), ['void f(int p) {', '  int v = p;', '  if (p) {', '    Get(&v);', '    Use(v);', '  }', '}'], 'own(v,int)');
+      assert.ok(a.sites[0].applied, a.sites[0].why);
+      assert.match(a.out, /int v; if \(p\) \{ Get\(&v\); Use\(v\); \}/);
+      const b = runWith(outOnly({ Get: 0 }), ['void f(int p) {', '  int v = p;', '  int r = Get(&v);', '  Use(v, r);', '}'], 'own(v,int)');
+      assert.ok(b.sites[0].applied, b.sites[0].why);
+    });
+  });
 });
+
+/** Tables whose out-parameters are argument `index` of each named callee, 4 bytes; every local 4 bytes. */
+function outOnly(at: Record<string, number>): Vc8FormTables {
+  return { outParamWidth: (callee, index) => at[callee] === index ? 4 : null, typeSize: () => 4 };
+}
 
 describe('vc8-form: guards and merge-guards', () => {
   // ITEMEVENT_ApplyHitDamage 005cad40: the null tests and the type test return apart.
