@@ -2,7 +2,8 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert';
 import { parse } from '../../../parser/index.js';
 import { emit } from '../../../emit/index.js';
-import type { AnyNode, TranslationUnit } from '../../../ast/nodes.js';
+import type { AnyNode, DeclStmt, FunctionDecl, LambdaExpr, TranslationUnit, VariableDecl } from '../../../ast/nodes.js';
+import { NodeKind } from '../../../ast/kinds.js';
 import { applyVc8Forms, parseVc8Form, type Vc8FormSite, type Vc8FormTables } from '../builtins/vc8-form.js';
 
 const flat = (s: string) => s.replace(/\s+/g, ' ').trim();
@@ -1408,5 +1409,47 @@ describe('vc8-form: opas', () => {
       assert.match(tagged.sites[0].why!, why, source.join('\n'));
       assert.strictEqual(tagged.out, plain.out, source.join('\n'));
     }
+  });
+  it('refuses implicit reference aliases that observe the shifted local', () => {
+    const variants = [
+      'int f(int v) { int& alias = v; return alias + (v >> 1); }',
+      'int f(int v) { const int& alias = v; return alias + (v >> 1); }',
+      'int f(int v) { int&& alias = Move(v); return alias + (v >> 1); }',
+      'int f(int v) { Save(v); return Peek() + (v >> 1); }',
+      'int f(int v) { Save(v); return *saved + (v >> 1); }',
+    ];
+    for (const source of variants) {
+      const plain = run([source]);
+      const tagged = run([source], 'opas(v,>>,1)');
+      assert.strictEqual(tagged.sites[0].applied, false, source);
+      assert.match(tagged.sites[0].why!, /reference aliases|lambda captures|call after the update|memory after the update/, source);
+      assert.strictEqual(tagged.out, plain.out, source);
+    }
+  });
+  it('refuses reference captures represented by the collector AST', () => {
+    // The parser does not read lambdas; other transforms construct this AST.
+    const tu = parse('int f(int v) { Fn read = 0; return read() + (v >> 1); } int body() { return v; }') as TranslationUnit;
+    const fn = tu.declarations[0] as FunctionDecl;
+    const decl = (fn.body!.statements[0] as DeclStmt).declarations[0] as VariableDecl;
+    decl.initializer = {
+      kind: NodeKind.LambdaExpr, captures: [], captureDefault: '&', parameters: [], returnType: null,
+      body: (tu.declarations[1] as FunctionDecl).body!, specifiers: [], location: decl.location,
+    } as LambdaExpr;
+    tu.declarations = [fn];
+    const plain = flat(emit(tu as AnyNode));
+    const sites: Vc8FormSite[] = [];
+    const tag = 'opas(v,>>,1)';
+    const out = applyVc8Forms(tu, [{ form: parseVc8Form(tag)!, tag }], s => sites.push(s));
+    assert.strictEqual(sites[0].applied, false);
+    assert.match(sites[0].why!, /lambda captures/);
+    assert.strictEqual(flat(emit(out as AnyNode)), plain);
+  });
+  it('keeps shifted rvalues callable and accepts a safe reference call before the update', () => {
+    const rvalue = run(['int f(int v) { return Use(v >> 1); }'], 'opas(v,>>,1)');
+    assert.ok(rvalue.sites[0].applied, rvalue.sites[0].why);
+    assert.match(rvalue.out, /v >>= 1; return Use\(v\);/);
+    const before = run(['int f(int v) { Save(v); return v >> 1; }'], 'opas(v,>>,1)');
+    assert.ok(before.sites[0].applied, before.sites[0].why);
+    assert.match(before.out, /Save\(v\); v >>= 1; return v;/);
   });
 });
