@@ -237,7 +237,8 @@ function sites(c: Ctx, maxAnchors: number): string[] {
     }
   }
 
-  // fold, ifsel, split (same type, a new name), width (a type a cast of V names).
+  // fold, ifsel, coalesce (copy-coalesce's proof decides), split (same type, a new name),
+  // width (a type a cast of V names).
   const casts = new Map<string, Set<string>>();
   for (const n of all) {
     if (n.kind !== NodeKind.CStyleCastExpr) continue;
@@ -248,6 +249,8 @@ function sites(c: Ctx, maxAnchors: number): string[] {
     }
   }
   for (const v of locals) {
+    // coalesce before fold: where both print one body, the tag names the proven fold.
+    out.add(`coalesce(${v})`);
     out.add(`fold(${v})`);
     out.add(`ifsel(${v})`);
     if (declarable(vars.get(v))) out.add(`split(${v},${vars.get(v)},${v}_2)`);
