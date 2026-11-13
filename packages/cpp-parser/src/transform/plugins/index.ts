@@ -1005,6 +1005,8 @@ export { labelMacroCollisionPlugin } from './builtins/label-macro-collision.js';
 import { gotoLabelCanonicalPlugin, gotoLabelRestorePlugin } from './builtins/label-canonical.js';
 import { labelUnreferencedDropPlugin } from './builtins/label-unreferenced-drop.js';
 import { deadOutSlotStorePlugin } from './builtins/dead-out-slot-store.js';
+import { loopPhiElementCopyPlugin } from './builtins/loop-phi-element-copy.js';
+export { loopPhiElementCopyPlugin, createLoopPhiElementCopyTransformer, type LoopPhiElementCopyOptions } from './builtins/loop-phi-element-copy.js';
 import { sunkStoreHoistPlugin } from './builtins/sunk-store-hoist.js';
 export { sunkStoreHoistPlugin, hoistSunkStores, findSunkStores, functionEnv, createSunkStoreHoistTransformer, type SunkStore, type SunkStoreEnv, type SunkStoreHoistOptions } from './builtins/sunk-store-hoist.js';
 import { adjShiftedPointerPlugin } from './builtins/adj-shifted-pointer.js';
@@ -1147,6 +1149,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   typeNormalizePlugin,         // Cleanup: uint → uint32_t, undefined4 → auto/uint32_t (priority 15)
   pointerCastNormalizePlugin, // Cleanup: (int)&expr → (intptr_t)&expr, (uint32_t)&expr → (uintptr_t)&expr (priority 16)
   pseudoOpLowerPlugin,        // Cleanup: SUB/CONCAT/ZEXT/SEXT/CARRY/SBORROW → exact C++ (priority 20)
+  loopPhiElementCopyPlugin,   // Correctness: a loop-carried value merged into a local array element, stored by no instruction -> a local (priority 4.5)
   sunkStoreHoistPlugin,       // Correctness: a stack element store sunk past a read through its address -> back before the read (priority 21)
   fourccLiteralPlugin,        // Cleanup: (char[4])L'\x...' → "abcd" (priority 25)
   methodCallRewritePlugin,    // C++ method call rewrite (priority 25, disabled by default)
