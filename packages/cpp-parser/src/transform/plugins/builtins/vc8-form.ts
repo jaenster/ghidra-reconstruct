@@ -54,6 +54,10 @@
  *                        store when that is a plain store in the same block. Refused when
  *                        the initializer can be read: a path reaches a read of V, or a
  *                        call handed &V that is not known to store all of V first.
+ *   own(V,T[,N],live)    the same, dropping an initializer that IS read: only where a VC8
+ *                        compile matched the original's bytes with it dropped, so the
+ *                        original left V uninitialised there too (the permuter writes
+ *                        `live` on a MATCH only).
  *   guards(K[,i])        the i-th early return guarded by `!(c1 && ... && cn)` (or
  *                        `!c1 || ... || !cn`) becomes two: c1..cK, then the rest.
  *   merge-guards([i])    the i-th pair of adjacent early returns of one value becomes one
@@ -347,7 +351,7 @@ export type Vc8Form =
   | { op: 'join'; into: string; from: string }
   | { op: 'coalesce'; name: string; from?: string }
   | { op: 'cache'; expr: string; name: string; type?: string; anchor?: string; count?: number }
-  | { op: 'own'; name: string; type: string; rename?: string }
+  | { op: 'own'; name: string; type: string; rename?: string; live?: boolean }
   | { op: 'guards'; split: number; index: number }
   | { op: 'merge-guards'; index: number }
   | { op: 'retval'; name: string; value: string }
@@ -493,9 +497,14 @@ export function parseVc8Form(text: string): Vc8Form | undefined {
         return { op: 'cache', expr: args[0], name: args[1], type: args[2], anchor: args[3].slice(1), count: int(args[4], NaN) };
       }
       return undefined;
-    case 'own':
-      if (anchor || args.length < 2 || args.length > 3) return undefined;
-      return { op: 'own', name: args[0], type: args[1], rename: args[2] };
+    case 'own': {
+      // `own(V,T[,N],live)`: the initializer is read, and a compile matched the original
+      // with it dropped all the same.
+      const live = args.length > 2 && args[args.length - 1] === 'live';
+      const rest = live ? args.slice(0, -1) : args;
+      if (anchor || rest.length < 2 || rest.length > 3) return undefined;
+      return { op: 'own', name: rest[0], type: rest[1], rename: rest[2], ...(live ? { live: true } : {}) };
+    }
     case 'guards': {
       const k = int(args[0], NaN), i = int(args[1], 1);
       return !anchor && args.length <= 2 && k >= 1 && i >= 1 ? { op: 'guards', split: k, index: i } : undefined;
@@ -1367,7 +1376,7 @@ function doOwn(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'own' }>): void {
       // the program computes, whatever the tag claims.
       const width = selectTables?.typeSize?.(text(d.type));
       const out = selectTables?.outParamWidth && width ? { outWidth: selectTables.outParamWidth, width } : undefined;
-      if (!initializerIsDead(fn.body!, b, k, f.name, out)) refuse(`${f.name}'s initializer is read`);
+      if (!f.live && !initializerIsDead(fn.body!, b, k, f.name, out)) refuse(`${f.name}'s initializer is read`);
     }
     d.initializer = null;
     d.type = parseType(f.type);

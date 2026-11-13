@@ -33,6 +33,8 @@ describe('vc8-form: parsing', () => {
       { op: 'cache', expr: 'p->x < 4 ? p->y : p->z', name: 'n', type: 'int', anchor: undefined });
     assert.deepStrictEqual(parseVc8Form('guards(2)'), { op: 'guards', split: 2, index: 1 });
     assert.deepStrictEqual(parseVc8Form('own(v,DWORD,nBytes)'), { op: 'own', name: 'v', type: 'DWORD', rename: 'nBytes' });
+    assert.deepStrictEqual(parseVc8Form('own(v,DWORD,live)'), { op: 'own', name: 'v', type: 'DWORD', rename: undefined, live: true });
+    assert.deepStrictEqual(parseVc8Form('own(v,DWORD,nBytes,live)'), { op: 'own', name: 'v', type: 'DWORD', rename: 'nBytes', live: true });
   });
   it('rejects an unknown op or a wrong arity', () => {
     assert.strictEqual(parseVc8Form('swap(a,b)'), undefined);
@@ -431,6 +433,13 @@ describe('vc8-form: own', () => {
         '  }',
         '}',
       ], 'own(v,int)'), /int v = p;/);
+    });
+    // UI_SLIDER_InitAutomapMode 0047d3b0: compiled byte-identical with the copy dropped, so
+    // the original left the slot uninitialised; the tag says so with `live`.
+    it('drops it under live, the mark of a matching compile', () => {
+      const r = run(['void f(Item* pItem) {', '  uint32_t n = (uint32_t)pItem;', '  Load("k", (int32_t*)&n);', '  Use(n);', '}'], 'own(n,uint32_t,live)');
+      assert.ok(r.sites[0].applied, r.sites[0].why);
+      assert.strictEqual(r.out, 'void f(Item* pItem) { uint32_t n; Load("k", (int32_t*)&n); Use(n); }');
     });
     it('still drops it where every path overwrites v first, through a call or a store', () => {
       const a = runWith(outOnly({ Get: 0 }), ['void f(int p) {', '  int v = p;', '  if (p) {', '    Get(&v);', '    Use(v);', '  }', '}'], 'own(v,int)');

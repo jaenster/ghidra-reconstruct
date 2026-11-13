@@ -242,8 +242,11 @@ async function main() {
     const frameMode = args.accept === 'frame';
     const frameEq = (x?: Base) => x !== undefined && x.fo !== undefined && x.fo === x.fr;
     /** The target as tried is kept: it matches, or under --accept frame its frame now equals
-     * the original's and it is strictly closer than in the checkout. */
-    const wins = (j: Job, t?: Base) => t !== undefined && (frameMode
+     * the original's and it is strictly closer than in the checkout. An `own(..,live)` drops an
+     * initializer the code reads; only a MATCH proves the original had none, so a set holding
+     * one is kept on a MATCH alone, whatever --accept says. */
+    const liveOwn = (f: string) => /^own\(.*,live\)$/s.test(f.trim());
+    const wins = (j: Job, t: Base | undefined, forms: readonly string[]) => t !== undefined && (frameMode && !forms.some(liveOwn)
       ? !['MISSING', 'QUARANTINE', 'FAIL'].includes(t.st) && frameEq(t) && t.sim > j.base!.sim
       : t.st === 'MATCH');
     /** What a trial costs the TU: every match it loses or function it drops, and under
@@ -382,7 +385,7 @@ async function main() {
     for (const r of res) {
       const [[j, on, form, bodies], ts, sim, gained, lost, tb] = r;
       note(r);
-      if (wins(j, tb) && !lost.size) accepted.push({ job: j, on, forms: [form as string], gained, bodies, sim });
+      if (wins(j, tb, [form as string]) && !lost.size) accepted.push({ job: j, on, forms: [form as string], gained, bodies, sim });
       else if (ts !== 'FAIL' && !lost.size) {
         if (!best.has(j.start)) best.set(j.start, []);
         best.get(j.start)!.push([sim, on, form as string, bodies]);
@@ -430,7 +433,7 @@ async function main() {
       for (const r of res) {
         const [[j, on, forms, bodies], , sim, gained, lost, tb] = r;
         note(r, 'pair');
-        if (wins(j, tb) && !lost.size && !accepted.some(a => a.job.start === j.start)) accepted.push({ job: j, on, forms: forms as string[], gained, bodies, sim });
+        if (wins(j, tb, forms as string[]) && !lost.size && !accepted.some(a => a.job.start === j.start)) accepted.push({ job: j, on, forms: forms as string[], gained, bodies, sim });
       }
     }
 
@@ -446,7 +449,7 @@ async function main() {
       for (let k = 0; k < ctl.length; k++) {
         const a = ctl[k][0], o = objs[k];
         const st = o ? await orc.judge(a.job.tu, o) : new Map();
-        if (wins(a.job, st.get(a.job.start))) a.reject = `phase: ${frameMode ? 'frame and similarity' : 'MATCH'} with dummy externs alone`;
+        if (wins(a.job, st.get(a.job.start), a.forms)) a.reject = `phase: ${frameMode ? 'frame and similarity' : 'MATCH'} with dummy externs alone`;
       }
       comp.drop(objs);
     }
@@ -490,7 +493,7 @@ async function main() {
         // A tag's own target may get further only by not winning, which drops it anyway.
         const targets = new Set(work.get(tu)!.map(a => a.job.start));
         const lost = [...losses(b, st)].filter(s => !targets.has(s) || b.get(s)!.st === 'MATCH');
-        const miss = work.get(tu)!.filter(a => !wins(a.job, st.get(a.job.start)));
+        const miss = work.get(tu)!.filter(a => !wins(a.job, st.get(a.job.start), a.forms));
         if (lost.length || miss.length) {
           const list = work.get(tu)!;
           const drop = miss.length ? miss[miss.length - 1] : list[list.length - 1];
