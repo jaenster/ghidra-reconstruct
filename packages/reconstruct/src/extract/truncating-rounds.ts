@@ -6,7 +6,8 @@
  * Facts count every printed ROUND and select ordinals only after a native proof.
  * They belong to the exact decompile text, through function-facts' hash gate.
  * The proof deliberately recognizes only the VC8 EBP/EAX control-word idiom;
- * unknown encodings, stores, stack pushes and interior flow entries fail closed.
+ * unknown encodings, stores and interior flow entries fail closed. A 32-bit PUSH
+ * also needs a symbolically proven EBP-relative write disjoint from the control words.
  */
 export interface TruncatingRoundSite { ord: number; width: 4 | 8 }
 export interface TruncatingRoundFacts { count: number; sites: TruncatingRoundSite[] }
@@ -17,10 +18,16 @@ class TruncatingRoundInstruction {
   byte[] bytes;
   String mnemonic, destBase;
   boolean flowEntry, fallThrough, boundary;
+  Integer stackWrite;
   TruncatingRoundInstruction(byte[] bytes, String mnemonic, String destBase,
       boolean flowEntry, boolean fallThrough, boolean boundary) {
+    this(bytes,mnemonic,destBase,flowEntry,fallThrough,boundary,null);
+  }
+  TruncatingRoundInstruction(byte[] bytes, String mnemonic, String destBase,
+      boolean flowEntry, boolean fallThrough, boolean boundary, Integer stackWrite) {
     this.bytes=bytes; this.mnemonic=mnemonic; this.destBase=destBase;
     this.flowEntry=flowEntry; this.fallThrough=fallThrough; this.boundary=boundary;
+    this.stackWrite=stackWrite;
   }
 }
 class TruncatingRoundProof {
@@ -40,6 +47,16 @@ class TruncatingRoundProof {
     return java.util.Arrays.equals(b, new byte[]{0x0d,0,0x0c,0,0})
         || java.util.Arrays.equals(b, new byte[]{(byte)0x81,(byte)0xc8,0,0x0c,0,0});
   }
+  boolean push32(byte[] b) {
+    int op = b.length == 0 ? -1 : b[0]&255;
+    return (b.length == 1 && op >= 0x50 && op <= 0x57)
+        || (b.length == 2 && op == 0x6a) || (b.length == 5 && op == 0x68);
+  }
+  // Offsets are x86 address words: byte comparisons also handle wrap at 2^32.
+  boolean overlaps(int a, int an, int b, int bn) {
+    for (int x=0; x<an; x++) for (int y=0; y<bn; y++) if (a+x == b+y) return true;
+    return false;
+  }
   boolean passive(TruncatingRoundInstruction i, boolean protectEax, boolean afterLoad) {
     String m = i.mnemonic.toUpperCase(java.util.Locale.ROOT);
     if (!afterLoad && java.util.Arrays.asList("FLD","FILD","FMUL","FMULP","FADD","FADDP",
@@ -48,7 +65,7 @@ class TruncatingRoundProof {
     if (!java.util.Arrays.asList("MOV","MOVZX","MOVSX","ADD","SUB","AND","OR","XOR",
         "SHR","SHL","SAR","POP").contains(m) || i.destBase == null) return false;
     // Changing EBP invalidates every slot. ESP changes alone do not write memory;
-    // PUSH and every memory destination are excluded above.
+    // PUSH is checked separately and every other memory destination is excluded.
     return !i.destBase.equals("EBP") && (!protectEax || !i.destBase.equals("EAX"));
   }
   int width(java.util.List<TruncatingRoundInstruction> seq) {
@@ -72,10 +89,15 @@ class TruncatingRoundProof {
       if (state == 1 && orTruncate(b)) { state = 2; continue; }
       Integer dest = slot(b,-1,0x89,0);
       if (state == 2 && dest != null) {
-        if ((long)dest < (long)saved+2 && (long)saved < (long)dest+4) return 0;
+        if (overlaps(dest,4,saved,2)) return 0;
         temp = dest; state = 3; continue;
       }
       if (state == 3 && temp.equals(slot(b,-1,0xd9,5))) { state = 4; continue; }
+      if (i.mnemonic.equalsIgnoreCase("PUSH")) {
+        if (!push32(b) || i.stackWrite == null || overlaps(i.stackWrite,4,saved,2)
+            || (temp != null && overlaps(i.stackWrite,4,temp,4))) return 0;
+        continue;
+      }
       if (!passive(i, state == 1 || state == 2, state == 4)) return 0;
     }
     return state == 4 ? width : 0;
@@ -90,6 +112,7 @@ export const TRUNCATING_ROUNDS_JAVA = `
                 && prog.getLanguage().getLanguageID().toString().startsWith("x86:LE:32:")) {
               ${TRUNCATING_ROUND_PROOF_JAVA}
               TruncatingRoundProof proof = new TruncatingRoundProof();
+              ghidra.app.cmd.function.CallDepthChangeInfo usp = null, ubp = null;
               int ucount = 0;
               StringBuilder usites = new StringBuilder();
               for (ghidra.app.decompiler.ClangNode n : toks) {
@@ -113,9 +136,28 @@ export const TRUNCATING_ROUNDS_JAVA = `
                   ghidra.program.model.lang.Register dest = cur.getNumOperands() > 0
                       && ghidra.program.model.lang.OperandType.isRegister(cur.getOperandType(0)) ? cur.getRegister(0) : null;
                   boolean next = following == null || (cur.getFallThrough() != null && cur.getFallThrough().equals(following));
+                  Integer stackWrite = null;
+                  if (cur.getMnemonicString().equalsIgnoreCase("PUSH") && proof.push32(cur.getBytes())) {
+                    if (usp == null && prog.getRegister("EBP") != null) {
+                      usp = new ghidra.app.cmd.function.CallDepthChangeInfo(fn,fn.getBody(),null,mon);
+                      ubp = new ghidra.app.cmd.function.CallDepthChangeInfo(fn,fn.getBody(),prog.getRegister("EBP"),mon);
+                    }
+                    if (usp != null && ubp != null) {
+                      // getDepth records only symbolic stack-space values; getRegDepth also
+                      // accepts absolute register constants and cannot prove a relative write.
+                      int sp = usp.getDepth(cur.getAddress()), bp = ubp.getDepth(cur.getAddress());
+                      if (sp != ghidra.program.model.listing.Function.UNKNOWN_STACK_DEPTH_CHANGE
+                          && sp != ghidra.program.model.listing.Function.INVALID_STACK_DEPTH_CHANGE
+                          && bp != ghidra.program.model.listing.Function.UNKNOWN_STACK_DEPTH_CHANGE
+                          && bp != ghidra.program.model.listing.Function.INVALID_STACK_DEPTH_CHANGE) {
+                        long off = (long)sp - (long)bp - 4;
+                        if (off >= Integer.MIN_VALUE && off <= Integer.MAX_VALUE) stackWrite = (int)off;
+                      }
+                    }
+                  }
                   seq.add(0,new TruncatingRoundInstruction(cur.getBytes(),cur.getMnemonicString(),
                       dest == null ? null : dest.getBaseRegister().getName(),entry,next,
-                      cur.getFlowType().isCall() || cur.getFlowType().isJump() || cur.getFlowType().isTerminal()));
+                      cur.getFlowType().isCall() || cur.getFlowType().isJump() || cur.getFlowType().isTerminal(),stackWrite));
                   if (proof.slot(cur.getBytes(),-1,0xd9,7) != null) break;
                   following = cur.getAddress();
                   cur = L.getInstructionBefore(cur.getAddress());

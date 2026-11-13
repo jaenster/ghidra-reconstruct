@@ -207,7 +207,7 @@
       "function": "00605f00",
       "conversion": "00606824",
       "width": 4,
-      "expected": 0,
+      "expected": 4,
       "instructions": [
         [
           "d97d0e",
@@ -243,7 +243,8 @@
           "6a00",
           "PUSH",
           null,
-          false
+          false,
+          -7204
         ],
         [
           "d96df8",
@@ -255,7 +256,8 @@
           "6a00",
           "PUSH",
           null,
-          false
+          false,
+          -7208
         ],
         [
           "db5df8",
@@ -263,7 +265,8 @@
           null,
           false
         ]
-      ]
+      ],
+      "stackWriteProvenance": "EBP-relative PUSH destinations from Ghidra12.2 symbolic stack-space tracking of the exact native bytes. Scratch import with native-checked __chkstk callfixup and native RET purge sizes; not an owning snapshot export."
     },
     {
       "function": "0061bce0",
