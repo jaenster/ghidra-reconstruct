@@ -1,0 +1,169 @@
+{
+  "source": "ace8cd9bc5aa780ce633526538f5e86e514621ca",
+  "generatorBase": "0b1d6155bb08c82d2a7809bea25cce28b5b0118f",
+  "attribution": "Redivivus contributors, MIT, https://github.com/jaenster/redivivus",
+  "scope": "Published VC8 function definitions. The actual generic backend makes these six functions MATCH in complete calibrated TUs. These are backend regressions, not a complete owning-snapshot generation fixture.",
+  "functions": [
+    {
+      "address": "004cefe0",
+      "name": "MISSILE_CreateRadialBurst",
+      "tu": "Source/D2Client/UNIT/Missile",
+      "originalSize": 359,
+      "definition": "// Spawns a full 360-degree burst of missiles around pUnit using precomputed spread tables (gaRadialBurstMissileSpreadY/X). Iterates 0x40 entries stepping by nStep for the primary ring (velocity from MissileTxt.Param1) and, if nSecondaryCount > 0, a secondary ring of 0x3C entries stepping by nSecondaryCount (velocity from Param2). Copies skill ID and level from the source missile. No-ops for MISSILE_Arrow.\nvoid __fastcall MISSILE_CreateRadialBurst(D2UnitStrc* pUnit, eMissilesId nMissileId, int32_t nSecondaryCount, int32_t nStep, int32_t nSubLoopMult) {\n  static int gaRadialBurstMissileSpreadConst2[16] = {0x2, 0x2, 0x2, 0x1, 0x0, -0x1, -0x2, -0x2, -0x2, -0x2, -0x2, -0x1, 0x0, 0x1, 0x2, 0x2};\n  D2_STATIC_GUARD(gaRadialBurstMissileSpreadConst2, \"D2Client::UNIT::Missile::MISSILE_CreateRadialBurst::gaRadialBurstMissileSpreadConst2\");\n  static int gaRadialBurstMissileSpreadY[16] = {0x0, 0x1, 0x2, 0x2, 0x2, 0x2, 0x2, 0x1, 0x0, -0x1, -0x2, -0x2, -0x2, -0x2, -0x2, -0x1};\n  D2_STATIC_GUARD(gaRadialBurstMissileSpreadY, \"D2Client::UNIT::Missile::MISSILE_CreateRadialBurst::gaRadialBurstMissileSpreadY\");\n  D2MissilesTxt* pMissileTxt;\n  D2SkillArgStrc sSkillArg;\n  if ((int)nMissileId < 0 || (int)nMissileId >= D2Common::ITEMS::Items::sgptDataTable->nTxtMissilesSize) {\n    pMissileTxt = 0;\n  } else {\n    pMissileTxt = D2Common::ITEMS::Items::sgptDataTable->pTxtMissiles + nMissileId;\n  }\n  if (nMissileId == MISSILE_Arrow) {\n    return;\n  }\n  memset(&sSkillArg, 0, 0x5c);\n  sSkillArg.nFlags = 0x17;\n  if (nSubLoopMult > 0) {\n    sSkillArg.nFlags = 0x1f;\n    sSkillArg.nSubLoopMult = nSubLoopMult;\n  }\n  sSkillArg.pOwner = CUnit::MISSILE_GetOwnerUnit(pUnit);\n  eD2UnitType eUnitType = pUnit->eUnitType;\n  sSkillArg.pMissile = pUnit;\n  sSkillArg.nMissileTxtNo = nMissileId;\n  int nXValue;\n  if (eUnitType == UNIT_OBJECT || (int)eUnitType > 3 && (int)eUnitType <= 5) {\n    nXValue = pUnit->pPath.pStaticPath->nPosX;\n  } else if (pUnit->pPath.pDynamicPath) {\n    nXValue = D2Common::PATH::DynamicPath::GetXPos(pUnit->pPath.pDynamicPath);\n  } else {\n    nXValue = 0;\n  }\n  sSkillArg.nX = nXValue;\n  eUnitType = pUnit->eUnitType;\n  int nYValue;\n  if (eUnitType == UNIT_OBJECT || (int)eUnitType > 3 && (int)eUnitType <= 5) {\n    nYValue = pUnit->pPath.pStaticPath->nPosY;\n  } else if (pUnit->pPath.pDynamicPath) {\n    nYValue = D2Common::PATH::DynamicPath::GetYPos(pUnit->pPath.pDynamicPath);\n  } else {\n    nYValue = 0;\n  }\n  sSkillArg.nY = nYValue;\n  sSkillArg.eSkillNo = D2Common::Units::Missile::GetSkillId(pUnit);\n  sSkillArg.nSkillLevel = D2Common::Units::Missile::GetLevel(pUnit);\n  sSkillArg.nVelocityOverride = pMissileTxt->Param1 << 7;\n  if (nStep < 1) {\n    nStep = 1;\n  }\n  int iSpreadIdx = 0;\n  do {\n    sSkillArg.nUnitX = *(int*)((char*)gaRadialBurstMissileSpreadY + iSpreadIdx);\n    sSkillArg.nUnitY = *(int*)((char*)gaRadialBurstMissileSpreadConst2 + iSpreadIdx);\n    Missile::MakeMissile(&sSkillArg);\n    iSpreadIdx += nStep * 4;\n  } while (iSpreadIdx < 0x40);\n  if (nSecondaryCount <= 0) {\n    return;\n  }\n  sSkillArg.nVelocityOverride = pMissileTxt->Param2 << 7;\n  iSpreadIdx = 0;\n  do {\n    sSkillArg.nUnitX = *(int*)((char*)gaRadialBurstMissileSpreadY + iSpreadIdx + 4);\n    sSkillArg.nUnitY = *(int*)((char*)gaRadialBurstMissileSpreadConst2 + iSpreadIdx + 4);\n    Missile::MakeMissile(&sSkillArg);\n    iSpreadIdx += nSecondaryCount * 4;\n  } while (iSpreadIdx < 0x3c);\n}",
+      "expectedStrides": 2
+    },
+    {
+      "address": "004d04d0",
+      "name": "MISSILE_CltHitFn30_FrozenOrb",
+      "tu": "Source/D2Client/UNIT/Missile",
+      "originalSize": 267,
+      "definition": "// Client-side missile hit handler #030: on impact, spawns a fan of CltHitSubMissile1 sub-missiles from the parent missile. Validates pUnit and its missiles.txt row, requires CltHitSubMissile1 set and a resolvable owner. Builds a D2SkillArgStrc (owner/skill/level from the parent missile, txtno=CltHitSubMissile1) and iterates the global Clt030 X/Y spread tables in steps of cHitPar1 (min 1) up to 64 entries; for each MakeMissile call it also seeds the sub-missile's TargetX/TargetY from the spread offset. Always returns 1. __fastcall: pUnit(ECX), pTarget(EDX). pTarget is unused.\nint32_t __fastcall MISSILE_CltHitFn30_FrozenOrb(D2UnitStrc* pUnit, D2UnitStrc* pTarget) {\n  static int gaSubMissileSpreadY_Clt030[64] = {0x0, 0x2, 0x5, 0x8, 0xb, 0xe, 0x10, 0x13, 0x15, 0x17, 0x18, 0x1a, 0x1b, 0x1c, 0x1d, 0x1d, 0x1e, 0x1d, 0x1d, 0x1c, 0x1b, 0x1a, 0x18, 0x17, 0x15, 0x13, 0x10, 0xe, 0xb, 0x8, 0x5, 0x2, 0x0, -0x2, -0x5, -0x8, -0xb, -0xe, -0x10, -0x13, -0x15, -0x17, -0x18, -0x1a, -0x1b, -0x1c, -0x1d, -0x1d, -0x1e, -0x1d, -0x1d, -0x1c, -0x1b, -0x1a, -0x18, -0x17, -0x15, -0x13, -0x10, -0xe, -0xb, -0x8, -0x5, -0x2};\n  D2_STATIC_GUARD(gaSubMissileSpreadY_Clt030, \"D2Client::UNIT::Missile::MISSILE_CltHitFn30_FrozenOrb::gaSubMissileSpreadY_Clt030\");\n  static int gaSubMissileSpreadX_Clt030[64] = {0x1e, 0x1d, 0x1d, 0x1c, 0x1b, 0x1a, 0x18, 0x17, 0x15, 0x13, 0x10, 0xe, 0xb, 0x8, 0x5, 0x2, 0x0, -0x2, -0x5, -0x8, -0xb, -0xe, -0x10, -0x13, -0x15, -0x17, -0x18, -0x1a, -0x1b, -0x1c, -0x1d, -0x1d, -0x1e, -0x1d, -0x1d, -0x1c, -0x1b, -0x1a, -0x18, -0x17, -0x15, -0x13, -0x10, -0xe, -0xb, -0x8, -0x5, -0x2, 0x0, 0x2, 0x5, 0x8, 0xb, 0xe, 0x10, 0x13, 0x15, 0x17, 0x18, 0x1a, 0x1b, 0x1c, 0x1d, 0x1d};\n  D2_STATIC_GUARD(gaSubMissileSpreadX_Clt030, \"D2Client::UNIT::Missile::MISSILE_CltHitFn30_FrozenOrb::gaSubMissileSpreadX_Clt030\");\n  D2UnitStrc* pOwnerUnit;\n  D2UnitStrc* pSubMissile;\n  int nSpreadOffset;\n  int nClassId;\n  D2SkillArgStrc sSkillArg;\n  if (pUnit) {\n    D2MissilesTxt* pMissileTxt;\n    nClassId = pUnit->nClassId;\n    pMissileTxt = nClassId >= 0 && nClassId < D2Common::ITEMS::Items::sgptDataTable->nTxtMissilesSize ? D2Common::ITEMS::Items::sgptDataTable->pTxtMissiles + nClassId : nullptr;\n    if (pMissileTxt && pMissileTxt->CltHitSubMissile1 >= 0) {\n      pOwnerUnit = CUnit::MISSILE_GetOwnerUnit(pUnit);\n      if (!pOwnerUnit) {\n        return 1;\n      }\n      memset(&sSkillArg, 0, 0x5c);\n      sSkillArg.nFlags = 2;\n      sSkillArg.pOwner = pOwnerUnit;\n      sSkillArg.pMissile = pUnit;\n      sSkillArg.eSkillNo = D2Common::Units::Missile::GetSkillId(pUnit);\n      sSkillArg.nSkillLevel = D2Common::Units::Missile::GetLevel(pUnit);\n      sSkillArg.nMissileTxtNo = (eMissilesId)pMissileTxt->CltHitSubMissile1;\n      nClassId = pMissileTxt->cHitPar1;\n      if (nClassId < 1) {\n        nClassId = 1;\n      }\n      nSpreadOffset = 0;\n      do {\n        sSkillArg.nUnitX = *(int*)((char*)gaSubMissileSpreadX_Clt030 + nSpreadOffset);\n        sSkillArg.nUnitY = *(int*)((char*)gaSubMissileSpreadY_Clt030 + nSpreadOffset);\n        pSubMissile = Missile::MakeMissile(&sSkillArg);\n        if (pSubMissile) {\n          D2Common::Units::Missile::SetTargetX(pSubMissile, *(int32_t*)((char*)gaSubMissileSpreadX_Clt030 + nSpreadOffset));\n          D2Common::Units::Missile::SetTargetY(pSubMissile, *(int32_t*)((char*)gaSubMissileSpreadY_Clt030 + nSpreadOffset));\n        }\n        nSpreadOffset += nClassId * 4;\n      } while (nSpreadOffset < 0x100);\n      return 1;\n    }\n  }\n  return 1;\n}",
+      "expectedStrides": 1
+    },
+    {
+      "address": "004d05e0",
+      "name": "MISSILE_CltHitFn04_Unused",
+      "tu": "Source/D2Client/UNIT/Missile",
+      "originalSize": 267,
+      "definition": "// Client-side missile hit handler #004: identical structure to CltHitFunc_030 but uses its own Clt004 spread tables. On impact spawns a fan of CltHitSubMissile1 sub-missiles from the parent. Validates pUnit and its missiles.txt row, requires CltHitSubMissile1 set and a resolvable owner; builds a D2SkillArgStrc (owner/skill/level/txtno=CltHitSubMissile1) and walks the global Clt004 X/Y spread tables in steps of cHitPar1 (min 1) up to 64 entries, calling MakeMissile and seeding each sub-missile's TargetX/TargetY. Always returns 1. __fastcall: pUnit(ECX), pTarget(EDX) unused.\nint32_t __fastcall MISSILE_CltHitFn04_Unused(D2UnitStrc* pUnit, D2UnitStrc* pTarget) {\n  static int gaSubMissileSpreadY_Clt004[64] = {0x0, 0x2, 0x5, 0x8, 0xb, 0xe, 0x10, 0x13, 0x15, 0x17, 0x18, 0x1a, 0x1b, 0x1c, 0x1d, 0x1d, 0x1e, 0x1d, 0x1d, 0x1c, 0x1b, 0x1a, 0x18, 0x17, 0x15, 0x13, 0x10, 0xe, 0xb, 0x8, 0x5, 0x2, 0x0, -0x2, -0x5, -0x8, -0xb, -0xe, -0x10, -0x13, -0x15, -0x17, -0x18, -0x1a, -0x1b, -0x1c, -0x1d, -0x1d, -0x1e, -0x1d, -0x1d, -0x1c, -0x1b, -0x1a, -0x18, -0x17, -0x15, -0x13, -0x10, -0xe, -0xb, -0x8, -0x5, -0x2};\n  D2_STATIC_GUARD(gaSubMissileSpreadY_Clt004, \"D2Client::UNIT::Missile::MISSILE_CltHitFn04_Unused::gaSubMissileSpreadY_Clt004\");\n  static int gaSubMissileSpreadX_Clt004[64] = {0x1e, 0x1d, 0x1d, 0x1c, 0x1b, 0x1a, 0x18, 0x17, 0x15, 0x13, 0x10, 0xe, 0xb, 0x8, 0x5, 0x2, 0x0, -0x2, -0x5, -0x8, -0xb, -0xe, -0x10, -0x13, -0x15, -0x17, -0x18, -0x1a, -0x1b, -0x1c, -0x1d, -0x1d, -0x1e, -0x1d, -0x1d, -0x1c, -0x1b, -0x1a, -0x18, -0x17, -0x15, -0x13, -0x10, -0xe, -0xb, -0x8, -0x5, -0x2, 0x0, 0x2, 0x5, 0x8, 0xb, 0xe, 0x10, 0x13, 0x15, 0x17, 0x18, 0x1a, 0x1b, 0x1c, 0x1d, 0x1d};\n  D2_STATIC_GUARD(gaSubMissileSpreadX_Clt004, \"D2Client::UNIT::Missile::MISSILE_CltHitFn04_Unused::gaSubMissileSpreadX_Clt004\");\n  D2UnitStrc* pOwnerUnit;\n  D2UnitStrc* pSubMissile;\n  int nSpreadOffset;\n  int nClassId;\n  D2SkillArgStrc sSkillArg;\n  if (pUnit) {\n    D2MissilesTxt* pMissileTxt;\n    nClassId = pUnit->nClassId;\n    pMissileTxt = nClassId >= 0 && nClassId < D2Common::ITEMS::Items::sgptDataTable->nTxtMissilesSize ? D2Common::ITEMS::Items::sgptDataTable->pTxtMissiles + nClassId : nullptr;\n    if (pMissileTxt && pMissileTxt->CltHitSubMissile1 >= 0) {\n      pOwnerUnit = CUnit::MISSILE_GetOwnerUnit(pUnit);\n      if (!pOwnerUnit) {\n        return 1;\n      }\n      memset(&sSkillArg, 0, 0x5c);\n      sSkillArg.nFlags = 2;\n      sSkillArg.pOwner = pOwnerUnit;\n      sSkillArg.pMissile = pUnit;\n      sSkillArg.eSkillNo = D2Common::Units::Missile::GetSkillId(pUnit);\n      sSkillArg.nSkillLevel = D2Common::Units::Missile::GetLevel(pUnit);\n      sSkillArg.nMissileTxtNo = (eMissilesId)pMissileTxt->CltHitSubMissile1;\n      nClassId = pMissileTxt->cHitPar1;\n      if (nClassId < 1) {\n        nClassId = 1;\n      }\n      nSpreadOffset = 0;\n      do {\n        sSkillArg.nUnitX = *(int*)((char*)gaSubMissileSpreadX_Clt004 + nSpreadOffset);\n        sSkillArg.nUnitY = *(int*)((char*)gaSubMissileSpreadY_Clt004 + nSpreadOffset);\n        pSubMissile = Missile::MakeMissile(&sSkillArg);\n        if (pSubMissile) {\n          D2Common::Units::Missile::SetTargetX(pSubMissile, *(int32_t*)((char*)gaSubMissileSpreadX_Clt004 + nSpreadOffset));\n          D2Common::Units::Missile::SetTargetY(pSubMissile, *(int32_t*)((char*)gaSubMissileSpreadY_Clt004 + nSpreadOffset));\n        }\n        nSpreadOffset += nClassId * 4;\n      } while (nSpreadOffset < 0x100);\n      return 1;\n    }\n  }\n  return 1;\n}",
+      "expectedStrides": 1
+    },
+    {
+      "address": "005abb00",
+      "name": "Missiles_SrvHitFunc_SpawnSpreadSubMissilesOnFirstFrame",
+      "tu": "Source/D2Game/MISSILES/MissilesMode",
+      "originalSize": 304,
+      "definition": "// Server-side missile hit-function: on the missile's first frame only (CurrentFrame==0), spawns a fan of HitSubMissile1 child missiles in a fixed spread around the impact, stepping through the static spread X/Y offset tables (gaSubMissileSpread*_Srv029) with stride sHitPar1. Each child is created via CreatingMissile and given the spread offset as its target direction. Returns 2 if invoked on a later frame (no-op), 3 after spawning, 1 if missile/owner invalid or HitSubMissile1<0.\nBOOL __fastcall Missiles_SrvHitFunc_SpawnSpreadSubMissilesOnFirstFrame(::SGAMEDATA* pGame, D2UnitStrc* pUnit, D2UnitStrc* pTarget) {\n  static int gaSubMissileSpreadY_Srv029[64] = {0x0, 0x2, 0x5, 0x8, 0xb, 0xe, 0x10, 0x13, 0x15, 0x17, 0x18, 0x1a, 0x1b, 0x1c, 0x1d, 0x1d, 0x1e, 0x1d, 0x1d, 0x1c, 0x1b, 0x1a, 0x18, 0x17, 0x15, 0x13, 0x10, 0xe, 0xb, 0x8, 0x5, 0x2, 0x0, -0x2, -0x5, -0x8, -0xb, -0xe, -0x10, -0x13, -0x15, -0x17, -0x18, -0x1a, -0x1b, -0x1c, -0x1d, -0x1d, -0x1e, -0x1d, -0x1d, -0x1c, -0x1b, -0x1a, -0x18, -0x17, -0x15, -0x13, -0x10, -0xe, -0xb, -0x8, -0x5, -0x2};\n  D2_STATIC_GUARD(gaSubMissileSpreadY_Srv029, \"D2Game::MISSILES::MissilesMode::Missiles_SrvHitFunc_SpawnSpreadSubMissilesOnFirstFrame::gaSubMissileSpreadY_Srv029\");\n  static int gaSubMissileSpreadX_Srv029[64] = {0x1e, 0x1d, 0x1d, 0x1c, 0x1b, 0x1a, 0x18, 0x17, 0x15, 0x13, 0x10, 0xe, 0xb, 0x8, 0x5, 0x2, 0x0, -0x2, -0x5, -0x8, -0xb, -0xe, -0x10, -0x13, -0x15, -0x17, -0x18, -0x1a, -0x1b, -0x1c, -0x1d, -0x1d, -0x1e, -0x1d, -0x1d, -0x1c, -0x1b, -0x1a, -0x18, -0x17, -0x15, -0x13, -0x10, -0xe, -0xb, -0x8, -0x5, -0x2, 0x0, 0x2, 0x5, 0x8, 0xb, 0xe, 0x10, 0x13, 0x15, 0x17, 0x18, 0x1a, 0x1b, 0x1c, 0x1d, 0x1d};\n  D2_STATIC_GUARD(gaSubMissileSpreadX_Srv029, \"D2Game::MISSILES::MissilesMode::Missiles_SrvHitFunc_SpawnSpreadSubMissilesOnFirstFrame::gaSubMissileSpreadX_Srv029\");\n  int nLoopOffset;\n  D2SkillArgStrc sSkillArg;\n  int nClassId;\n  D2MissilesTxt* pMissileTxt = pUnit && (nClassId = pUnit->nClassId) >= 0 && nClassId < D2Common::ITEMS::Items::sgptDataTable->nTxtMissilesSize ? D2Common::ITEMS::Items::sgptDataTable->pTxtMissiles + nClassId : nullptr;\n  if (!(pMissileTxt && pMissileTxt->HitSubMissile1 >= 0)) {\n    return 1;\n  }\n  int32_t nCurrFrame = D2Common::Units::Missile::GetCurrentFrame(pUnit);\n  if (nCurrFrame) {\n    return 2;\n  }\n  D2UnitStrc* pOwnerUnit = UNIT::SUnit::GetOwnerUnit(pGame, pUnit);\n  if (pOwnerUnit) {\n    D2UnitStrc* pUnit_00;\n    memset(&sSkillArg, 0, 0x5c);\n    sSkillArg.nFlags = 2;\n    sSkillArg.pOwner = pOwnerUnit;\n    sSkillArg.pMissile = pUnit;\n    sSkillArg.eSkillNo = D2Common::Units::Missile::GetSkillId(pUnit);\n    sSkillArg.nSkillLevel = D2Common::Units::Missile::GetLevel(pUnit);\n    sSkillArg.nMissileTxtNo = (eMissilesId)pMissileTxt->HitSubMissile1;\n    nClassId = pMissileTxt->sHitPar1;\n    if (nClassId < 1) {\n      nClassId = 1;\n    }\n    nLoopOffset = 0;\n    do {\n      sSkillArg.nUnitX = *(int*)((char*)gaSubMissileSpreadX_Srv029 + nLoopOffset);\n      sSkillArg.nUnitY = *(int*)((char*)gaSubMissileSpreadY_Srv029 + nLoopOffset);\n      pUnit_00 = Missiles::CreatingMissile(pGame, &sSkillArg);\n      if (pUnit_00) {\n        D2Common::Units::Missile::SetTargetX(pUnit_00, *(int32_t*)((char*)gaSubMissileSpreadX_Srv029 + nLoopOffset));\n        D2Common::Units::Missile::SetTargetY(pUnit_00, *(int32_t*)((char*)gaSubMissileSpreadY_Srv029 + nLoopOffset));\n      }\n      nLoopOffset += nClassId * 4;\n    } while (nLoopOffset < 0x100);\n    return 3;\n  }\n  return 1;\n}",
+      "expectedStrides": 1
+    },
+    {
+      "address": "005ac940",
+      "name": "Missiles_SrvHitFunc_SpawnEightDirectionSubMissiles",
+      "tu": "Source/D2Game/MISSILES/MissilesMode",
+      "originalSize": 265,
+      "definition": "// On-hit handler that spawns HitSubMissile1 in up to 8 cardinal/diagonal directions using the precomputed gnMissileSrvSpread8DirTableX/Y tables. Step through the table is controlled by missiles.txt sHitPar1 (minimum 1). Sets each spawned missile's target to its own direction vector. Always returns TRUE.\nBOOL __fastcall Missiles_SrvHitFunc_SpawnEightDirectionSubMissiles(::SGAMEDATA* pGame, D2UnitStrc* pUnit, D2UnitStrc* pTarget) {\n  static int gnMissileSrvSpread8DirTableY[8] = {0x0, 0x10, 0x10, 0x10, 0x0, -0x10, -0x10, -0x10};\n  D2_STATIC_GUARD(gnMissileSrvSpread8DirTableY, \"D2Game::MISSILES::MissilesMode::Missiles_SrvHitFunc_SpawnEightDirectionSubMissiles::gnMissileSrvSpread8DirTableY\");\n  static int gnMissileSrvSpread8DirTableX[8] = {0x10, 0x10, 0x0, -0x10, -0x10, -0x10, 0x0, 0x10};\n  D2_STATIC_GUARD(gnMissileSrvSpread8DirTableX, \"D2Game::MISSILES::MissilesMode::Missiles_SrvHitFunc_SpawnEightDirectionSubMissiles::gnMissileSrvSpread8DirTableX\");\n  D2UnitStrc* pOwnerUnit;\n  int nClassId;\n  D2UnitStrc* pUnit_00;\n  int nLoopOffset;\n  D2SkillArgStrc sSkillArg;\n  if (pUnit) {\n    D2MissilesTxt* pMissileTxt;\n    nClassId = pUnit->nClassId;\n    pMissileTxt = nClassId >= 0 && nClassId < D2Common::ITEMS::Items::sgptDataTable->nTxtMissilesSize ? D2Common::ITEMS::Items::sgptDataTable->pTxtMissiles + nClassId : nullptr;\n    if (pMissileTxt && pMissileTxt->HitSubMissile1 >= 0) {\n      pOwnerUnit = UNIT::SUnit::GetOwnerUnit(pGame, pUnit);\n      if (!pOwnerUnit) {\n        return 1;\n      }\n      memset(&sSkillArg, 0, 0x5c);\n      sSkillArg.nFlags = 2;\n      sSkillArg.pOwner = pOwnerUnit;\n      sSkillArg.pMissile = pUnit;\n      sSkillArg.eSkillNo = D2Common::Units::Missile::GetSkillId(pUnit);\n      sSkillArg.nSkillLevel = D2Common::Units::Missile::GetLevel(pUnit);\n      nClassId = pMissileTxt->sHitPar1;\n      if (nClassId < 1) {\n        nClassId = 1;\n      }\n      nLoopOffset = 0;\n      do {\n        sSkillArg.nUnitX = *(int*)((char*)gnMissileSrvSpread8DirTableX + nLoopOffset);\n        sSkillArg.nUnitY = *(int*)((char*)gnMissileSrvSpread8DirTableY + nLoopOffset);\n        pUnit_00 = Missiles::CreatingMissile(pGame, &sSkillArg);\n        if (pUnit_00) {\n          D2Common::Units::Missile::SetTargetX(pUnit_00, *(int32_t*)((char*)gnMissileSrvSpread8DirTableX + nLoopOffset));\n          D2Common::Units::Missile::SetTargetY(pUnit_00, *(int32_t*)((char*)gnMissileSrvSpread8DirTableY + nLoopOffset));\n        }\n        nLoopOffset += nClassId * 4;\n      } while (nLoopOffset < 0x20);\n      return 1;\n    }\n  }\n  return 1;\n}",
+      "expectedStrides": 1
+    },
+    {
+      "address": "005ccd10",
+      "name": "Skills_SrvDoFunc_099_FireMissileRing8Dir",
+      "tu": "Source/D2Game/SKILLS/SkillMonst",
+      "originalSize": 365,
+      "definition": "// Server skill handler for Fire Ring (8-direction). Validates skill/missile txt records, sets UNITFLAG_SKSRVDOFUNC, then spawns two rings of missiles (inner and outer) at evenly spaced cardinal/diagonal offsets around the caster using calc[0] as damage/speed override and calc[1] as the second-ring missile count. Returns TRUE on success.\nBOOL __fastcall Skills_SrvDoFunc_099_FireMissileRing8Dir(::SGAMEDATA* pGame, D2UnitStrc* pUnit, eD2Skills eSkill, int32_t nSkillLvl) {\n  static int gnSkillMissileCount_FireOrb[16] = {0x2, 0x2, 0x2, 0x1, 0x0, -0x1, -0x2, -0x2, -0x2, -0x2, -0x2, -0x1, 0x0, 0x1, 0x2, 0x2};\n  D2_STATIC_GUARD(gnSkillMissileCount_FireOrb, \"D2Game::SKILLS::SkillMonst::Skills_SrvDoFunc_099_FireMissileRing8Dir::gnSkillMissileCount_FireOrb\");\n  static int gnSkillMissileCount_FireRing[16] = {0x0, 0x1, 0x2, 0x2, 0x2, 0x2, 0x2, 0x1, 0x0, -0x1, -0x2, -0x2, -0x2, -0x2, -0x2, -0x1};\n  D2_STATIC_GUARD(gnSkillMissileCount_FireRing, \"D2Game::SKILLS::SkillMonst::Skills_SrvDoFunc_099_FireMissileRing8Dir::gnSkillMissileCount_FireRing\");\n  D2MissilesTxt* pMissileTxt;\n  int nDirIndex;\n  D2SkillArgStrc sSkillArg;\n  D2SkillsTxt* pSkillsTxt = (int)eSkill >= 0 && (int)eSkill < D2Common::ITEMS::Items::sgptDataTable->nTxtSkillsCount ? D2Common::ITEMS::Items::sgptDataTable->pTxtSkills + eSkill : nullptr;\n  if (!pSkillsTxt) {\n    return 0;\n  }\n  eMissilesId eSrvMissileId = (eMissilesId)pSkillsTxt->srvmissile[1];\n  pMissileTxt = (int)eSrvMissileId >= 0 && (int)eSrvMissileId < D2Common::ITEMS::Items::sgptDataTable->nTxtMissilesSize ? D2Common::ITEMS::Items::sgptDataTable->pTxtMissiles + eSrvMissileId : nullptr;\n  if (pMissileTxt) {\n    int32_t nMissileCount;\n    if (pUnit) {\n      pUnit->eUnitFlags |= UNITFLAG_SKSRVDOFUNC;\n    }\n    memset(&sSkillArg, 0, 0x5c);\n    sSkillArg.nFlags = 0x1f;\n    sSkillArg.pOwner = pUnit;\n    sSkillArg.pMissile = pUnit;\n    sSkillArg.nMissileTxtNo = eSrvMissileId;\n    sSkillArg.nX = D2Common::Units::GetXPosFromDynamicPathUnit(pUnit);\n    sSkillArg.nY = D2Common::Units::GetYPosFromDynamicPathUnit(pUnit);\n    sSkillArg.nSkillLevel = nSkillLvl;\n    sSkillArg.nSubLoopMult = D2Common::Skills::D2GetSkillCalc(pUnit, pSkillsTxt->calc[0], eSkill, nSkillLvl);\n    sSkillArg.nVelocityOverride = pMissileTxt->Param1 << 6;\n    nMissileCount = D2Common::Skills::D2GetSkillCalc(pUnit, pSkillsTxt->calc[1], eSkill, nSkillLvl);\n    if (nMissileCount < 1) {\n      nMissileCount = 1;\n    }\n    nDirIndex = 0;\n    do {\n      sSkillArg.nUnitX = *(int*)((char*)gnSkillMissileCount_FireRing + nDirIndex);\n      sSkillArg.nUnitY = *(int*)((char*)gnSkillMissileCount_FireOrb + nDirIndex);\n      MISSILES::Missiles::CreatingMissile(pGame, &sSkillArg);\n      nDirIndex += 8;\n    } while (nDirIndex < 0x40);\n    sSkillArg.nVelocityOverride = pMissileTxt->Param2 << 6;\n    if (nMissileCount <= 1) {\n      return 1;\n    }\n    nDirIndex = 0;\n    do {\n      sSkillArg.nUnitX = *(int*)((char*)gnSkillMissileCount_FireRing + nDirIndex + 4);\n      sSkillArg.nUnitY = *(int*)((char*)gnSkillMissileCount_FireOrb + nDirIndex + 4);\n      MISSILES::Missiles::CreatingMissile(pGame, &sSkillArg);\n      nDirIndex += nMissileCount * 4;\n    } while (nDirIndex < 0x3c);\n    return 1;\n  }\n  return 0;\n}",
+      "expectedStrides": 1
+    }
+  ],
+  "liveEmitterExample": {
+    "fn": {
+      "name": "MISSILE_CreateRadialBurst",
+      "address": "004cefe0",
+      "entryPoint": "004cefe0",
+      "signature": "void MISSILE_CreateRadialBurst(D2UnitStrc * pUnit, eMissilesId nMissileId, int32_t nSecondaryCount, int32_t nStep, int32_t nSubLoopMult)",
+      "returnType": "void",
+      "callingConvention": "__fastcall",
+      "size": 359,
+      "isThunk": false,
+      "isExternal": false,
+      "hasVarArgs": false,
+      "namespace": "D2Client::UNIT::Missile",
+      "comment": "@function MISSILE_CreateRadialBurst\n@address Game.exe.ram:004cefe0\n@date 2026.06.20\n@calling __fastcall\n@description Spawns a full 360-degree burst of missiles around pUnit using precomputed spread tables (gaRadialBurstMissileSpreadY/X). Iterates 0x40 entries stepping by nStep for the primary ring (velocity from MissileTxt.Param1) and, if nSecondaryCount > 0, a secondary ring of 0x3C entries stepping by nSecondaryCount (velocity from Param2). Copies skill ID and level from the source missile. No-ops for MISSILE_Arrow.",
+      "sourceFile": null,
+      "sourceLine": null,
+      "sourceInfo": null,
+      "parameters": [
+        {
+          "name": "pUnit",
+          "dataType": "D2UnitStrc *",
+          "size": 4,
+          "ordinal": 0,
+          "storage": "ECX:4",
+          "stackOffset": null,
+          "resolvedType": null
+        },
+        {
+          "name": "nMissileId",
+          "dataType": "eMissilesId",
+          "size": 4,
+          "ordinal": 1,
+          "storage": "EDX:4",
+          "stackOffset": null,
+          "resolvedType": null
+        },
+        {
+          "name": "nSecondaryCount",
+          "dataType": "int32_t",
+          "size": 4,
+          "ordinal": 2,
+          "storage": "Stack[0x4]:4",
+          "stackOffset": 4,
+          "resolvedType": null
+        },
+        {
+          "name": "nStep",
+          "dataType": "int32_t",
+          "size": 4,
+          "ordinal": 3,
+          "storage": "Stack[0x8]:4",
+          "stackOffset": 8,
+          "resolvedType": null
+        },
+        {
+          "name": "nSubLoopMult",
+          "dataType": "int32_t",
+          "size": 4,
+          "ordinal": 4,
+          "storage": "Stack[0xc]:4",
+          "stackOffset": 12,
+          "resolvedType": null
+        }
+      ],
+      "localVariables": [
+        {
+          "name": "pMissileTxt",
+          "dataType": "undefined4",
+          "size": 4,
+          "storage": "EBX:4",
+          "stackOffset": null,
+          "resolvedType": "D2MissilesTxt *"
+        },
+        {
+          "name": "iSpreadIdx",
+          "dataType": "undefined4",
+          "size": 4,
+          "storage": "ESI:4",
+          "stackOffset": null,
+          "resolvedType": "int"
+        },
+        {
+          "name": "sSkillArg",
+          "dataType": "D2SkillArgStrc",
+          "size": 92,
+          "storage": "Stack[-0x60]:92",
+          "stackOffset": -96,
+          "resolvedType": null
+        },
+        {
+          "name": "eUnitType",
+          "dataType": "undefined4",
+          "size": 4,
+          "storage": "HASH:5f7e6e9ddb:4",
+          "stackOffset": null,
+          "resolvedType": "eD2UnitType"
+        }
+      ],
+      "tags": null,
+      "decompiled": "\n/* WARNING: Enum \"eCollisionFlags\": Some values do not have unique names */\n/* WARNING: Enum \"eD2TimerType\": Some values do not have unique names */\n/* WARNING: Enum \"eD2TimerTypeDWORD\": Some values do not have unique names */\n/* @function MISSILE_CreateRadialBurst\n   @address Game.exe.ram:004cefe0\n   @date 2026.06.20\n   @calling __fastcall\n   @description Spawns a full 360-degree burst of missiles around pUnit using precomputed spread\n   tables (gaRadialBurstMissileSpreadY/X). Iterates 0x40 entries stepping by nStep for the primary\n   ring (velocity from MissileTxt.Param1) and, if nSecondaryCount > 0, a secondary ring of 0x3C\n   entries stepping by nSecondaryCount (velocity from Param2). Copies skill ID and level from the\n   source missile. No-ops for MISSILE_Arrow. */\n\nvoid __fastcall\nD2Client::UNIT::Missile::MISSILE_CreateRadialBurst\n          (D2UnitStrc *pUnit,eMissilesId nMissileId,int32_t nSecondaryCount,int32_t nStep,\n          int32_t nSubLoopMult)\n\n{\n  D2MissilesTxt *pMissileTxt;\n  int iSpreadIdx;\n  D2SkillArgStrc sSkillArg;\n  eD2UnitType eUnitType;\n  \n  if (((int)nMissileId < 0) ||\n     (D2Common::ITEMS::Items::sgptDataTable->nTxtMissilesSize <= (int)nMissileId)) {\n    pMissileTxt = (D2MissilesTxt *)0x0;\n  }\n  else {\n    pMissileTxt = D2Common::ITEMS::Items::sgptDataTable->pTxtMissiles + nMissileId;\n  }\n  if (nMissileId != MISSILE_Arrow) {\n    compiler::memset(&sSkillArg,0,0x5c);\n    sSkillArg.nFlags = 0x17;\n    if (0 < nSubLoopMult) {\n      sSkillArg.nFlags = 0x1f;\n      sSkillArg.nSubLoopMult = nSubLoopMult;\n    }\n    sSkillArg.pOwner = D2Client::UNIT::CUnit::MISSILE_GetOwnerUnit(pUnit);\n    eUnitType = pUnit->eUnitType;\n    sSkillArg.pMissile = pUnit;\n    sSkillArg.nMissileTxtNo = nMissileId;\n    if ((eUnitType == UNIT_OBJECT) || ((3 < (int)eUnitType && ((int)eUnitType < 6)))) {\n      sSkillArg.nX = ((pUnit->pPath).pStaticPath)->nPosX;\n    }\n    else if ((pUnit->pPath).pDynamicPath == (D2DynamicPathStrc *)0x0) {\n      sSkillArg.nX = 0;\n    }\n    else {\n      sSkillArg.nX = D2Common::PATH::DynamicPath::GetXPos((pUnit->pPath).pDynamicPath);\n    }\n    eUnitType = pUnit->eUnitType;\n    if ((eUnitType == UNIT_OBJECT) || ((3 < (int)eUnitType && ((int)eUnitType < 6)))) {\n      sSkillArg.nY = ((pUnit->pPath).pStaticPath)->nPosY;\n    }\n    else if ((pUnit->pPath).pDynamicPath == (D2DynamicPathStrc *)0x0) {\n      sSkillArg.nY = 0;\n    }\n    else {\n      sSkillArg.nY = D2Common::PATH::DynamicPath::GetYPos((pUnit->pPath).pDynamicPath);\n    }\n    sSkillArg.eSkillNo = D2Common::Units::Missile::GetSkillId(pUnit);\n    sSkillArg.nSkillLevel = D2Common::Units::Missile::GetLevel(pUnit);\n    sSkillArg.nVelocityOverride = pMissileTxt->Param1 << 7;\n    if (nStep < 1) {\n      nStep = 1;\n    }\n    iSpreadIdx = 0;\n    do {\n      sSkillArg.nUnitX = *(int *)((int)gaRadialBurstMissileSpreadY + iSpreadIdx);\n      sSkillArg.nUnitY = *(int *)((int)gaRadialBurstMissileSpreadConst2 + iSpreadIdx);\n      D2Client::UNIT::Missile::MakeMissile(&sSkillArg);\n      iSpreadIdx = iSpreadIdx + nStep * 4;\n    } while (iSpreadIdx < 0x40);\n    if (0 < nSecondaryCount) {\n      sSkillArg.nVelocityOverride = pMissileTxt->Param2 << 7;\n      iSpreadIdx = 0;\n      do {\n        sSkillArg.nUnitX = *(int *)((int)gaRadialBurstMissileSpreadY + iSpreadIdx + 4);\n        sSkillArg.nUnitY = *(int *)((int)gaRadialBurstMissileSpreadConst2 + iSpreadIdx + 4);\n        D2Client::UNIT::Missile::MakeMissile(&sSkillArg);\n        iSpreadIdx = iSpreadIdx + nSecondaryCount * 4;\n      } while (iSpreadIdx < 0x3c);\n    }\n  }\n  return;\n}\n\n"
+    },
+    "options": {
+      "outputDir": "./out",
+      "format": "cpp",
+      "organization": "namespace",
+      "generateCMake": false,
+      "generateSourceMaps": false,
+      "transformPreset": "full",
+      "includeAddressComments": false,
+      "promoteStaticGlobals": false
+    },
+    "scope": "Exact live metadata/decompile through the real resolved-type mapper and full function emitter, with empty optional context. Confirms registry integration; empty-context native baselines do not reproduce the published source forms."
+  }
+}
