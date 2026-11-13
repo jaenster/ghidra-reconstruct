@@ -1255,8 +1255,21 @@ function createPseudoOpLowerTransformer(options: PseudoOpLowerOptions = {}): Tra
     returnTypes: options.functionReturnTypes,
     resolve: options.typedefTargets ? (n: string) => options.typedefTargets![n] : undefined,
   };
+  const volatileTypeSpelling = (spelling: string): boolean => {
+    const seen = new Set<string>(), todo = [spelling];
+    while (todo.length) {
+      const text = todo.pop()!;
+      if (/\bvolatile\b/.test(text)) return true;
+      for (const word of text.match(/[A-Za-z_]\w*/g) ?? []) if (!seen.has(word)) {
+        seen.add(word);
+        const target = options.typedefTargets?.[word];
+        if (target) todo.push(target);
+      }
+    }
+    return false;
+  };
 
-  const lowerBody = (body: ASTNode, localTypes: Map<string, TypeNode>): ASTNode => {
+  const lowerBody = (body: ASTNode, localTypes: Map<string, TypeNode>, declarationCounts: Map<string, number>): ASTNode => {
     const shape = createExprShape(localTypes, tables);
     const classify = (e: Expression): Operand => {
       const x = unwrapParens(e);
@@ -1463,6 +1476,21 @@ function createPseudoOpLowerTransformer(options: PseudoOpLowerOptions = {}): Tra
           localArrays: localArraysOf(body), localArrayPointers: localArrayPointersOf(body),
           stackSlots: options.stackSlots, fieldOffsets: options.structFieldOffsets,
           structFields: options.structFields, aggregateSizes: options.aggregateSizes,
+          declarationCounts,
+          typeIsVolatile: (type: TypeNode) => volatileTypeSpelling(emit(type as AnyNode)),
+          volatileNames: new Set([
+            ...[...localTypes].filter(([, t]) => volatileTypeSpelling(emit(t as AnyNode))).map(([name]) => name),
+            ...Object.entries({ ...options.globalTypes, ...options.enclosingVarTypes })
+              .filter(([name, type]) => !localTypes.has(name) && volatileTypeSpelling(type)).map(([name]) => name),
+          ]),
+          byteArrays: new Set([
+            ...[...localArraysOf(body)].filter(([, a]) => a.elem === 1).map(([name]) => name),
+            ...Object.entries({ ...options.globalTypes, ...options.enclosingVarTypes })
+              .filter(([name, type]) => !localTypes.has(name) && !volatileTypeSpelling(type)
+                && /\[[1-9]\d*\]\s*$/.test(type) && shape({ kind: NodeKind.Identifier, name } as Identifier)?.stars === 1
+                && ['char', 'signed char', 'unsigned char'].includes(shape({ kind: NodeKind.Identifier, name } as Identifier)!.base))
+              .map(([name]) => name),
+          ]),
         };
         const next = lowerStringIntrinsics(
           lowerCarryChains(lowerNegTestConditions(lowerFlagConditions(list, deps), deps), carryDeps), stringDeps);
@@ -1478,15 +1506,20 @@ function createPseudoOpLowerTransformer(options: PseudoOpLowerOptions = {}): Tra
       visitFunctionDecl(fn: FunctionDecl): ASTNode | undefined {
         if (!fn.body) return undefined;
         const localTypes = new Map<string, TypeNode>();
+        const declarationCounts = new Map<string, number>();
         for (const p of fn.parameters) {
           const pd = p as ParameterDecl;
-          if (pd.name) localTypes.set(pd.name.name, pd.type);
+          if (pd.name) {
+            localTypes.set(pd.name.name, pd.type);
+            declarationCounts.set(pd.name.name, (declarationCounts.get(pd.name.name) ?? 0) + 1);
+          }
         }
         for (const d of findNodesByKind(fn.body, NodeKind.VariableDecl)) {
           const v = d as VariableDecl;
           if (!localTypes.has(v.name.name)) localTypes.set(v.name.name, v.type);
+          declarationCounts.set(v.name.name, (declarationCounts.get(v.name.name) ?? 0) + 1);
         }
-        return { ...fn, body: lowerBody(fn.body, localTypes) } as FunctionDecl;
+        return { ...fn, body: lowerBody(fn.body, localTypes, declarationCounts) } as FunctionDecl;
       },
     })(root);
   };
