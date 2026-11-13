@@ -36,6 +36,9 @@
  * `if (i < 0 || i >= T->nSize || !(T->pTxt + i)) return;` (Skills_SrvDoFunc_106 005cd870).
  * Inverting a comparison of the index (an integer) is exact, so this is
  * `if (pre || !(p = getter) || post)`, read through after the branch as a `!`-guard is.
+ * With an else, a `!`-guard's else branch runs only where the getter held, so its reads
+ * route as a plain guard's body does, in an else-if arm too (SUNITMSG state list
+ * `if (i < 0 || i >= T->nSize || !(T->pTxt + i)) .. else if (T->pTxt[i].f & m)`).
  * A switch's or if's condition is read before its body runs, so its reads route even
  * when the body calls (SKILLS_CltProcessActiveSkill 004c7890). `&T->pTxt[i]` takes the
  * address of the record, not of `i`.
@@ -47,8 +50,9 @@
  *     address is never taken; the range tests before it mention `i` and neither call nor
  *     write. The local holds `base + i` exactly when they are true, so testing it is
  *     testing them;
- *   - under `!` the guard has no else and its branch leaves (ends in return, goto or a
- *     halt), so the statements after it run only with the record in range;
+ *   - under `!` without an else the guard's branch leaves (ends in return, goto or a
+ *     halt), so the statements after it run only with the record in range; with an else
+ *     only the else branch's reads route, never the statements after the if;
  *   - a read `base[i]` (also `&base[i]`, `base[i].f`) or `base + i` becomes the local
  *     only up to the first statement that could change `base` or `i` or what `base`
  *     points at: a call (one call whose arguments neither call nor write still has its
@@ -565,8 +569,17 @@ function rewriteFunction(fn: FunctionDecl, opts: RecordGetterGuardOptions): Func
     // so the body's reads go through the record only if none of them can change it.
     const postClean = run.post.every(p => effectsOf(p).calls === 0 && !clobbers(p, g));
     let reads: Statement[] = [];
-    if (negated || failure) {
-      if (!top || ifs.elseBranch || !leaves(ifs.thenBranch)) return null;
+    if ((negated || failure) && ifs.elseBranch) {
+      // The else branch runs only when every test failed, the getter's failure among them:
+      // the getter ran and held, as in the body of a plain guard.
+      if (postClean) {
+        reads = ifs.elseBranch.kind === NodeKind.CompoundStmt
+          ? (ifs.elseBranch as CompoundStmt).statements : [ifs.elseBranch];
+        // A label in it could be reached without the getter having run.
+        if (hasJumpTarget(reads)) return null;
+      }
+    } else if (negated || failure) {
+      if (!top || !leaves(ifs.thenBranch)) return null;
       if (postClean) reads = block.statements.slice(b + 1);
     } else if (postClean) {
       reads = ifs.thenBranch.kind === NodeKind.CompoundStmt
