@@ -3326,6 +3326,21 @@ function transformDecompiledCode(
         rootQualifiedTypedefs: context.funcPtrArgCasts.rootQualifiedTypedefs,
         enclosingVarTypes,
       };
+      // A draw below a limit: the limit's and the result's types decide what the block
+      // computes (seed-roll-limited.ts).
+      perPluginOptions['seed-roll-limited'] = {
+        globalTypes: context.funcPtrArgCasts.globalTypes,
+        fieldTypes: context.funcPtrArgCasts.fieldTypes,
+        structFields: context.funcPtrArgCasts.structFields,
+        typedefTargets: context.funcPtrArgCasts.typedefTargets,
+        functionReturnTypes: context.funcPtrArgCasts.functionReturnTypes,
+        enclosingVarTypes,
+        onSite: (e: { seed: string; limit: string; result: string }) =>
+          console.warn(`[seed-limited] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.result} = D2_SeedRollLimited(${e.seed}, ${e.limit})`),
+        onReject: process.env.D2_SEED_LIMITED_DEBUG
+          ? (e: { line: number; why: string }) => console.warn(`[seed-limited] ${funcAddress ?? '???'} left line ${e.line}: ${e.why}`)
+          : undefined,
+      };
       perPluginOptions['unsigned-range-compare'] = {
         unsignedEnums: context.funcPtrArgCasts.unsignedEnums,
         enumTypes: context.funcPtrArgCasts.enumTypes,

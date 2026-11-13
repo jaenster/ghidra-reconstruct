@@ -752,6 +752,11 @@ export {
 } from './builtins/seed-roll-step.js';
 
 export {
+  seedRollLimitedPlugin,
+  type SeedRollLimitedOptions,
+} from './builtins/seed-roll-limited.js';
+
+export {
   seedProductFoldPlugin,
   foldSeedProducts,
 } from './builtins/seed-product-fold.js';
@@ -877,6 +882,7 @@ import { prngTransformPlugin } from './builtins/prng-transform.js';
 import { seedProductFoldPlugin } from './builtins/seed-product-fold.js';
 import { prngTempCollapsePlugin } from './builtins/prng-temp-collapse.js';
 import { seedRollStepPlugin } from './builtins/seed-roll-step.js';
+import { seedRollLimitedPlugin } from './builtins/seed-roll-limited.js';
 import { bitfieldAccessPlugin } from './builtins/bitfield-access.js';
 import { scalarPieceArithmeticPlugin } from './builtins/scalar-piece-arithmetic.js';
 export { scalarPieceArithmeticPlugin } from './builtins/scalar-piece-arithmetic.js';
@@ -1264,6 +1270,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   prngTransformPlugin,        // Pattern detection: PRNG (priority 80)
   prngTempCollapsePlugin,     // Cleanup: collapse PRNG temp variables (priority 85)
   seedRollStepPlugin,         // Matching: a seed step written back into its seed is the roll call (priority 619.5)
+  seedRollLimitedPlugin,      // Matching: a draw below a limit, if/else on a power of two, is the limited roll (priority 619.6)
   voidReturnCleanupPlugin,    // Cleanup: trailing return; in void functions (priority 90)
   undefinedGotoLabelPlugin,   // Control-flow: define dropped Ghidra goto targets (priority 95)
   underscoreStorageAliasPlugin, // Declaration: bind `_<global>` to the global and `_<crt>(` to the CRT name (priority 599)
