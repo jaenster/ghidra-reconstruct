@@ -19,7 +19,8 @@
  *   tsx candidates.ts dh <snapshot dir> <addrs.json> <out.json>
  *       the generator's decompile hash (vc8formBodyHash) and size per address
  */
-import { readFileSync, writeFileSync, createReadStream } from 'node:fs';
+import { readFileSync, writeFileSync, createReadStream, existsSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { pathToFileURL } from 'node:url';
 import { parse, emit, NodeKind, applyVc8Forms, definitionOf, parseVc8Form, type Vc8Form } from '../../packages/cpp-parser/dist/index.js';
@@ -74,10 +75,20 @@ const accTables: {
   enumValues: Record<string, number>;
   accessors: Vc8Accessor[];
   typedefTargets: Record<string, string>;
-} = { structFields: {}, structLayouts: {}, aggregateMembers: {}, unionNames: [], enumValues: {}, accessors: [], typedefTargets: {} };
+  structFieldOffsets: Record<string, Record<string, number>>;
+  targetLanguageId?: string;
+  targetPointerSize?: number;
+} = { structFields: {}, structLayouts: {}, aggregateMembers: {}, unionNames: [], enumValues: {}, accessors: [], typedefTargets: {}, structFieldOffsets: {} };
 
 function loadTypes(path?: string) {
   if (!path) return;
+  // Target identity comes from the same snapshot as the fields, never a guessed host architecture.
+  const manifest = join(dirname(path), 'manifest.json');
+  if (existsSync(manifest)) {
+    const info = JSON.parse(readFileSync(manifest, 'utf8')).provenance?.programInfo;
+    accTables.targetLanguageId = info?.languageId;
+    accTables.targetPointerSize = info?.pointerSize;
+  }
   for (const l of readFileSync(path, 'utf8').split('\n')) {
     if (!l) continue;
     const t = JSON.parse(l);
@@ -99,6 +110,9 @@ function loadTypes(path?: string) {
       accTables.aggregateMembers[t.name] = [...emittedMemberNames(t)];
       if (t.kind === 'UNION') accTables.unionNames.push(t.name);
     }
+    if (t.fields) accTables.structFieldOffsets[t.name] = Object.fromEntries(t.fields
+      .filter((f: Field) => f.name && Number.isSafeInteger(f.offset) && f.offset! >= 0).map((f: Field) => [f.name, f.offset!]));
+    if (t.underlyingType) accTables.typedefTargets[t.name] = spell(t.underlyingType);
   }
 }
 
@@ -220,6 +234,19 @@ function sites(c: Ctx, maxAnchors: number): string[] {
   // nullfault32: the form checks the sole volatile byte store and its null address.
   if (pr(fn.returnType) === 'void' && fn.parameters.length === 0 && !fn.isVariadic
       && fn.body!.statements.length <= 2) out.add('nullfault32()');
+  // nullfield: a returned field address identifies the base, struct, and field. The form
+  // verifies the fallback offset, target, types, purity, and complete body shape.
+  for (const n of all) {
+    if (n.kind !== NodeKind.ReturnStmt || !n.value) continue;
+    const e = unparen(n.value);
+    if (e.kind !== NodeKind.UnaryExpr || e.operator !== '&') continue;
+    const m = unparen(e.operand);
+    if (m.kind !== NodeKind.MemberExpr || !m.isArrow || m.member?.kind !== NodeKind.Identifier) continue;
+    const t = typeOf(m.object, vars);
+    if (!t?.endsWith('*')) continue;
+    const s = t.slice(0, -1).replace(/^const /, '').trim();
+    if (/^[A-Za-z_]\w*$/.test(s)) out.add(`nullfield(${pr(m.object)},${s},${m.member.name})`);
+  }
   const free = (stem: string) => { for (let k = 0; ; k++) if (!vars.has(`${stem}${k}`)) return `${stem}${k}`; };
 
   // seq: adjacent stores, every other order of each run of two to four.

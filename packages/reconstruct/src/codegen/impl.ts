@@ -567,6 +567,9 @@ export interface ThunkForward {
 }
 
 export interface ImplGenContext {
+  /** Architecture and pointer width of the extracted binary, for target-specific forms. */
+  targetLanguageId?: string;
+  targetPointerSize?: number;
   /**
    * Thunk address → the forwarder's callee. Absent for a thunk whose target
    * Ghidra could not resolve, or which is not emitted anywhere in this tree;
@@ -4443,6 +4446,9 @@ function transformDecompiledCode(
             outParamWidth: (callee: string, index: number) => context.funcPtrArgCasts!.outParams!.outParamWidthDocumented(callee, index),
             typeSize: (spelling: string) => context.funcPtrArgCasts!.outParams!.typeSize(spelling),
           } : {}),
+          structFieldOffsets: context?.funcPtrArgCasts?.structFieldOffsets,
+          targetLanguageId: context?.targetLanguageId,
+          targetPointerSize: context?.targetPointerSize,
         },
         onSite: s => {
           if (s.applied) for (const d of s.prefix ?? []) if (!vc8Prefix.includes(d)) vc8Prefix.push(d);

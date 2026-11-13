@@ -306,6 +306,11 @@
  *                        outside any loop, the address of a local named nowhere before that
  *                        store - a loop copying within one buffer (Fog's D2Net 0040b0c0
  *                        smears zeros forward) is no memcpy.
+ *   nullfield(E,T,F)     `if (C) return &E->F; return (R*)K;` becomes a
+ *                        single integer/offsetof return. Requires a pure C, a plain
+ *                        E of type T*, an exact field offset and result type from the
+ *                        program's type tables, and the literal fallback equal to the
+ *                        field offset. Refuses any other body shape.
  *   dec(V,K)             before the first condition that reads `V - K`, write `V -= K;`
  *                        and use V at every subsequent `V - K` read. V must be one
  *                        unaliased 32-bit integer local, have at least two such reads,
@@ -359,6 +364,8 @@ import { cloneNode } from '../../transformer.js';
 import { buildFunctionFlow } from '../../cfg/index.js';
 import { selectPairedArguments, SelectRefused, type SelectArgumentOptions } from './select-argument.js';
 import { createExprShape } from './expr-shape.js';
+import { shapeOfNode, shapeOfSpelling, sameShape } from './call-arg-cast.js';
+import { isPure } from './pseudo-op-lower.js';
 import { localTypesOf } from './compare-form.js';
 import { calleeName, scopedLookup } from './call-arg-cast.js';
 import { coalesceLocal } from './copy-coalesce.js';
@@ -415,6 +422,7 @@ export type Vc8Form =
   | { op: 'onecall'; cond: string; name: string; index: number }
   | { op: 'roundup'; name: string; param?: string }
   | { op: 'swmerge'; name: string; index: number }
+  | { op: 'nullfield'; expr: string; struct: string; field: string }
   | { op: 'opas'; updates: Array<{ name: string; operator: '+' | '-' | '>>'; constant: string }> }
   | { op: 'dec'; name: string; amount: number }
   | { op: 'range'; cond: string; index: number }
@@ -449,6 +457,9 @@ export type Vc8FormTables = SelectArgumentOptions & RecordWalkTables & {
   outParamWidth?: (callee: string, index: number) => number | null;
   /** Bytes a value of the spelled type occupies, or null. */
   typeSize?: (spelling: string) => number | null;
+  structFieldOffsets?: Record<string, Record<string, number>>;
+  targetLanguageId?: string;
+  targetPointerSize?: number;
 };
 
 export interface Vc8FormSite {
@@ -470,7 +481,7 @@ export interface Vc8FormOptions {
 
 const OPS = new Set(['nullfault32', 'seq', 'fold', 'join', 'coalesce', 'recordwalk', 'cache', 'own', 'guards', 'merge-guards', 'retval', 'branchret', 'width', 'boolflag', 'retwiden', 'arms',
   'nest', 'merge-tail', 'tailguard', 'tailcopy', 'continue', 'dup', 'tarms', 'zero', 'nonzero', 'bool', 'cmp', 'swap', 'ifsel', 'clamp', 'split', 'select', 'decl', 'unselect', 'tsel', 'hoist',
-  'nestcall', 'fill', 'elems', 'copy', 'shift', 'ptrwalk', 'rowptr', 'acc', 'retvar', 'onecall', 'roundup', 'swmerge', 'switch', 'dec', 'opas', 'range', 'castout', 'signbit']);
+  'nestcall', 'fill', 'elems', 'copy', 'shift', 'ptrwalk', 'rowptr', 'acc', 'retvar', 'onecall', 'roundup', 'swmerge', 'switch', 'dec', 'opas', 'range', 'castout', 'signbit', 'nullfield']);
 
 /** Split at commas outside brackets and parentheses. For cache, the third argument is a
  * type, so commas inside its template arguments also belong to that argument. */
@@ -511,6 +522,9 @@ export function parseVc8Form(text: string): Vc8Form | undefined {
     case 'fold': return args.length === 1 && !anchor ? { op: 'fold', name: args[0] } : undefined;
     case 'coalesce': return (args.length === 1 || args.length === 2) && !anchor && args.every(a => /^[A-Za-z_]\w*$/.test(a))
       ? { op: 'coalesce', name: args[0], ...(args[1] ? { from: args[1] } : {}) } : undefined;
+    case 'nullfield':
+      return !anchor && args.length === 3 && args[0] !== '' && /^[A-Za-z_]\w*$/.test(args[1]) && /^[A-Za-z_]\w*$/.test(args[2])
+        ? { op: 'nullfield', expr: args[0], struct: args[1], field: args[2] } : undefined;
     case 'join': return args.length === 2 && !anchor && args.every(a => /^[A-Za-z_]\w*$/.test(a)) && args[0] !== args[1]
       ? { op: 'join', into: args[0], from: args[1] } : undefined;
     case 'cache':
@@ -3587,6 +3601,58 @@ function doAcc(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'acc' }>): void {
   prefixUsed.add(acc.definition);
 }
 
+/** Preserve a null-base field address as the exact x86 integer offset VC8 used. */
+function doNullfield(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'nullfield' }>): void {
+  if (!/^x86:LE:32:/.test(selectTables?.targetLanguageId ?? '') || selectTables?.targetPointerSize !== 4)
+    refuse('nullfield requires a 32-bit x86 target');
+  const statements = fn.body?.statements;
+  if (!statements || statements.length !== 2 || statements[0].kind !== NodeKind.IfStmt || statements[1].kind !== NodeKind.ReturnStmt)
+    refuse('body is not one if and one fallback return');
+  const guard = statements[0] as IfStmt;
+  if (guard.elseBranch || !isPure(guard.condition) || hasCall(guard.condition)) refuse('guard has an else or side effects');
+  const arm = soleReturn(guard.thenBranch);
+  const fallback = statements[1] as ReturnStmt;
+  if (!arm?.value || !fallback.value) refuse('both arms must return values');
+
+  const address = unparen(arm.value);
+  if (address.kind !== NodeKind.UnaryExpr || (address as UnaryExpr).operator !== '&') refuse('true arm is not an address');
+  const member = unparen((address as UnaryExpr).operand);
+  if (member.kind !== NodeKind.MemberExpr) refuse('true arm is not a field address');
+  const m = member as unknown as { object: Expression; member: ASTNode; isArrow: boolean };
+  const base = unparen(m.object);
+  if (!m.isArrow || !isId(m.member, f.field) || text(base) !== norm(f.expr) || !plainPointer(base))
+    refuse('field or plain base pointer does not match');
+
+  const tail = unparen(fallback.value);
+  if (tail.kind !== NodeKind.CStyleCastExpr) refuse('fallback is not a typed offset');
+  const cast = tail as CStyleCastExpr;
+  if (unparen(cast.expression).kind !== NodeKind.IntegerLiteral) refuse('fallback is not a literal offset');
+  const offset = selectTables?.structFieldOffsets?.[f.struct]?.[f.field];
+  const fieldType = selectTables?.structFields?.[f.struct]?.[f.field];
+  if (!Number.isSafeInteger(offset) || offset! <= 0 || !fieldType || constValue(cast.expression) !== BigInt(offset!))
+    refuse('field offset or type is unavailable or differs from fallback');
+
+  const resolve = (n: string) => selectTables?.typedefTargets?.[n];
+  const shapeOf = createExprShape(localTypesOf(fn), {
+    globalTypes: selectTables?.globalTypes ?? {}, enclosingVarTypes: selectTables?.enclosingVarTypes ?? {},
+    structFields: selectTables?.structFields ?? {}, fieldTypes: selectTables?.fieldTypes ?? {},
+    returnTypes: selectTables?.functionReturnTypes ?? {}, resolve,
+  });
+  const baseShape = shapeOf(base);
+  const structShape = shapeOfSpelling(`${f.struct}*`, resolve);
+  const fieldShape = shapeOfSpelling(fieldType, resolve);
+  const resultShape = shapeOfNode(fn.returnType, 0, resolve);
+  const castShape = shapeOfNode(cast.type, 0, resolve);
+  if (!baseShape || !structShape || !sameShape(baseShape, structShape)
+      || !fieldShape || !resultShape || !castShape || !sameShape(resultShape, castShape)
+      || !sameShape(resultShape, { ...fieldShape, stars: fieldShape.stars + 1 }))
+    refuse('base, field, fallback, and result types do not agree');
+
+  const resultType = emit(fn.returnType as never).trim();
+  const [ret] = parseStmts(`return (${resultType})((uint32_t)(uintptr_t)(${emit(guard.condition as never)} ? ${emit(base as never)} : 0) + offsetof(${f.struct}, ${f.field}));`);
+  statements.splice(0, 2, ret);
+}
+
 // ---------------------------------------------------------------------------------------
 // retvar, onecall: a value VC8 held in a register, written as a variable of its own
 
@@ -4510,6 +4576,7 @@ const APPLY: { [K in Vc8Form['op']]: (fn: FunctionDecl, f: Extract<Vc8Form, { op
   cmp: doCmp, swap: doSwap, ifsel: doIfsel, clamp: doClamp, split: doSplit, select: doSelect, decl: doDecl, unselect: doUnselect,
   tsel: doTsel, hoist: doHoist, nestcall: doNestcall, fill: doFill, elems: doElems, copy: doCopy, shift: doShift, ptrwalk: doPtrwalk, rowptr: doRowptr,
   acc: doAcc,
+  nullfield: doNullfield,
   retvar: doRetvar, onecall: doOnecall, roundup: doRoundup, opas: doOpas, swmerge: doSwmerge, dec: doDec, switch: doSwitch,
   range: doRange, castout: doCastout, signbit: doSignbit,
 };
