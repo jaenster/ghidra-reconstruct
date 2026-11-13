@@ -3,7 +3,7 @@
  *
  *   tsx permute.ts --checkout DIR --snapshot SNAP --out OUT [--pool AUDIT] [--sample N] [--seed S]
  *                  [--addrs A,B,...] [--jobs J] [--max-insns K] [--no-pairs] [--no-phase] [--called-helpers]
- *                  [--resume [--group G]] [--oracle-zig BIN] [--ops OP,OP,...]
+ *                  [--resume [--group G]] [--oracle-zig BIN] [--ops OP,OP,...] [--accept match|frame]
  *
  * For each target function (the near-miss pool of an audit.tsv, a sample of it, or --addrs):
  *
@@ -29,6 +29,13 @@
  *      the generator sorts a function's tags (same-op pairs get `ord`).
  *   6. The accepted tags of each TU are compiled together; a tag that loses another
  *      function or its own target there is dropped, the rest compiled again.
+ *
+ * --accept frame keeps a tag that does not reach MATCH: its target's frame (`sub esp, N`) differs
+ * from the original's in the checkout and equals it with the tag, its similarity strictly rises,
+ * and no function of the TU gets further: none stops matching, none loses similarity, none
+ * whose frame was equal stops being equal. The same rule holds the phase control (dummy externs
+ * that alone do the same reject the tag) and the combined compile of a TU's tags. Targets whose
+ * frame already equals the original's are skipped. The default, --accept match, is MATCH only.
  *
  * --ops keeps only the candidates of the named ops (`--ops nest,merge-tail,cache`): one family of
  * forms asked about, at a fraction of the trials.
@@ -95,19 +102,20 @@ const cmpStr = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
 type Target = [number, string, string, string];      // start, name, tu, status
 interface Job {
   start: number; name: string; tu: string; status: string; span: [number, number]; helpers: number[];
-  skip?: string; base?: { st: string; sim: number; simText: string; reg: boolean; calls: string[] };
+  skip?: string; base?: Base;
   ord?: Map<string, Record<string, number>>; phase_scanned?: boolean;
 }
 type Form = string | string[];
 type Bodies = Map<number, string>;
 type Item = [Job, number, Form, Bodies];
-type Res = [Item, string, number, Set<number>, Set<number>];
-interface Accepted { job: Job; on: number; forms: string[]; gained: Set<number>; bodies: Bodies; reject?: string }
+type Res = [Item, string, number, Set<number>, Set<number>, Base | undefined];
+interface Accepted { job: Job; on: number; forms: string[]; gained: Set<number>; bodies: Bodies; sim: number; reject?: string; after?: string }
+type Base = { st: string; sim: number; simText: string; reg: boolean; calls: string[]; fo?: number; fr?: number };
 
 interface Args {
   checkout: string; snapshot: string; out: string; pool?: string; addrs?: string; ops?: string; sample: number; seed: number;
   max_insns: number; jobs: number; max_anchors: number; pair_top: number; no_pairs: boolean; no_phase: boolean; called_helpers: boolean;
-  resume: boolean; group: number; zig: string; ops?: string;
+  resume: boolean; group: number; zig: string; ops?: string; accept: 'match' | 'frame';
 }
 
 function usage(code = 2): never {
@@ -117,8 +125,8 @@ function usage(code = 2): never {
 }
 
 function parseArgs(argv: string[]): Args {
-  const a: Partial<Args> & Record<string, unknown> = { sample: 0, seed: 1, max_insns: 100, jobs: 4, max_anchors: 16, pair_top: 3, no_pairs: false, no_phase: false, called_helpers: false, resume: false, group: 1 };
-  const str: Record<string, keyof Args> = { '--checkout': 'checkout', '--snapshot': 'snapshot', '--out': 'out', '--pool': 'pool', '--addrs': 'addrs', '--oracle-zig': 'zig', '--ops': 'ops', '--forms': 'ops' };
+  const a: Partial<Args> & Record<string, unknown> = { accept: 'match', sample: 0, seed: 1, max_insns: 100, jobs: 4, max_anchors: 16, pair_top: 3, no_pairs: false, no_phase: false, called_helpers: false, resume: false, group: 1 };
+  const str: Record<string, keyof Args> = { '--checkout': 'checkout', '--snapshot': 'snapshot', '--out': 'out', '--pool': 'pool', '--addrs': 'addrs', '--oracle-zig': 'zig', '--ops': 'ops', '--forms': 'ops', '--accept': 'accept' };
   const int: Record<string, keyof Args> = { '--sample': 'sample', '--seed': 'seed', '--max-insns': 'max_insns', '--jobs': 'jobs', '--max-anchors': 'max_anchors', '--pair-top': 'pair_top', '--group': 'group' };
   const flag: Record<string, keyof Args> = { '--no-pairs': 'no_pairs', '--no-phase': 'no_phase', '--called-helpers': 'called_helpers', '--resume': 'resume' };
   for (let i = 0; i < argv.length; i++) {
@@ -133,6 +141,7 @@ function parseArgs(argv: string[]): Args {
     else { if (!/^[-+]?\d+$/.test(v.trim())) usage(); a[int[k]] = parseInt(v, 10) as never; }
   }
   if (!a.checkout || !a.snapshot || !a.out) usage();
+  if (a.accept !== 'match' && a.accept !== 'frame') { process.stderr.write(`--accept is match or frame, not ${a.accept}\n`); usage(); }
   a.zig ??= process.env.ORACLE_ZIG || join(a.checkout, 'asm_matching', 'msvc8', 'zig', 'zig-out', 'bin', 'oracle-zig');
   return a as Args;
 }
@@ -230,10 +239,34 @@ async function main() {
     };
 
     const tus = [...new Set(jobs.map(j => j.tu))].sort(cmpStr);
+    const frameMode = args.accept === 'frame';
+    const frameEq = (x?: Base) => x !== undefined && x.fo !== undefined && x.fo === x.fr;
+    /** The target as tried is kept: it matches, or under --accept frame its frame now equals
+     * the original's and it is strictly closer than in the checkout. */
+    const wins = (j: Job, t?: Base) => t !== undefined && (frameMode
+      ? !['MISSING', 'QUARANTINE', 'FAIL'].includes(t.st) && frameEq(t) && t.sim > j.base!.sim
+      : t.st === 'MATCH');
+    /** What a trial costs the TU: every match it loses or function it drops, and under
+     * --accept frame every function that gets further (less similar, or a frame that was
+     * equal and no longer is). */
+    const losses = (b: Judged, st: Judged): Set<number> => {
+      const stOf = (s: number) => st.get(s)?.st ?? 'MISSING';
+      const lost = new Set([...b.keys()].filter(s => b.get(s)!.st === 'MATCH' && stOf(s) !== 'MATCH'));
+      for (const s of b.keys()) if (!['MISSING', 'QUARANTINE'].includes(b.get(s)!.st) && ['MISSING', 'QUARANTINE'].includes(stOf(s))) lost.add(s);
+      if (frameMode) for (const [s, x] of b) {
+        const y = st.get(s);
+        if (!y || ['MISSING', 'QUARANTINE'].includes(x.st)) continue;
+        if (y.sim < x.sim || (frameEq(x) && !frameEq(y))) lost.add(s);
+      }
+      return lost;
+    };
     const baseObjs = comp.run(tus.map(tu => [tu, trialText(tu, new Map())]));
     const base = new Map<string, Judged>();
     for (let k = 0; k < tus.length; k++) base.set(tus[k], await orc.judge(tus[k], baseObjs[k]));
     comp.drop(baseObjs);
+    if (frameMode && [...base.values()].some(b => [...b.values()].some(x => x.fo === undefined))) {
+      throw new Error(`--accept frame: ${args.zig} judges no frames (an oracle-zig whose judge reports them is needed)`);
+    }
     // Helpers count only where VC8 inlines them: a callee our object still calls keeps
     // its own body. --called-helpers keeps the called ones too: VC8 fits a static callee's
     // register use into its callers, so its body can change theirs (UI_ConfigHandleMouseClick
@@ -290,6 +323,7 @@ async function main() {
       if (diff.length) j.skip = `printing the bodies back changes ${diff.length} function(s), e.g. ${hex8(diff[0])}`;
       j.base = b.get(j.start);
       if (j.base!.st === 'MATCH') j.skip = 'already MATCH in this checkout';
+      else if (frameMode && frameEq(j.base)) j.skip = 'frame already equal in this checkout';
     }
     comp.drop(rtObjs);
 
@@ -321,13 +355,10 @@ async function main() {
         const it = items[k], o = objs[k];
         const j = it[0];
         const b = base.get(j.tu)!;
-        if (o === null) { res.push([it, 'FAIL', 0, new Set(), new Set()]); continue; }
+        if (o === null) { res.push([it, 'FAIL', 0, new Set(), new Set(), undefined]); continue; }
         const st = await orc.judge(j.tu, o);
         const gained = new Set([...st.keys()].filter(s => st.get(s)!.st === 'MATCH' && b.get(s)!.st !== 'MATCH'));
-        const stOf = (s: number) => st.get(s)?.st ?? 'MISSING';
-        const lost = new Set([...b.keys()].filter(s => b.get(s)!.st === 'MATCH' && stOf(s) !== 'MATCH'));
-        for (const s of b.keys()) if (!['MISSING', 'QUARANTINE'].includes(b.get(s)!.st) && ['MISSING', 'QUARANTINE'].includes(stOf(s))) lost.add(s);
-        res.push([it, st.get(j.start)!.st, st.get(j.start)!.sim, gained, lost]);
+        res.push([it, st.get(j.start)!.st, st.get(j.start)!.sim, gained, losses(b, st), st.get(j.start)]);
       }
       comp.drop(objs);
       return res;
@@ -349,9 +380,9 @@ async function main() {
     const adds = new Map<string, number>();
     for (const j of live) for (const on of [j.start, ...j.helpers]) for (const c of cands.get(fid(j.tu, on)).candidates) adds.set(`${fid(j.tu, on)}\0${c.form}`, c.adds);
     for (const r of res) {
-      const [[j, on, form, bodies], ts, sim, gained, lost] = r;
+      const [[j, on, form, bodies], ts, sim, gained, lost, tb] = r;
       note(r);
-      if (ts === 'MATCH' && !lost.size) accepted.push({ job: j, on, forms: [form as string], gained, bodies });
+      if (wins(j, tb) && !lost.size) accepted.push({ job: j, on, forms: [form as string], gained, bodies, sim });
       else if (ts !== 'FAIL' && !lost.size) {
         if (!best.has(j.start)) best.set(j.start, []);
         best.get(j.start)!.push([sim, on, form as string, bodies]);
@@ -397,9 +428,9 @@ async function main() {
       res = await runTrials(pairItems);
       log(`pairs: ${pairItems.length} trials (${fixed(now() - t3, 0)}s)`);
       for (const r of res) {
-        const [[j, on, forms, bodies], ts, , gained, lost] = r;
+        const [[j, on, forms, bodies], , sim, gained, lost, tb] = r;
         note(r, 'pair');
-        if (ts === 'MATCH' && !lost.size && !accepted.some(a => a.job.start === j.start)) accepted.push({ job: j, on, forms: forms as string[], gained, bodies });
+        if (wins(j, tb) && !lost.size && !accepted.some(a => a.job.start === j.start)) accepted.push({ job: j, on, forms: forms as string[], gained, bodies, sim });
       }
     }
 
@@ -415,17 +446,18 @@ async function main() {
       for (let k = 0; k < ctl.length; k++) {
         const a = ctl[k][0], o = objs[k];
         const st = o ? await orc.judge(a.job.tu, o) : new Map();
-        if ((st.get(a.job.start)?.st ?? '?') === 'MATCH') a.reject = 'phase: MATCH with dummy externs alone';
+        if (wins(a.job, st.get(a.job.start))) a.reject = `phase: ${frameMode ? 'frame and similarity' : 'MATCH'} with dummy externs alone`;
       }
       comp.drop(objs);
     }
     for (const a of accepted) if (a.reject) log(`reject ${hex8(a.job.start)} ${pyTuple(a.forms)}: ${a.reject}`);
     accepted = accepted.filter(a => !a.reject);
-    // One tag set per target: the one with the most gains, singles before pairs, then fewest forms.
+    // One tag set per target: the one with the most gains, then the most similar (every
+    // MATCH is 1), singles before pairs, then fewest forms.
     const pick = new Map<number, Accepted>();
     for (const a of accepted) {
       const k = a.job.start, p = pick.get(k);
-      if (!p || a.gained.size > p.gained.size || (a.gained.size === p.gained.size && -a.forms.length > -p.forms.length)) pick.set(k, a);
+      if (!p || a.gained.size > p.gained.size || (a.gained.size === p.gained.size && (a.sim > p.sim || (a.sim === p.sim && -a.forms.length > -p.forms.length)))) pick.set(k, a);
     }
     accepted = [...pick.values()].sort((x, y) => x.job.start - y.job.start);
 
@@ -455,14 +487,19 @@ async function main() {
         const tu = todo[k], o = objs[k];
         const b = base.get(tu)!;
         const st: Judged = o ? await orc.judge(tu, o) : new Map();
-        const lost = [...b.keys()].filter(s => b.get(s)!.st === 'MATCH' && (st.get(s)?.st ?? 'MISSING') !== 'MATCH');
-        const miss = work.get(tu)!.filter(a => (st.get(a.job.start)?.st ?? '?') !== 'MATCH');
+        // A tag's own target may get further only by not winning, which drops it anyway.
+        const targets = new Set(work.get(tu)!.map(a => a.job.start));
+        const lost = [...losses(b, st)].filter(s => !targets.has(s) || b.get(s)!.st === 'MATCH');
+        const miss = work.get(tu)!.filter(a => !wins(a.job, st.get(a.job.start)));
         if (lost.length || miss.length) {
           const list = work.get(tu)!;
           const drop = miss.length ? miss[miss.length - 1] : list[list.length - 1];
           list.splice(list.indexOf(drop), 1);
           log(`combined: ${tu} drops ${hex8(drop.job.start)} ${pyTuple(drop.forms)}`);
-        } else done.set(tu, new Set([...st.keys()].filter(s => st.get(s)!.st === 'MATCH' && b.get(s)!.st !== 'MATCH')));
+        } else {
+          done.set(tu, new Set([...st.keys()].filter(s => st.get(s)!.st === 'MATCH' && b.get(s)!.st !== 'MATCH')));
+          for (const a of work.get(tu)!) { const t = st.get(a.job.start)!; a.after = frameMode ? `${t.st}@${t.simText}` : t.st; }
+        }
       }
       comp.drop(objs);
     }
@@ -490,12 +527,13 @@ async function main() {
       if (d === undefined) { log(`no snapshot function at ${hex8(on)}`); continue; }
       const ords: Record<string, number> = a.forms.length > 1 ? (j.ord?.get(a.forms.join('\0')) ?? {}) : {};
       for (const f of a.forms) {
-        const row = `${hex8(on)}\t${d.name}\t${f}\t${hex8(j.start)}\t${j.base!.st}\tMATCH\t${hexList(a.gained)}\t\tvc8-sp1 ${args.checkout.endsWith('/') ? '' : basename(args.checkout)}`;
+        const before = frameMode ? `${j.base!.st}@${j.base!.simText}` : j.base!.st;
+        const row = `${hex8(on)}\t${d.name}\t${f}\t${hex8(j.start)}\t${before}\t${a.after ?? 'MATCH'}\t${hexList(a.gained)}\t\tvc8-sp1 ${args.checkout.endsWith('/') ? '' : basename(args.checkout)}`;
         ev += row + '\n';
         const evh = createHash('sha256').update(row, 'utf8').digest('hex').slice(0, 10);
         let data = `${f};ev=${evh};bh=${await orc.bh(on, d.size)};dh=${d.dh}`;
         if (Object.prototype.hasOwnProperty.call(ords, f)) data += `;ord=${ords[f]}`;
-        tags += `${hex8(on)}\t${d.name}\tvc8form:${data}\t${a.gained.size}\t0\t${f.split('(')[0]}\t${hex8(j.start)}\t${j.base!.st}->MATCH\t${d.tags.length}\n`;
+        tags += `${hex8(on)}\t${d.name}\tvc8form:${data}\t${a.gained.size}\t0\t${f.split('(')[0]}\t${hex8(j.start)}\t${before}->${a.after ?? 'MATCH'}\t${d.tags.length}\n`;
       }
     }
     writeFileSync(join(out, 'tags.tsv'), tags);
@@ -513,7 +551,7 @@ async function main() {
     const wall = now() - t0;
     const lines = [
       `targets ${jobs.length}, skipped ${jobs.length - live.length} (${[...skips].map(([k, v]) => `${k} ${v}`).join(', ')})`,
-      `targets reaching MATCH alone: ${accepted.length} (singles ${accepted.filter(a => a.forms.length === 1).length}, pairs ${accepted.filter(a => a.forms.length > 1).length})`,
+      `targets ${frameMode ? 'whose frame equals the original\'s, closer,' : 'reaching MATCH'} alone: ${accepted.length} (singles ${accepted.filter(a => a.forms.length === 1).length}, pairs ${accepted.filter(a => a.forms.length > 1).length})`,
       `kept together: ${final.length} tag sets (${nSingle} single), MATCH gained together ${combinedGain}`,
       `wall ${fixed(wall, 0)}s, ${fixed(wall / Math.max(1, jobs.length), 1)}s per target, ${comp.n} compiles`,
     ];
@@ -629,7 +667,7 @@ async function resumeRun(args: Args, targets: Target[], run: RunFn, comp: Compil
     let o = '';
     for (const [start, name, , status] of step) {
       const j = byStart.get(start);
-      const outcome = won.has(start) ? 'MATCH ' + won.get(start) : j && j.skip !== undefined ? 'skip: ' + j.skip : j ? 'none' : 'skip: no definition';
+      const outcome = won.has(start) ? (args.accept === 'frame' ? 'FRAME ' : 'MATCH ') + won.get(start) : j && j.skip !== undefined ? 'skip: ' + j.skip : j ? 'none' : 'skip: no definition';
       o += `${hex8(start)}\t${name}\t${status}\t${outcome.replace(/\t/g, ' ')}\t${fixed(secs / step.length, 0)}\t${at}\n`;
     }
     appendFileSync(donePath, o);
