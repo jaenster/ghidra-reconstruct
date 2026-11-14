@@ -13,6 +13,13 @@
  *
  * The forms (each argument is printed text; whitespace is ignored when comparing):
  *
+ *   keepstore(L[,i])     keep the i-th existing zero store to L through a volatile
+ *                        destination access. L must be a scalar arrow-member of a known
+ *                        local/parameter pointer, overwritten in a same-object store run.
+ *                        Requires field layouts; refuses bitfields, overlapping stores,
+ *                        calls, branches and uncertain values. Never adds a store. Opt-in
+ *                        only: native-byte evidence must show the original performs it.
+ *
  *   seq(L1,...,Ln)       the run of statements that store to (or declare and initialize)
  *                        L1..Ln, adjacent in one block and not in this order yet, is
  *                        written in the listed order. Refused when no run or more than
@@ -395,10 +402,12 @@ import { isPure } from './pseudo-op-lower.js';
 import { localTypesOf } from './compare-form.js';
 import { calleeName, scopedLookup } from './call-arg-cast.js';
 import { coalesceLocal } from './copy-coalesce.js';
+import { keepZeroStore, type KeepStoreTables } from './keep-store.js';
 import { initializerIsDead } from './store-liveness.js';
 import { recordWalk, type RecordWalkTables } from './record-walk.js';
 
 export type Vc8Form =
+  | { op: 'keepstore'; expr: string; index: number }
   | { op: 'nullfault32' }
   | { op: 'seq'; targets: string[]; index?: number }
   | { op: 'fold'; name: string }
@@ -478,7 +487,7 @@ export interface Vc8Accessor {
 }
 
 /** The tables vc8-form reads: select-argument's, and the accessors `acc` writes. */
-export type Vc8FormTables = SelectArgumentOptions & RecordWalkTables & {
+export type Vc8FormTables = SelectArgumentOptions & KeepStoreTables & RecordWalkTables & {
   accessors?: Vc8Accessor[];
   /**
    * Bytes a callee stores through argument `index` (a non-null `&local`) on every path
@@ -509,7 +518,7 @@ export interface Vc8FormOptions {
   selectTables?: Vc8FormTables;
 }
 
-const OPS = new Set(['nullfault32', 'seq', 'fold', 'join', 'coalesce', 'recordwalk', 'cache', 'own', 'guards', 'merge-guards', 'retval', 'branchret', 'width', 'boolflag', 'retwiden', 'arms',
+const OPS = new Set(['nullfault32', 'seq', 'fold', 'join', 'coalesce', 'keepstore', 'recordwalk', 'cache', 'own', 'guards', 'merge-guards', 'retval', 'branchret', 'width', 'boolflag', 'retwiden', 'arms',
   'nest', 'merge-tail', 'tailguard', 'tailcopy', 'continue', 'dup', 'tarms', 'zero', 'nonzero', 'bool', 'cmp', 'swap', 'ifsel', 'clamp', 'split', 'select', 'decl', 'unselect', 'tsel', 'hoist',
   'nestcall', 'fill', 'elems', 'copy', 'shift', 'ptrwalk', 'rowptr', 'acc', 'retvar', 'onecall', 'roundup', 'swmerge', 'switch', 'dec', 'opas', 'range', 'castout', 'signbit', 'nullfield', 'zinit', 'znew', 'swclamp', 'retbase']);
 
@@ -543,6 +552,8 @@ export function parseVc8Form(text: string): Vc8Form | undefined {
   const anchor = args.length > 0 && args[args.length - 1].startsWith('@') ? args.pop()!.slice(1) : undefined;
   const int = (s: string | undefined, d: number) => (s === undefined || s === '' ? d : /^\d+$/.test(s) ? Number(s) : NaN);
   switch (m[1]) {
+    case 'keepstore': return !anchor && (args.length === 1 || args.length === 2) && args[0] !== '' && int(args[1], 1) >= 1
+      ? { op: 'keepstore', expr: args[0], index: int(args[1], 1) } : undefined;
     case 'nullfault32': return args.length === 0 && !anchor ? { op: 'nullfault32' } : undefined;
     case 'seq': {
       // `seq(a,b,@N)`: the N-th run, when several store these.
@@ -4792,6 +4803,7 @@ function doRetbase(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'retbase' }>): vo
 }
 
 const APPLY: { [K in Vc8Form['op']]: (fn: FunctionDecl, f: Extract<Vc8Form, { op: K }>) => void } = {
+  keepstore: (fn, f) => { const why = keepZeroStore(fn, f.expr, f.index, selectTables); if (why) refuse(why); },
   nullfault32: doNullfault32,
   seq: doSeq, fold: doFold, join: doJoin, coalesce: doCoalesce, recordwalk: doRecordwalk, cache: doCache, own: doOwn, guards: doGuards, 'merge-guards': doMergeGuards,
   retval: doRetval, branchret: doBranchret, width: doWidth, boolflag: doBoolflag, retwiden: doRetwiden, arms: doArms,

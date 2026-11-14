@@ -249,6 +249,20 @@ function sites(c: Ctx, maxAnchors: number): string[] {
   }
   const free = (stem: string) => { for (let k = 0; ; k++) if (!vars.has(`${stem}${k}`)) return `${stem}${k}`; };
 
+  // keepstore only offers existing standalone member zero stores; application proves
+  // the owning layout and the uninterrupted overwrite before it writes a candidate.
+  const zeroCounts = new Map<string, number>();
+  for (const b of blocks) for (const s of b.statements as N[]) {
+    const a = s.kind === NodeKind.ExprStmt ? unparen(s.expression) : undefined;
+    const lhs = a?.kind === NodeKind.AssignExpr && a.operator === '=' ? unparen(a.left) : undefined;
+    const rhs = lhs ? unparen(a.right) : undefined;
+    if (lhs?.kind !== NodeKind.MemberExpr || !lhs.isArrow || lhs.member.kind !== NodeKind.Identifier
+        || unparen(lhs.object).kind !== NodeKind.Identifier || rhs?.kind !== NodeKind.IntegerLiteral || rhs.value !== 0n) continue;
+    const expr = pr(lhs), n = (zeroCounts.get(expr) ?? 0) + 1;
+    zeroCounts.set(expr, n);
+    out.add(`keepstore(${expr},${n})`);
+  }
+
   // seq: adjacent stores, every other order of each run of two to four.
   const seqRuns: string[][] = [];
   for (const b of blocks) {
