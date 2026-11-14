@@ -339,3 +339,136 @@ describe('ratchet: in the generator', () => {
     }
   });
 });
+
+describe('ratchet: attributes and specifiers before a definition', () => {
+  // 00449bf0 at deploy 1166: an inline host `__attribute__((noinline)) inline void ..` was
+  // read as a function named `__attribute__` whose parameter list is `(noinline)`.
+  const NET_H = `#pragma once
+namespace Game::Net {
+__attribute__((noinline)) inline void __stdcall SetJoinResult(int32_t nResult); // 1.14d: 00449bf0
+}
+`;
+  const NET_INLINE = (g: string, extra = '') => `namespace Game::Net {
+
+// 1.14d: 00449bf0
+__attribute__((noinline)) inline void __stdcall SetJoinResult(int32_t nResult) {
+    ${g} = nResult${extra};
+}
+
+} // namespace Game::Net
+`;
+  const globals = (g: string) => `# address\tqualified name\ttype\n0079929c\tGame::Net::${g}\tint32_t\n`;
+  const netTree = (g: string, extra = '') => SymbolIndex.build(memoryTree(new Map([
+    ['Source/G/Net.h', NET_H],
+    ['Source/G/Net.inline.h', NET_INLINE(g, extra)],
+    [GLOBALS_INDEX_FILE, globals(g)],
+  ])));
+
+  it('reads the name, parameter types and return type past the attribute group', () => {
+    const ix = netTree('gnJoinResult');
+    const info = ix.fnByAddr.get('00449bf0')!;
+    assert.strictEqual(info.qname, 'Game::Net::SetJoinResult');
+    assert.deepStrictEqual(info.params, ['nResult']);
+    assert.deepStrictEqual(info.paramTypes, ['int32_t']);
+    assert.strictEqual(info.retText, 'void');
+    const rec = record(ix, '00449bf0');
+    assert.strictEqual(rec.members[0].name, 'Game::Net::SetJoinResult');
+    assert.deepStrictEqual(rec.members[0].paramTypes, ['int32_t']);
+    assert.strictEqual(rec.members[0].ret, 'void');
+  });
+
+  it('skips __declspec, [[..]], static and an attribute between the return type and the name', () => {
+    const ix = SymbolIndex.build(memoryTree(new Map([['Source/G/A.cpp', `namespace G {
+// 1.14d: 00401000
+__declspec(noinline) static int __fastcall A(char * p, int n) {
+    return n;
+}
+// 1.14d: 00401100
+[[nodiscard]] extern int * __attribute__((always_inline)) B(int n) {
+    return 0;
+}
+}
+`]])));
+    const a = ix.fnByAddr.get('00401000')!;
+    assert.strictEqual(a.qname, 'G::A');
+    assert.deepStrictEqual(a.paramTypes, ['char *', 'int']);
+    assert.strictEqual(a.retText, 'int');
+    const b = ix.fnByAddr.get('00401100')!;
+    assert.strictEqual(b.qname, 'G::B');
+    assert.deepStrictEqual(b.paramTypes, ['int']);
+    assert.strictEqual(b.retText, 'int *');
+    assert.deepStrictEqual(b.ret, { base: 'int', ptr: 1 });
+  });
+
+  it('keeps the body through a changed text, never under #if 0', () => {
+    const rec = record(netTree('gnJoinResult'), '00449bf0');
+    // The global renamed and the generator spelling the body differently.
+    const now = netTree('gnD2GSJoinResult', ' + 0');
+    const out = applyRecords(now, [rec]);
+    assert.strictEqual(row(out.rows, '00449bf0').status, 'kept', row(out.rows, '00449bf0').detail);
+    const kept = body(now, out, '00449bf0');
+    assert.ok(kept.includes('gnD2GSJoinResult = nResult;'), kept);
+    assert.ok(!out.changed.get('Source/G/Net.inline.h')!.includes('#if 0'));
+  });
+
+  it('re-reads the types of a record captured with the attribute misparsed', () => {
+    const rec = record(netTree('gnJoinResult'), '00449bf0');
+    // What the scanner stored before: the attribute's parentheses as the parameter list.
+    Object.assign(rec.members[0], { name: 'Game::Net::__attribute__', paramTypes: ['( noinline )'], ret: '' });
+    const now = netTree('gnD2GSJoinResult', ' + 0');
+    const out = applyRecords(now, [rec]);
+    assert.strictEqual(row(out.rows, '00449bf0').status, 'kept', row(out.rows, '00449bf0').detail);
+    assert.ok(body(now, out, '00449bf0').includes('gnD2GSJoinResult = nResult;'));
+    assert.ok(!out.changed.get('Source/G/Net.inline.h')!.includes('#if 0'));
+    // A real retype is still reported.
+    const retyped = SymbolIndex.build(memoryTree(new Map([
+      ['Source/G/Net.h', NET_H.replace('int32_t nResult', 'uint8_t nResult')],
+      ['Source/G/Net.inline.h', NET_INLINE('gnD2GSJoinResult', ' + 0').replace('int32_t nResult', 'uint8_t nResult')],
+      [GLOBALS_INDEX_FILE, globals('gnD2GSJoinResult')],
+    ])));
+    const r2 = applyRecords(retyped, [rec]);
+    assert.strictEqual(row(r2.rows, '00449bf0').status, 'unresolved');
+    assert.match(row(r2.rows, '00449bf0').detail, /parameter 0 retyped: int32_t -> uint8_t/u);
+  });
+
+  it('refreshes a misparsed record on advance even when its text is unchanged', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ratchet-test-'));
+    try {
+      const store = new RatchetStore(dir);
+      const ix = netTree('gnJoinResult');
+      const rec = record(ix, '00449bf0');
+      Object.assign(rec.members[0], { name: 'Game::Net::__attribute__', paramTypes: ['( noinline )'], ret: '' });
+      store.put(rec);
+      const audit = readAudit(`start\tend\tname\ttu\tmethod\tref_insns\tour_insns\tbyte_diffs\tsimilarity\tstatus\n00449bf0\t0\tSetJoinResult\tt\tm\t1\t1\t0\t1\tMATCH\n`);
+      const rows = advance(ix, store, audit, 'ev1');
+      assert.strictEqual(rows[0].status, 'refreshed');
+      assert.deepStrictEqual(store.get('00449bf0')!.members[0].paramTypes, ['int32_t']);
+      assert.strictEqual(store.get('00449bf0')!.members[0].ret, 'void');
+      assert.strictEqual(advance(ix, store, audit, 'ev2')[0].status, 'unchanged');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('follows a hand file past its attribute groups', () => {
+    const before = netTree('gnJoinResult');
+    // SetJoinResult moved to Game::Mcp.
+    const after = SymbolIndex.build(memoryTree(new Map([
+      ['Source/G/Net.h', NET_H.replace('Game::Net', 'Game::Mcp')],
+      ['Source/G/Net.inline.h', NET_INLINE('gnJoinResult').replace('Game::Net', 'Game::Mcp')],
+      [GLOBALS_INDEX_FILE, globals('gnJoinResult')],
+    ])));
+    const hand = `#include "Source/G/Net.h"
+namespace Game::Net {
+__attribute__((noinline)) inline void __stdcall Hook(int32_t n) {
+    Game::Net::SetJoinResult(n);
+}
+}
+__declspec(dllexport) void Pump(void) { Game::Net::SetJoinResult(1); }
+`;
+    const r = followHandFile(hand, before, after);
+    assert.deepStrictEqual(r.errors, []);
+    assert.ok(r.text.includes('__attribute__((noinline)) inline void __stdcall Hook(int32_t n) {\n    Game::Mcp::SetJoinResult(n);'), r.text);
+    assert.ok(r.text.includes('__declspec(dllexport) void Pump(void) { Game::Mcp::SetJoinResult(1); }'), r.text);
+  });
+});
