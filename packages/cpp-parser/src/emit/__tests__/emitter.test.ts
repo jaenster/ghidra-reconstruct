@@ -231,6 +231,29 @@ describe('CppEmitter', () => {
       const mulAdd = Expr.add(a, Expr.mul(b, c));
       assert.strictEqual(emit(mulAdd), 'a + b * c');
     });
+
+    it('keeps right-nested floating arithmetic grouping', () => {
+      const plus = emit(parse('float f(float a, float b, float c) { return a + (b + c); }'));
+      const times = emit(parse('float f(float a, float b, float c) { return a * (b * c); }'));
+      assert.match(plus, /return a \+ \(b \+ c\);/);
+      assert.match(times, /return a \* \(b \* c\);/);
+
+      const f = Math.fround;
+      const a = f(1e20), b = f(-1e20), c = f(3.25);
+      assert.notStrictEqual(f(a + f(b + c)), f(f(a + b) + c));
+      const x = f(1e20), y = f(1e20), z = f(1e-20);
+      assert.notStrictEqual(f(x * f(y * z)), f(f(x * y) * z));
+    });
+
+    it('keeps right grouping for operators that C++ types may overload', () => {
+      const a = Expr.identifier('a');
+      const b = Expr.identifier('b');
+      const c = Expr.identifier('c');
+      for (const op of ['+', '*', '&&', '||', '&', '|', '^'] as const) {
+        assert.strictEqual(emit(Expr.binary(a, op, Expr.binary(b, op, c))), `a ${op} (b ${op} c)`);
+        assert.strictEqual(emit(Expr.binary(Expr.binary(a, op, b), op, c)), `a ${op} b ${op} c`);
+      }
+    });
   });
 
   describe('Unary Expressions', () => {
