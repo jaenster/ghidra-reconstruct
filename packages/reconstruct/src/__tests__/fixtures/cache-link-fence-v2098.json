@@ -1,0 +1,1401 @@
+{
+  "evidence": "Fresh Windows v2098 MCP decompiles/info and live field layouts, real resolved-type mapper with *32 normalized to *. All five if keyword addresses and next-node arm positions are manually native-attested; this is not an owning snapshot or extractor execution. Unit tests use explicitly placeholder evidence/byte seals, never proposal data.",
+  "source": "810e50183da9a5ebd21d4adfd810c9da07e8163a",
+  "generatorBase": "e2b183b189b43b65044d0ec617e9f70590aeff25",
+  "functions": [
+    {
+      "name": "GLTEXCACHE_EvictLRU",
+      "address": "0050ec40",
+      "signature": "void GLTEXCACHE_EvictLRU(GlTextureCacheStrc * pCache)",
+      "returnType": "void",
+      "parameters": [
+        {
+          "name": "pCache",
+          "dataType": "GlTextureCacheStrc *",
+          "size": 4,
+          "ordinal": 0,
+          "storage": "ECX:4",
+          "stackOffset": null,
+          "resolvedType": null
+        }
+      ],
+      "localVariables": [
+        {
+          "name": "pEvictNode",
+          "dataType": "GlTextureCacheNodeStrc *",
+          "size": 4,
+          "storage": "HASH:5f355cbffc:4",
+          "stackOffset": null,
+          "resolvedType": null
+        },
+        {
+          "name": "pNextNode",
+          "dataType": "GlTextureCacheNodeStrc *",
+          "size": 4,
+          "storage": "HASH:5fa2bc9d19:4",
+          "stackOffset": null,
+          "resolvedType": null
+        }
+      ],
+      "namespace": "D2Glide::glTextureCache",
+      "decompiled": "\n/* @function GLTEXCACHE_EvictLRU\n   @address Game.exe.ram:0050ec40\n   @date 2026.06.12\n   @calling __fastcall\n   @description Evicts least recently used texture from cache by removing head of active list.\n   Clears hash table entry and moves node to free list tail. */\n\nvoid __fastcall D2Glide::glTextureCache::GLTEXCACHE_EvictLRU(GlTextureCacheStrc *pCache)\n\n{\n  GlTextureCacheNodeStrc *pNextNode;\n  GlTextureCacheNodeStrc *pEvictNode;\n  \n  if (pCache->nUsedCount != 0) {\n    pEvictNode = pCache->pActiveHead;\n    if (pEvictNode != (GlTextureCacheNodeStrc *)0x0) {\n      pNextNode = pEvictNode->pNext;\n      pCache->pActiveHead = pNextNode;\n      if (pNextNode == (GlTextureCacheNodeStrc *)0x0) {\n        pCache->pActiveTail = (GlTextureCacheNodeStrc *)0x0;\n      }\n      else {\n        pNextNode->pPrev = (GlTextureCacheNodeStrc *)0x0;\n      }\n      pEvictNode->pNext = (GlTextureCacheNodeStrc *)0x0;\n      pEvictNode->pPrev = (GlTextureCacheNodeStrc *)0x0;\n      if (pEvictNode->pHashTable != (void *)0x0) {\n        *(undefined4 *)((int)pEvictNode->pHashTable + pEvictNode->nHashIndex * 8) = 0;\n        *(undefined4 *)((int)pEvictNode->pHashTable + pEvictNode->nHashIndex * 8 + 4) = 0;\n        pEvictNode->pHashTable = (void *)0x0;\n      }\n      if (pCache->pFreeHead == (GlTextureCacheNodeStrc *)0x0) {\n        pCache->nUsedCount = pCache->nUsedCount - 1;\n        pCache->pFreeHead = pEvictNode;\n        pCache->pFreeTail = pEvictNode;\n        return;\n      }\n      pCache->pFreeTail->pNext = pEvictNode;\n      pEvictNode->pPrev = pCache->pFreeTail;\n      pCache->pFreeTail = pEvictNode;\n    }\n    pCache->nUsedCount = pCache->nUsedCount - 1;\n  }\n  return;\n}\n\n",
+      "callingConvention": "__fastcall",
+      "size": 105,
+      "isThunk": false,
+      "isExternal": false,
+      "hasVarArgs": false,
+      "tags": [
+        {
+          "type": "x64-typing"
+        }
+      ],
+      "branchLayout": {
+        "lineCount": 47,
+        "lines": [
+          [
+            21,
+            [
+              30
+            ]
+          ],
+          [
+            24,
+            [
+              25
+            ]
+          ]
+        ],
+        "ifs": [
+          [
+            15,
+            6
+          ],
+          [
+            17,
+            13
+          ],
+          [
+            20,
+            23
+          ],
+          [
+            28,
+            44
+          ],
+          [
+            33,
+            70
+          ]
+        ]
+      }
+    },
+    {
+      "name": "GLTEXCACHE_EnsureCapacity",
+      "address": "0050ed10",
+      "signature": "int GLTEXCACHE_EnsureCapacity(GlTextureCacheStrc * pCache)",
+      "returnType": "int",
+      "parameters": [
+        {
+          "name": "pCache",
+          "dataType": "GlTextureCacheStrc *",
+          "size": 4,
+          "ordinal": 0,
+          "storage": "ECX:4",
+          "stackOffset": null,
+          "resolvedType": null
+        }
+      ],
+      "localVariables": [
+        {
+          "name": "nAllocResult",
+          "dataType": "int",
+          "size": 4,
+          "storage": "EAX:4",
+          "stackOffset": null,
+          "resolvedType": "int"
+        },
+        {
+          "name": "pEvictNode",
+          "dataType": "GlTextureCacheNodeStrc *",
+          "size": 4,
+          "storage": "HASH:5f0526cbd7:4",
+          "stackOffset": null,
+          "resolvedType": null
+        },
+        {
+          "name": "pNextNode",
+          "dataType": "GlTextureCacheNodeStrc *",
+          "size": 4,
+          "storage": "HASH:5f47449f7c:4",
+          "stackOffset": null,
+          "resolvedType": null
+        }
+      ],
+      "namespace": "D2Glide::glTextureCache",
+      "decompiled": "\n/* @function GLTEXCACHE_EnsureCapacity\n   @address Game.exe.ram:0050ed10\n   @date 2026.06.13\n   @calling __fastcall\n   @description Ensures cache has free capacity by allocating a node. If cache is full, evicts LRU\n   entry first. */\n\nint __fastcall D2Glide::glTextureCache::GLTEXCACHE_EnsureCapacity(GlTextureCacheStrc *pCache)\n\n{\n  int nAllocResult;\n  GlTextureCacheNodeStrc *pEvictNode;\n  GlTextureCacheNodeStrc *pNextNode;\n  \n  nAllocResult = D2Glide::glTextureCache::GLTEXCACHE_AllocateNode(pCache);\n  while (nAllocResult == 0) {\n    if (pCache->nUsedCount != 0) {\n      pEvictNode = pCache->pActiveHead;\n      if (pEvictNode != (GlTextureCacheNodeStrc *)0x0) {\n        pNextNode = pEvictNode->pNext;\n        pCache->pActiveHead = pNextNode;\n        if (pNextNode == (GlTextureCacheNodeStrc *)0x0) {\n          pCache->pActiveTail = (GlTextureCacheNodeStrc *)0x0;\n        }\n        else {\n          pNextNode->pPrev = (GlTextureCacheNodeStrc *)0x0;\n        }\n        pEvictNode->pNext = (GlTextureCacheNodeStrc *)0x0;\n        pEvictNode->pPrev = (GlTextureCacheNodeStrc *)0x0;\n        if (pEvictNode->pHashTable != (void *)0x0) {\n          *(undefined4 *)((int)pEvictNode->pHashTable + pEvictNode->nHashIndex * 8) = 0;\n          *(undefined4 *)((int)pEvictNode->pHashTable + pEvictNode->nHashIndex * 8 + 4) = 0;\n          pEvictNode->pHashTable = (void *)0x0;\n        }\n        if (pCache->pFreeHead == (GlTextureCacheNodeStrc *)0x0) {\n          pCache->pFreeHead = pEvictNode;\n        }\n        else {\n          pCache->pFreeTail->pNext = pEvictNode;\n          pEvictNode->pPrev = pCache->pFreeTail;\n        }\n        pCache->pFreeTail = pEvictNode;\n      }\n      pCache->nUsedCount = pCache->nUsedCount - 1;\n    }\n    nAllocResult = D2Glide::glTextureCache::GLTEXCACHE_AllocateNode(pCache);\n  }\n  return nAllocResult;\n}\n\n",
+      "callingConvention": "__fastcall",
+      "size": 122,
+      "isThunk": false,
+      "isExternal": false,
+      "hasVarArgs": false,
+      "tags": [
+        {
+          "type": "verified-2026-10-25"
+        },
+        {
+          "type": "x64-typing"
+        }
+      ],
+      "branchLayout": {
+        "lineCount": 51,
+        "lines": [
+          [
+            24,
+            [
+              44
+            ]
+          ],
+          [
+            27,
+            [
+              39
+            ]
+          ]
+        ],
+        "ifs": [
+          [
+            18,
+            20
+          ],
+          [
+            20,
+            27
+          ],
+          [
+            23,
+            37
+          ],
+          [
+            31,
+            58
+          ],
+          [
+            36,
+            82
+          ]
+        ]
+      }
+    },
+    {
+      "name": "GLSUBTILE_EnsureCapacity",
+      "address": "0050f2b0",
+      "signature": "int GLSUBTILE_EnsureCapacity(GlSubtileCacheStrc * pCache)",
+      "returnType": "int",
+      "parameters": [
+        {
+          "name": "pCache",
+          "dataType": "GlSubtileCacheStrc *",
+          "size": 4,
+          "ordinal": 0,
+          "storage": "ECX:4",
+          "stackOffset": null,
+          "resolvedType": null
+        }
+      ],
+      "localVariables": [
+        {
+          "name": "nNodeIndex",
+          "dataType": "int",
+          "size": 4,
+          "storage": "EAX:4",
+          "stackOffset": null,
+          "resolvedType": "int"
+        },
+        {
+          "name": "pEvictedNode",
+          "dataType": "GlSubtileCacheNodeStrc *",
+          "size": 4,
+          "storage": "HASH:5f2243ca3a:4",
+          "stackOffset": null,
+          "resolvedType": "GlSubtileCacheNodeStrc *"
+        },
+        {
+          "name": "pNextFree",
+          "dataType": "GlSubtileCacheNodeStrc *",
+          "size": 4,
+          "storage": "HASH:5fbd41eb70:4",
+          "stackOffset": null,
+          "resolvedType": "GlSubtileCacheNodeStrc *"
+        }
+      ],
+      "namespace": "D2Glide::glSubtileCache",
+      "decompiled": "\n/* @function GLSUBTILE_EnsureCapacity\n   @address Game.exe.ram:0050f2b0\n   @date 2026.09.05\n   @calling __fastcall\n   @description Ensures cache has free capacity by allocating a node. If cache is full, evicts LRU\n   entry first. */\n\nint __fastcall D2Glide::glSubtileCache::GLSUBTILE_EnsureCapacity(GlSubtileCacheStrc *pCache)\n\n{\n  int nNodeIndex;\n  GlSubtileCacheNodeStrc *pEvictedNode;\n  GlSubtileCacheNodeStrc *pNextFree;\n  \n  nNodeIndex = D2Glide::glSubtileCache::GLSUBTILE_AllocateNode(pCache);\n  while (nNodeIndex == 0) {\n    if (pCache->nUsedCount != 0) {\n      pEvictedNode = pCache->pActiveHead;\n      if (pEvictedNode != (GlSubtileCacheNodeStrc *)0x0) {\n        pNextFree = pEvictedNode->pNext;\n        pCache->pActiveHead = pNextFree;\n        if (pNextFree == (GlSubtileCacheNodeStrc *)0x0) {\n          pCache->pActiveTail = (GlSubtileCacheNodeStrc *)0x0;\n        }\n        else {\n          pNextFree->pPrev = (GlSubtileCacheNodeStrc *)0x0;\n        }\n        pEvictedNode->pNext = (GlSubtileCacheNodeStrc *)0x0;\n        pEvictedNode->pPrev = (GlSubtileCacheNodeStrc *)0x0;\n        if (pEvictedNode->pSubTile != (D2GroundSubTileStrc *)0x0) {\n          pEvictedNode->pSubTile->nTextureCacheIndex = 0;\n          pEvictedNode->pSubTile = (D2GroundSubTileStrc *)0x0;\n        }\n        if (pCache->pFreeHead == (GlSubtileCacheNodeStrc *)0x0) {\n          pCache->pFreeHead = pEvictedNode;\n        }\n        else {\n          pCache->pFreeTail->pNext = pEvictedNode;\n          pEvictedNode->pPrev = pCache->pFreeTail;\n        }\n        pCache->pFreeTail = pEvictedNode;\n      }\n      pCache->nUsedCount = pCache->nUsedCount - 1;\n    }\n    nNodeIndex = D2Glide::glSubtileCache::GLSUBTILE_AllocateNode(pCache);\n  }\n  return nNodeIndex;\n}\n\n",
+      "callingConvention": "__fastcall",
+      "size": 110,
+      "isThunk": false,
+      "isExternal": false,
+      "hasVarArgs": false,
+      "tags": [
+        {
+          "type": "verified-2026-10-25"
+        }
+      ],
+      "branchLayout": {
+        "lineCount": 50,
+        "lines": [
+          [
+            24,
+            [
+              44
+            ]
+          ],
+          [
+            27,
+            [
+              39
+            ]
+          ]
+        ],
+        "ifs": [
+          [
+            18,
+            20
+          ],
+          [
+            20,
+            27
+          ],
+          [
+            23,
+            37
+          ],
+          [
+            31,
+            58
+          ],
+          [
+            35,
+            70
+          ]
+        ]
+      }
+    },
+    {
+      "name": "GLFLOOR_EvictLRU",
+      "address": "0050f6d0",
+      "signature": "void GLFLOOR_EvictLRU(GlFloorCacheStrc * pCache)",
+      "returnType": "void",
+      "parameters": [
+        {
+          "name": "pCache",
+          "dataType": "GlFloorCacheStrc *",
+          "size": 4,
+          "ordinal": 0,
+          "storage": "ECX:4",
+          "stackOffset": null,
+          "resolvedType": null
+        }
+      ],
+      "localVariables": [
+        {
+          "name": "nAddress",
+          "dataType": "void *",
+          "size": 4,
+          "storage": "EAX:4",
+          "stackOffset": null,
+          "resolvedType": "void *"
+        },
+        {
+          "name": "pEvictNode",
+          "dataType": "GlFloorCacheNodeStrc *",
+          "size": 4,
+          "storage": "HASH:5f68111a22:4",
+          "stackOffset": null,
+          "resolvedType": "GlFloorCacheNodeStrc *"
+        },
+        {
+          "name": "pNextNode",
+          "dataType": "GlFloorCacheNodeStrc *",
+          "size": 4,
+          "storage": "HASH:5ffb27edd4:4",
+          "stackOffset": null,
+          "resolvedType": "GlFloorCacheNodeStrc *"
+        },
+        {
+          "name": "nLine",
+          "dataType": "int32_t",
+          "size": 4,
+          "storage": "HASH:3fa462fb47:4",
+          "stackOffset": null,
+          "resolvedType": "int32_t"
+        }
+      ],
+      "namespace": "D2Glide::glFloorCache",
+      "decompiled": "\n/* Evicts the least recently used floor-tile node: unlinks the head of the active list (pActiveHead,\n   clearing pActiveTail when it empties), clears the node's tile's nTextureCacheIndex (word\n   [pTile+0x42])\n   and detaches the tile, then appends the node to the free list and decrements nUsedCount. Halts on\n   line\n   0xd3 if pTile is null.\n   Provenance: 1.14d asm 0050f6d0 (MOV word [EDX+0x42] through node+8 at 0050f71d). */\n\nvoid __fastcall D2Glide::glFloorCache::GLFLOOR_EvictLRU(GlFloorCacheStrc *pCache)\n\n{\n  void *nAddress;\n  int32_t nLine;\n  GlFloorCacheNodeStrc *pEvictNode;\n  GlFloorCacheNodeStrc *pNextNode;\n  \n  if (pCache->nUsedCount != 0) {\n    pEvictNode = pCache->pActiveHead;\n    if (pEvictNode != (GlFloorCacheNodeStrc *)0x0) {\n      pNextNode = pEvictNode->pNext;\n      pCache->pActiveHead = pNextNode;\n      if (pNextNode == (GlFloorCacheNodeStrc *)0x0) {\n        pCache->pActiveTail = (GlFloorCacheNodeStrc *)0x0;\n      }\n      else {\n        pNextNode->pPrev = (GlFloorCacheNodeStrc *)0x0;\n      }\n      pEvictNode->pNext = (GlFloorCacheNodeStrc *)0x0;\n      pEvictNode->pPrev = (GlFloorCacheNodeStrc *)0x0;\n      if (pEvictNode->pTile == (D2TileLibraryEntryStrc *)0x0) {\n        nLine = 0xd3;\n        nAddress = Fog::Src::ErrorManager::GetInstructionPointer();\n        Fog::Src::ErrorManager::ERROR_UnrecoverableInternalError_Halt(\"\",nAddress,nLine);\n                    /* WARNING: Subroutine does not return */\n        compiler::exit(-1);\n      }\n      pEvictNode->pTile->nTextureCacheIndex = 0;\n      pEvictNode->pTile = (D2TileLibraryEntryStrc *)0x0;\n      if (pCache->pFreeHead == (GlFloorCacheNodeStrc *)0x0) {\n        pCache->nUsedCount = pCache->nUsedCount - 1;\n        pCache->pFreeHead = pEvictNode;\n        pCache->pFreeTail = pEvictNode;\n        return;\n      }\n      pCache->pFreeTail->pNext = pEvictNode;\n      pEvictNode->pPrev = pCache->pFreeTail;\n      pCache->pFreeTail = pEvictNode;\n    }\n    pCache->nUsedCount = pCache->nUsedCount - 1;\n  }\n  return;\n}\n\n",
+      "callingConvention": "__fastcall",
+      "size": 122,
+      "isThunk": false,
+      "isExternal": false,
+      "hasVarArgs": false,
+      "tags": [
+        {
+          "type": "halt-returns"
+        }
+      ],
+      "branchLayout": {
+        "lineCount": 54,
+        "lines": [
+          [
+            24,
+            [
+              30
+            ]
+          ],
+          [
+            27,
+            [
+              25
+            ]
+          ]
+        ],
+        "ifs": [
+          [
+            18,
+            6
+          ],
+          [
+            20,
+            13
+          ],
+          [
+            23,
+            23
+          ],
+          [
+            31,
+            44
+          ],
+          [
+            40,
+            87
+          ]
+        ]
+      }
+    },
+    {
+      "name": "D3DTEXCACHE_InvalidateByTilePtr",
+      "address": "006ba7c0",
+      "signature": "void D3DTEXCACHE_InvalidateByTilePtr(D3DTextureCacheStrc * pCache)",
+      "returnType": "void",
+      "parameters": [
+        {
+          "name": "pCache",
+          "dataType": "D3DTextureCacheStrc *",
+          "size": 4,
+          "ordinal": 0,
+          "storage": "ECX:4",
+          "stackOffset": null,
+          "resolvedType": null
+        }
+      ],
+      "localVariables": [
+        {
+          "name": "pUsedNode",
+          "dataType": "D3DTextureCacheNodeStrc *",
+          "size": 4,
+          "storage": "HASH:5f27d3d98e:4",
+          "stackOffset": null,
+          "resolvedType": "D3DTextureCacheNodeStrc *"
+        },
+        {
+          "name": "pNextUsedNode",
+          "dataType": "D3DTextureCacheNodeStrc *",
+          "size": 4,
+          "storage": "HASH:5fec49d518:4",
+          "stackOffset": null,
+          "resolvedType": "D3DTextureCacheNodeStrc *"
+        }
+      ],
+      "namespace": "D2Direct3D::d3dTextureCache",
+      "decompiled": "\n/* @function D3DTEXCACHE_InvalidateByTilePtr\n   @address Game.exe.ram:006ba7c0\n   @date 2026.09.05\n   @calling __fastcall */\n\nvoid __fastcall\nD2Direct3D::d3dTextureCache::D3DTEXCACHE_InvalidateByTilePtr(D3DTextureCacheStrc *pCache)\n\n{\n  D3DTextureCacheNodeStrc *pNextUsedNode;\n  D3DTextureCacheNodeStrc *pUsedNode;\n  \n  if (pCache->nUsedCount != 0) {\n    pUsedNode = pCache->pUsedHead;\n    if (pUsedNode != (D3DTextureCacheNodeStrc *)0x0) {\n      pNextUsedNode = pUsedNode->pNext;\n      pCache->pUsedHead = pNextUsedNode;\n      if (pNextUsedNode == (D3DTextureCacheNodeStrc *)0x0) {\n        pCache->pUsedTail = (D3DTextureCacheNodeStrc *)0x0;\n      }\n      else {\n        pNextUsedNode->pPrev = (D3DTextureCacheNodeStrc *)0x0;\n      }\n      pUsedNode->pNext = (D3DTextureCacheNodeStrc *)0x0;\n      pUsedNode->pPrev = (D3DTextureCacheNodeStrc *)0x0;\n      if (pUsedNode->pAssociatedTilePtr != (void *)0x0) {\n        *(undefined4 *)((int)pUsedNode->pAssociatedTilePtr + (int)pUsedNode->nTileSlotIndex * 8) = 0\n        ;\n        *(undefined4 *)((int)pUsedNode->pAssociatedTilePtr + (int)pUsedNode->nTileSlotIndex * 8 + 4)\n             = 0;\n        pUsedNode->pAssociatedTilePtr = (void *)0x0;\n      }\n      if (pCache->pFreeHead == (D3DTextureCacheNodeStrc *)0x0) {\n        pCache->nUsedCount = pCache->nUsedCount + -1;\n        pCache->pFreeHead = pUsedNode;\n        pCache->pFreeTail = pUsedNode;\n        return;\n      }\n      pCache->pFreeTail->pNext = pUsedNode;\n      pUsedNode->pPrev = pCache->pFreeTail;\n      pCache->pFreeTail = pUsedNode;\n    }\n    pCache->nUsedCount = pCache->nUsedCount + -1;\n  }\n  return;\n}\n\n",
+      "callingConvention": "__fastcall",
+      "size": 105,
+      "isThunk": false,
+      "isExternal": false,
+      "hasVarArgs": false,
+      "tags": [
+        {
+          "type": "method",
+          "data": "D2DrlgTileGridStrc"
+        }
+      ],
+      "branchLayout": {
+        "lineCount": 48,
+        "lines": [
+          [
+            20,
+            [
+              30
+            ]
+          ],
+          [
+            23,
+            [
+              25
+            ]
+          ]
+        ],
+        "ifs": [
+          [
+            14,
+            6
+          ],
+          [
+            16,
+            13
+          ],
+          [
+            19,
+            23
+          ],
+          [
+            27,
+            44
+          ],
+          [
+            34,
+            70
+          ]
+        ]
+      }
+    },
+    {
+      "name": "D3DTEXCACHE_EnsureAvailableNode",
+      "address": "006ba920",
+      "signature": "int32_t D3DTEXCACHE_EnsureAvailableNode(D3DTextureCacheStrc * pCache)",
+      "returnType": "int32_t",
+      "parameters": [
+        {
+          "name": "pCache",
+          "dataType": "D3DTextureCacheStrc *",
+          "size": 4,
+          "ordinal": 0,
+          "storage": "ECX:4",
+          "stackOffset": null,
+          "resolvedType": null
+        }
+      ],
+      "localVariables": [
+        {
+          "name": "bAllocated",
+          "dataType": "int",
+          "size": 4,
+          "storage": "EAX:4",
+          "stackOffset": null,
+          "resolvedType": "int"
+        },
+        {
+          "name": "pEvictNode",
+          "dataType": "D3DTextureCacheNodeStrc *",
+          "size": 4,
+          "storage": "HASH:5fce077631:4",
+          "stackOffset": null,
+          "resolvedType": "D3DTextureCacheNodeStrc *"
+        },
+        {
+          "name": "pNextUsedHead",
+          "dataType": "D3DTextureCacheNodeStrc *",
+          "size": 4,
+          "storage": "HASH:5f3662dc7f:4",
+          "stackOffset": null,
+          "resolvedType": "D3DTextureCacheNodeStrc *"
+        }
+      ],
+      "namespace": "D2Direct3D::d3dTextureCache",
+      "decompiled": "\n/* @function D3DTEXCACHE_EnsureAvailableNode\n   @address Game.exe.ram:006ba920\n   @date 2026.09.08\n   @calling __fastcall */\n\nint32_t __fastcall\nD2Direct3D::d3dTextureCache::D3DTEXCACHE_EnsureAvailableNode(D3DTextureCacheStrc *pCache)\n\n{\n  int bAllocated;\n  D3DTextureCacheNodeStrc *pEvictNode;\n  D3DTextureCacheNodeStrc *pNextUsedHead;\n  \n  bAllocated = D2Direct3D::d3dTextureCache::D3DTEXCACHE_AllocateNodeFromFreeList(pCache);\n  while (bAllocated == 0) {\n    if (pCache->nUsedCount != 0) {\n      pEvictNode = pCache->pUsedHead;\n      if (pEvictNode != (D3DTextureCacheNodeStrc *)0x0) {\n        pNextUsedHead = pEvictNode->pNext;\n        pCache->pUsedHead = pNextUsedHead;\n        if (pNextUsedHead == (D3DTextureCacheNodeStrc *)0x0) {\n          pCache->pUsedTail = (D3DTextureCacheNodeStrc *)0x0;\n        }\n        else {\n          pNextUsedHead->pPrev = (D3DTextureCacheNodeStrc *)0x0;\n        }\n        pEvictNode->pNext = (D3DTextureCacheNodeStrc *)0x0;\n        pEvictNode->pPrev = (D3DTextureCacheNodeStrc *)0x0;\n        if (pEvictNode->pAssociatedTilePtr != (void *)0x0) {\n          *(undefined4 *)((int)pEvictNode->pAssociatedTilePtr + (int)pEvictNode->nTileSlotIndex * 8)\n               = 0;\n          *(undefined4 *)\n           ((int)pEvictNode->pAssociatedTilePtr + (int)pEvictNode->nTileSlotIndex * 8 + 4) = 0;\n          pEvictNode->pAssociatedTilePtr = (void *)0x0;\n        }\n        if (pCache->pFreeHead == (D3DTextureCacheNodeStrc *)0x0) {\n          pCache->pFreeHead = pEvictNode;\n        }\n        else {\n          pCache->pFreeTail->pNext = pEvictNode;\n          pEvictNode->pPrev = pCache->pFreeTail;\n        }\n        pCache->pFreeTail = pEvictNode;\n      }\n      pCache->nUsedCount = pCache->nUsedCount + -1;\n    }\n    bAllocated = D2Direct3D::d3dTextureCache::D3DTEXCACHE_AllocateNodeFromFreeList(pCache);\n  }\n  return bAllocated;\n}\n\n",
+      "callingConvention": "__fastcall",
+      "size": 122,
+      "isThunk": false,
+      "isExternal": false,
+      "hasVarArgs": false,
+      "tags": [
+        {
+          "type": "method",
+          "data": "D2DrlgTileGridStrc"
+        }
+      ],
+      "branchLayout": {
+        "lineCount": 52,
+        "lines": [
+          [
+            23,
+            [
+              44
+            ]
+          ],
+          [
+            26,
+            [
+              39
+            ]
+          ]
+        ],
+        "ifs": [
+          [
+            17,
+            20
+          ],
+          [
+            19,
+            27
+          ],
+          [
+            22,
+            37
+          ],
+          [
+            30,
+            58
+          ],
+          [
+            37,
+            82
+          ]
+        ]
+      }
+    },
+    {
+      "name": "D3DFLOOR_EvictLRU",
+      "address": "006bb330",
+      "signature": "void D3DFLOOR_EvictLRU(D3DFloorCacheStrc * pCache)",
+      "returnType": "void",
+      "parameters": [
+        {
+          "name": "pCache",
+          "dataType": "D3DFloorCacheStrc *",
+          "size": 4,
+          "ordinal": 0,
+          "storage": "ECX:4",
+          "stackOffset": null,
+          "resolvedType": null
+        }
+      ],
+      "localVariables": [
+        {
+          "name": "pEvictNode",
+          "dataType": "D3DFloorCacheNodeStrc *",
+          "size": 4,
+          "storage": "HASH:5f85d26e56:4",
+          "stackOffset": null,
+          "resolvedType": "D3DFloorCacheNodeStrc *"
+        },
+        {
+          "name": "pNextNode",
+          "dataType": "D3DFloorCacheNodeStrc *",
+          "size": 4,
+          "storage": "HASH:5ff3b3211f:4",
+          "stackOffset": null,
+          "resolvedType": "D3DFloorCacheNodeStrc *"
+        }
+      ],
+      "namespace": "D2Direct3D::d3dFloorCache",
+      "decompiled": "\n/* Evicts the least-recently-used node of a D3D floor-texture cache: unlinks the head of the used\n   list, clears its tile's nTextureCacheIndex, appends it to the free list. D3D twin of\n   GLFLOOR_EvictLRU (0050f6d0) without the null-tile halt.\n   Provenance: 1.14d asm 006bb330..006bb38a; no references (EnsureAvailableNode inlines the same\n   body). */\n\nvoid __fastcall D2Direct3D::d3dFloorCache::D3DFLOOR_EvictLRU(D3DFloorCacheStrc *pCache)\n\n{\n  D3DFloorCacheNodeStrc *pEvictNode;\n  D3DFloorCacheNodeStrc *pNextNode;\n  \n  if (pCache->nUsedCount != 0) {\n    pEvictNode = pCache->pUsedHead;\n    if (pEvictNode != (D3DFloorCacheNodeStrc *)0x0) {\n      pNextNode = pEvictNode->pNext;\n      pCache->pUsedHead = pNextNode;\n      if (pNextNode == (D3DFloorCacheNodeStrc *)0x0) {\n        pCache->pUsedTail = (D3DFloorCacheNodeStrc *)0x0;\n      }\n      else {\n        pNextNode->pPrev = (D3DFloorCacheNodeStrc *)0x0;\n      }\n      pEvictNode->pNext = (D3DFloorCacheNodeStrc *)0x0;\n      pEvictNode->pPrev = (D3DFloorCacheNodeStrc *)0x0;\n      if (pEvictNode->pTile != (D2TileLibraryEntryStrc *)0x0) {\n        pEvictNode->pTile->nTextureCacheIndex = 0;\n        pEvictNode->pTile = (D2TileLibraryEntryStrc *)0x0;\n      }\n      if (pCache->pFreeHead == (D3DFloorCacheNodeStrc *)0x0) {\n        pCache->nUsedCount = pCache->nUsedCount + -1;\n        pCache->pFreeHead = pEvictNode;\n        pCache->pFreeTail = pEvictNode;\n        return;\n      }\n      pCache->pFreeTail->pNext = pEvictNode;\n      pEvictNode->pPrev = pCache->pFreeTail;\n      pCache->pFreeTail = pEvictNode;\n    }\n    pCache->nUsedCount = pCache->nUsedCount + -1;\n  }\n  return;\n}\n\n",
+      "callingConvention": "__fastcall",
+      "size": 91,
+      "isThunk": false,
+      "isExternal": false,
+      "hasVarArgs": false,
+      "tags": [
+        {
+          "type": "llm-created"
+        }
+      ],
+      "branchLayout": {
+        "lineCount": 45,
+        "lines": [
+          [
+            20,
+            [
+              30
+            ]
+          ],
+          [
+            23,
+            [
+              25
+            ]
+          ]
+        ],
+        "ifs": [
+          [
+            14,
+            6
+          ],
+          [
+            16,
+            13
+          ],
+          [
+            19,
+            23
+          ],
+          [
+            27,
+            44
+          ],
+          [
+            31,
+            56
+          ]
+        ]
+      }
+    }
+  ],
+  "anchors": {
+    "0050ec40": [
+      "pEvictNode->pNext",
+      "pEvictNode->pPrev"
+    ],
+    "0050ed10": [
+      "pEvictNode->pNext",
+      "pEvictNode->pPrev"
+    ],
+    "0050f2b0": [
+      "pEvictedNode->pNext",
+      "pEvictedNode->pPrev"
+    ],
+    "0050f6d0": [
+      "pEvictNode->pNext",
+      "pEvictNode->pPrev"
+    ],
+    "006ba7c0": [
+      "pUsedNode->pNext",
+      "pUsedNode->pPrev"
+    ],
+    "006ba920": [
+      "pEvictNode->pNext",
+      "pEvictNode->pPrev"
+    ],
+    "006bb330": [
+      "pEvictNode->pNext",
+      "pEvictNode->pPrev"
+    ]
+  },
+  "tables": {
+    "paramFuncdefs": {},
+    "funcdefSignatures": {},
+    "functionSignatures": {},
+    "variableNames": [],
+    "voidPointerFunctions": [],
+    "rootQualifiedTypedefs": [],
+    "typedefTargets": {
+      "byte": "unsigned char",
+      "uint": "unsigned int",
+      "uint8_t": "unsigned char",
+      "uint16_t": "unsigned short",
+      "int32_t": "int",
+      "uint32_t": "unsigned int",
+      "BOOL": "int"
+    },
+    "structFields": {
+      "GlTextureCacheStrc": {
+        "dwEntrySize": "uint",
+        "nMaxEntries": "uint",
+        "nUsedCount": "uint",
+        "pActiveHead": "GlTextureCacheNodeStrc *",
+        "pActiveTail": "GlTextureCacheNodeStrc *",
+        "pFreeHead": "GlTextureCacheNodeStrc *",
+        "pFreeTail": "GlTextureCacheNodeStrc *",
+        "pNodes": "GlTextureCacheNodeStrc *"
+      },
+      "GlTextureCacheNodeStrc": {
+        "nIndex": "int",
+        "dwAddress": "uint",
+        "pHashTable": "void *",
+        "nHashIndex": "int",
+        "null": "undefined",
+        "pNext": "GlTextureCacheNodeStrc *",
+        "pPrev": "GlTextureCacheNodeStrc *"
+      },
+      "GlSubtileCacheStrc": {
+        "dwEntrySize": "uint",
+        "nMaxEntries": "uint",
+        "nUsedCount": "uint",
+        "pActiveHead": "GlSubtileCacheNodeStrc *",
+        "pActiveTail": "GlSubtileCacheNodeStrc *",
+        "pFreeHead": "GlSubtileCacheNodeStrc *",
+        "pFreeTail": "GlSubtileCacheNodeStrc *",
+        "pNodes": "GlSubtileCacheNodeStrc *"
+      },
+      "GlSubtileCacheNodeStrc": {
+        "nIndex": "int",
+        "dwAddress": "uint",
+        "pSubTile": "D2GroundSubTileStrc *",
+        "pNext": "GlSubtileCacheNodeStrc *",
+        "pPrev": "GlSubtileCacheNodeStrc *"
+      },
+      "GlFloorCacheStrc": {
+        "dwEntrySize": "uint",
+        "nMaxEntries": "uint",
+        "nUsedCount": "uint",
+        "pActiveHead": "GlFloorCacheNodeStrc *",
+        "pActiveTail": "GlFloorCacheNodeStrc *",
+        "pFreeHead": "GlFloorCacheNodeStrc *",
+        "pFreeTail": "GlFloorCacheNodeStrc *",
+        "pNodes": "GlFloorCacheNodeStrc *"
+      },
+      "GlFloorCacheNodeStrc": {
+        "nIndex": "int",
+        "dwAddress": "uint",
+        "pTile": "D2TileLibraryEntryStrc *",
+        "pNext": "GlFloorCacheNodeStrc *",
+        "pPrev": "GlFloorCacheNodeStrc *"
+      },
+      "D3DTextureCacheStrc": {
+        "nMaxNodes": "int",
+        "nUsedCount": "int",
+        "pUsedHead": "D3DTextureCacheNodeStrc *",
+        "pUsedTail": "D3DTextureCacheNodeStrc *",
+        "pFreeHead": "D3DTextureCacheNodeStrc *",
+        "pFreeTail": "D3DTextureCacheNodeStrc *",
+        "pNodeBuffer": "D3DTextureCacheNodeStrc *"
+      },
+      "D3DTextureCacheNodeStrc": {
+        "nIndex": "int",
+        "pAssociatedTilePtr": "void *",
+        "nTileSlotIndex": "void *",
+        "field_0x0C": "void *",
+        "pSurface": "IDirectDrawSurface7 *",
+        "pTexture": "IDirect3DTexture2 *",
+        "pNext": "D3DTextureCacheNodeStrc *",
+        "pPrev": "D3DTextureCacheNodeStrc *"
+      },
+      "D3DFloorCacheStrc": {
+        "nMaxNodes": "int",
+        "nUsedCount": "int",
+        "pUsedHead": "D3DFloorCacheNodeStrc *",
+        "pUsedTail": "D3DFloorCacheNodeStrc *",
+        "pFreeHead": "D3DFloorCacheNodeStrc *",
+        "pFreeTail": "D3DFloorCacheNodeStrc *",
+        "pNodeBuffer": "D3DFloorCacheNodeStrc *"
+      },
+      "D3DFloorCacheNodeStrc": {
+        "nIndex": "int",
+        "pTile": "D2TileLibraryEntryStrc *",
+        "pSurface": "IDirectDrawSurface7 *",
+        "pTexture": "IDirect3DTexture2 *",
+        "pNext": "D3DFloorCacheNodeStrc *",
+        "pPrev": "D3DFloorCacheNodeStrc *"
+      },
+      "D2TileLibraryEntryStrc": {
+        "nDirection": "int",
+        "nRoofHeight": "uint16_t",
+        "nFlags": "short",
+        "nHeight": "int",
+        "nWidth": "int",
+        "nHeightToBottom": "int",
+        "nOrientation": "int",
+        "nIndex": "int",
+        "nSubIndex": "int",
+        "nFrame_Rarity": "int",
+        "transparentColorRGB24": "int",
+        "abSubTileFlags": "BYTE[25]",
+        "null": "int",
+        "nTextureCacheIndex": "short",
+        "dwBlockDataOffset": "int",
+        "nBlockDataSize": "int",
+        "nSubTiles": "int",
+        "pSubTiles": "D2GroundSubTileStrc *",
+        "szFilePath": "char *",
+        "pLruNode": "D2LRUCacheNodeStrc *"
+      }
+    },
+    "structLayouts": {
+      "GlTextureCacheStrc": [
+        {
+          "name": "dwEntrySize",
+          "type": "uint",
+          "offset": 0,
+          "size": 4
+        },
+        {
+          "name": "nMaxEntries",
+          "type": "uint",
+          "offset": 4,
+          "size": 4
+        },
+        {
+          "name": "nUsedCount",
+          "type": "uint",
+          "offset": 8,
+          "size": 4
+        },
+        {
+          "name": "pActiveHead",
+          "type": "GlTextureCacheNodeStrc *",
+          "offset": 12,
+          "size": 4
+        },
+        {
+          "name": "pActiveTail",
+          "type": "GlTextureCacheNodeStrc *",
+          "offset": 16,
+          "size": 4
+        },
+        {
+          "name": "pFreeHead",
+          "type": "GlTextureCacheNodeStrc *",
+          "offset": 20,
+          "size": 4
+        },
+        {
+          "name": "pFreeTail",
+          "type": "GlTextureCacheNodeStrc *",
+          "offset": 24,
+          "size": 4
+        },
+        {
+          "name": "pNodes",
+          "type": "GlTextureCacheNodeStrc *",
+          "offset": 28,
+          "size": 4
+        }
+      ],
+      "GlTextureCacheNodeStrc": [
+        {
+          "name": "nIndex",
+          "type": "int",
+          "offset": 0,
+          "size": 4
+        },
+        {
+          "name": "dwAddress",
+          "type": "uint",
+          "offset": 4,
+          "size": 4
+        },
+        {
+          "name": "pHashTable",
+          "type": "void *",
+          "offset": 8,
+          "size": 4
+        },
+        {
+          "name": "nHashIndex",
+          "type": "int",
+          "offset": 12,
+          "size": 4
+        },
+        {
+          "name": null,
+          "type": "undefined",
+          "offset": 16,
+          "size": 1
+        },
+        {
+          "name": null,
+          "type": "undefined",
+          "offset": 17,
+          "size": 1
+        },
+        {
+          "name": null,
+          "type": "undefined",
+          "offset": 18,
+          "size": 1
+        },
+        {
+          "name": null,
+          "type": "undefined",
+          "offset": 19,
+          "size": 1
+        },
+        {
+          "name": "pNext",
+          "type": "GlTextureCacheNodeStrc *",
+          "offset": 20,
+          "size": 4
+        },
+        {
+          "name": "pPrev",
+          "type": "GlTextureCacheNodeStrc *",
+          "offset": 24,
+          "size": 4
+        }
+      ],
+      "GlSubtileCacheStrc": [
+        {
+          "name": "dwEntrySize",
+          "type": "uint",
+          "offset": 0,
+          "size": 4
+        },
+        {
+          "name": "nMaxEntries",
+          "type": "uint",
+          "offset": 4,
+          "size": 4
+        },
+        {
+          "name": "nUsedCount",
+          "type": "uint",
+          "offset": 8,
+          "size": 4
+        },
+        {
+          "name": "pActiveHead",
+          "type": "GlSubtileCacheNodeStrc *",
+          "offset": 12,
+          "size": 4
+        },
+        {
+          "name": "pActiveTail",
+          "type": "GlSubtileCacheNodeStrc *",
+          "offset": 16,
+          "size": 4
+        },
+        {
+          "name": "pFreeHead",
+          "type": "GlSubtileCacheNodeStrc *",
+          "offset": 20,
+          "size": 4
+        },
+        {
+          "name": "pFreeTail",
+          "type": "GlSubtileCacheNodeStrc *",
+          "offset": 24,
+          "size": 4
+        },
+        {
+          "name": "pNodes",
+          "type": "GlSubtileCacheNodeStrc *",
+          "offset": 28,
+          "size": 4
+        }
+      ],
+      "GlSubtileCacheNodeStrc": [
+        {
+          "name": "nIndex",
+          "type": "int",
+          "offset": 0,
+          "size": 4
+        },
+        {
+          "name": "dwAddress",
+          "type": "uint",
+          "offset": 4,
+          "size": 4
+        },
+        {
+          "name": "pSubTile",
+          "type": "D2GroundSubTileStrc *",
+          "offset": 8,
+          "size": 4
+        },
+        {
+          "name": "pNext",
+          "type": "GlSubtileCacheNodeStrc *",
+          "offset": 12,
+          "size": 4
+        },
+        {
+          "name": "pPrev",
+          "type": "GlSubtileCacheNodeStrc *",
+          "offset": 16,
+          "size": 4
+        }
+      ],
+      "GlFloorCacheStrc": [
+        {
+          "name": "dwEntrySize",
+          "type": "uint",
+          "offset": 0,
+          "size": 4
+        },
+        {
+          "name": "nMaxEntries",
+          "type": "uint",
+          "offset": 4,
+          "size": 4
+        },
+        {
+          "name": "nUsedCount",
+          "type": "uint",
+          "offset": 8,
+          "size": 4
+        },
+        {
+          "name": "pActiveHead",
+          "type": "GlFloorCacheNodeStrc *",
+          "offset": 12,
+          "size": 4
+        },
+        {
+          "name": "pActiveTail",
+          "type": "GlFloorCacheNodeStrc *",
+          "offset": 16,
+          "size": 4
+        },
+        {
+          "name": "pFreeHead",
+          "type": "GlFloorCacheNodeStrc *",
+          "offset": 20,
+          "size": 4
+        },
+        {
+          "name": "pFreeTail",
+          "type": "GlFloorCacheNodeStrc *",
+          "offset": 24,
+          "size": 4
+        },
+        {
+          "name": "pNodes",
+          "type": "GlFloorCacheNodeStrc *",
+          "offset": 28,
+          "size": 4
+        }
+      ],
+      "GlFloorCacheNodeStrc": [
+        {
+          "name": "nIndex",
+          "type": "int",
+          "offset": 0,
+          "size": 4
+        },
+        {
+          "name": "dwAddress",
+          "type": "uint",
+          "offset": 4,
+          "size": 4
+        },
+        {
+          "name": "pTile",
+          "type": "D2TileLibraryEntryStrc *",
+          "offset": 8,
+          "size": 4
+        },
+        {
+          "name": "pNext",
+          "type": "GlFloorCacheNodeStrc *",
+          "offset": 12,
+          "size": 4
+        },
+        {
+          "name": "pPrev",
+          "type": "GlFloorCacheNodeStrc *",
+          "offset": 16,
+          "size": 4
+        }
+      ],
+      "D3DTextureCacheStrc": [
+        {
+          "name": "nMaxNodes",
+          "type": "int",
+          "offset": 0,
+          "size": 4
+        },
+        {
+          "name": "nUsedCount",
+          "type": "int",
+          "offset": 4,
+          "size": 4
+        },
+        {
+          "name": "pUsedHead",
+          "type": "D3DTextureCacheNodeStrc *",
+          "offset": 8,
+          "size": 4
+        },
+        {
+          "name": "pUsedTail",
+          "type": "D3DTextureCacheNodeStrc *",
+          "offset": 12,
+          "size": 4
+        },
+        {
+          "name": "pFreeHead",
+          "type": "D3DTextureCacheNodeStrc *",
+          "offset": 16,
+          "size": 4
+        },
+        {
+          "name": "pFreeTail",
+          "type": "D3DTextureCacheNodeStrc *",
+          "offset": 20,
+          "size": 4
+        },
+        {
+          "name": "pNodeBuffer",
+          "type": "D3DTextureCacheNodeStrc *",
+          "offset": 24,
+          "size": 4
+        }
+      ],
+      "D3DTextureCacheNodeStrc": [
+        {
+          "name": "nIndex",
+          "type": "int",
+          "offset": 0,
+          "size": 4
+        },
+        {
+          "name": "pAssociatedTilePtr",
+          "type": "void *",
+          "offset": 4,
+          "size": 4
+        },
+        {
+          "name": "nTileSlotIndex",
+          "type": "void *",
+          "offset": 8,
+          "size": 4
+        },
+        {
+          "name": "field_0x0C",
+          "type": "void *",
+          "offset": 12,
+          "size": 4
+        },
+        {
+          "name": "pSurface",
+          "type": "IDirectDrawSurface7 *",
+          "offset": 16,
+          "size": 4
+        },
+        {
+          "name": "pTexture",
+          "type": "IDirect3DTexture2 *",
+          "offset": 20,
+          "size": 4
+        },
+        {
+          "name": "pNext",
+          "type": "D3DTextureCacheNodeStrc *",
+          "offset": 24,
+          "size": 4
+        },
+        {
+          "name": "pPrev",
+          "type": "D3DTextureCacheNodeStrc *",
+          "offset": 28,
+          "size": 4
+        }
+      ],
+      "D3DFloorCacheStrc": [
+        {
+          "name": "nMaxNodes",
+          "type": "int",
+          "offset": 0,
+          "size": 4
+        },
+        {
+          "name": "nUsedCount",
+          "type": "int",
+          "offset": 4,
+          "size": 4
+        },
+        {
+          "name": "pUsedHead",
+          "type": "D3DFloorCacheNodeStrc *",
+          "offset": 8,
+          "size": 4
+        },
+        {
+          "name": "pUsedTail",
+          "type": "D3DFloorCacheNodeStrc *",
+          "offset": 12,
+          "size": 4
+        },
+        {
+          "name": "pFreeHead",
+          "type": "D3DFloorCacheNodeStrc *",
+          "offset": 16,
+          "size": 4
+        },
+        {
+          "name": "pFreeTail",
+          "type": "D3DFloorCacheNodeStrc *",
+          "offset": 20,
+          "size": 4
+        },
+        {
+          "name": "pNodeBuffer",
+          "type": "D3DFloorCacheNodeStrc *",
+          "offset": 24,
+          "size": 4
+        }
+      ],
+      "D3DFloorCacheNodeStrc": [
+        {
+          "name": "nIndex",
+          "type": "int",
+          "offset": 0,
+          "size": 4
+        },
+        {
+          "name": "pTile",
+          "type": "D2TileLibraryEntryStrc *",
+          "offset": 4,
+          "size": 4
+        },
+        {
+          "name": "pSurface",
+          "type": "IDirectDrawSurface7 *",
+          "offset": 8,
+          "size": 4
+        },
+        {
+          "name": "pTexture",
+          "type": "IDirect3DTexture2 *",
+          "offset": 12,
+          "size": 4
+        },
+        {
+          "name": "pNext",
+          "type": "D3DFloorCacheNodeStrc *",
+          "offset": 16,
+          "size": 4
+        },
+        {
+          "name": "pPrev",
+          "type": "D3DFloorCacheNodeStrc *",
+          "offset": 20,
+          "size": 4
+        }
+      ],
+      "D2TileLibraryEntryStrc": [
+        {
+          "name": "nDirection",
+          "type": "int",
+          "offset": 0,
+          "size": 4
+        },
+        {
+          "name": "nRoofHeight",
+          "type": "uint16_t",
+          "offset": 4,
+          "size": 2
+        },
+        {
+          "name": "nFlags",
+          "type": "short",
+          "offset": 6,
+          "size": 2
+        },
+        {
+          "name": "nHeight",
+          "type": "int",
+          "offset": 8,
+          "size": 4
+        },
+        {
+          "name": "nWidth",
+          "type": "int",
+          "offset": 12,
+          "size": 4
+        },
+        {
+          "name": "nHeightToBottom",
+          "type": "int",
+          "offset": 16,
+          "size": 4
+        },
+        {
+          "name": "nOrientation",
+          "type": "int",
+          "offset": 20,
+          "size": 4
+        },
+        {
+          "name": "nIndex",
+          "type": "int",
+          "offset": 24,
+          "size": 4
+        },
+        {
+          "name": "nSubIndex",
+          "type": "int",
+          "offset": 28,
+          "size": 4
+        },
+        {
+          "name": "nFrame_Rarity",
+          "type": "int",
+          "offset": 32,
+          "size": 4
+        },
+        {
+          "name": "transparentColorRGB24",
+          "type": "int",
+          "offset": 36,
+          "size": 4
+        },
+        {
+          "name": "abSubTileFlags",
+          "type": "BYTE[25]",
+          "offset": 40,
+          "size": 25
+        },
+        {
+          "name": null,
+          "type": "undefined",
+          "offset": 65,
+          "size": 1
+        },
+        {
+          "name": "nTextureCacheIndex",
+          "type": "short",
+          "offset": 66,
+          "size": 2
+        },
+        {
+          "name": null,
+          "type": "int",
+          "offset": 68,
+          "size": 4
+        },
+        {
+          "name": "dwBlockDataOffset",
+          "type": "int",
+          "offset": 72,
+          "size": 4
+        },
+        {
+          "name": "nBlockDataSize",
+          "type": "int",
+          "offset": 76,
+          "size": 4
+        },
+        {
+          "name": "nSubTiles",
+          "type": "int",
+          "offset": 80,
+          "size": 4
+        },
+        {
+          "name": "pSubTiles",
+          "type": "D2GroundSubTileStrc *",
+          "offset": 84,
+          "size": 4
+        },
+        {
+          "name": "szFilePath",
+          "type": "char *",
+          "offset": 88,
+          "size": 4
+        },
+        {
+          "name": "pLruNode",
+          "type": "D2LRUCacheNodeStrc *",
+          "offset": 92,
+          "size": 4
+        }
+      ]
+    },
+    "functionReturnTypes": {
+      "GLTEXCACHE_AllocateNode": "int",
+      "GLSUBTILE_AllocateNode": "int",
+      "D3DTEXCACHE_AllocateNodeFromFreeList": "int"
+    }
+  }
+}

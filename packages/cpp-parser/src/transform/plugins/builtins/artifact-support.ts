@@ -96,3 +96,18 @@ export const SHIFT_COUNT_SUPPORT_LINES: readonly string[] = [
   '#  define D2_SHIFT_COUNT(n) ((n) & 0x1f)',
   '#endif',
 ];
+
+/** Compiler ordering without a hardware fence; VC8/GNU need no runtime call. */
+export const COMPILER_FENCE_SUPPORT_LINES: readonly string[] = [
+  '// An opt-in measured source form keeps stores before the next load (vc8-form fence).',
+  '#if defined(_MSC_VER)',
+  'extern "C" void __cdecl _ReadWriteBarrier(void);',
+  '#pragma intrinsic(_ReadWriteBarrier)',
+  '#define D2_COMPILER_FENCE() _ReadWriteBarrier()',
+  '#elif defined(__GNUC__) || defined(__clang__)',
+  '#define D2_COMPILER_FENCE() __asm__ __volatile__("" ::: "memory")',
+  '#else',
+  '#include <atomic>',
+  '#define D2_COMPILER_FENCE() std::atomic_signal_fence(std::memory_order_seq_cst)',
+  '#endif',
+];

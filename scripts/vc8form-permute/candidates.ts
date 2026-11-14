@@ -231,6 +231,23 @@ function sites(c: Ctx, maxAnchors: number): string[] {
   const { fn, vars, locals } = c;
   const all = [...walk(fn.body!)];
   const blocks = all.filter(n => n.kind === NodeKind.CompoundStmt);
+  // fence: adjacent member clears; the form proves their types/layout and the
+  // following pointer test. Count raw matching runs exactly as application does.
+  const fences: string[] = [];
+  const clearedMember = (s: N): N | undefined => {
+    const a = s?.kind === NodeKind.ExprStmt ? unparen(s.expression) : undefined;
+    if (a?.kind !== NodeKind.AssignExpr || a.operator !== '=') return undefined;
+    let rhs = unparen(a.right);
+    while (rhs.kind === NodeKind.CStyleCastExpr) rhs = unparen(rhs.expression);
+    if (rhs.kind !== NodeKind.NullptrLiteral && !(rhs.kind === NodeKind.IntegerLiteral && BigInt(rhs.value) === 0n)) return undefined;
+    const lhs = unparen(a.left);
+    return lhs.kind === NodeKind.MemberExpr && lhs.isArrow && unparen(lhs.object).kind === NodeKind.Identifier ? lhs : undefined;
+  };
+  for (const block of blocks) for (let i = 0; i + 1 < block.statements.length; ++i) {
+    const a = clearedMember(block.statements[i]), b = clearedMember(block.statements[i + 1]);
+    if (a && b) fences.push(`${pr(a)},${pr(b)}`);
+  }
+  for (const { t, i } of indexed(fences)) out.add(`fence(${t}${i ? `,@${i}` : ''})`);
   // nullfault32: the form checks the sole volatile byte store and its null address.
   if (pr(fn.returnType) === 'void' && fn.parameters.length === 0 && !fn.isVariadic
       && fn.body!.statements.length <= 2) out.add('nullfault32()');
