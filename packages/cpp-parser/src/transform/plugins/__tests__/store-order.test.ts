@@ -272,6 +272,38 @@ describe('storeOrderPlugin', () => {
     assert.deepStrictEqual(sites, []);
   });
 
+  // CreateMissileOrMonster, 00466730: the original stores nUnitGUID (+0x50), nMonstatId (+0x5a)
+  // and nX (+0x5d) before nY (+0x60) and eUnitType (+0x63); the decompiler prints the first
+  // three last, as values carried into UNIT_CreateMonster. A global's value beside parameters,
+  // stored into a local whose address is first taken by the call.
+  it('orders field stores the decompiler carried into the call', () => {
+    const create = [
+      { name: 'nUnitGUID', offset: 0, size: 4, type: 'int' }, { name: 'nMonstatId', offset: 4, size: 4, type: 'int' },
+      { name: 'nX', offset: 8, size: 4, type: 'int' }, { name: 'nY', offset: 12, size: 4, type: 'int' },
+      { name: 'eMonsterType', offset: 16, size: 4, type: 'int' }, { name: 'nOwnerGUID', offset: 20, size: 4, type: 'int' },
+      { name: 'eUnitType', offset: 24, size: 4, type: 'int' },
+    ];
+    const { out, sites } = run([
+      'struct Create { int nUnitGUID; int nMonstatId; int nX; int nY; int eMonsterType; int nOwnerGUID; int eUnitType; };',
+      'int f(int nMonstatId, int nX, int nY, int eUnitType) {',
+      '  Create s;',
+      '[@0x45] s.eMonsterType = 0;',
+      '[@0x48] s.nOwnerGUID = 0;',
+      '[@0x60] s.nY = nY;',
+      '[@0x63] s.eUnitType = eUnitType;',
+      '[@0x50] s.nUnitGUID = gA;',
+      '[@0x5a] s.nMonstatId = nMonstatId;',
+      '[@0x5d] s.nX = nX;',
+      '  return Use(&s);',
+      '}',
+    ], {
+      structFields: { ...TABLES.structFields, Create: Object.fromEntries(create.map(f => [f.name, f.type])) },
+      structLayouts: { ...TABLES.structLayouts, Create: create },
+    });
+    assert.deepStrictEqual(sites, ['order7']);
+    assert.ok(out.includes('s.eMonsterType = 0; s.nOwnerGUID = 0; s.nUnitGUID = gA; s.nMonstatId = nMonstatId; s.nX = nX; s.nY = nY; s.eUnitType = eUnitType;'), out);
+  });
+
   it('leaves a run with an unknown store', () => {
     const { sites } = run([
       'void f(int a, int b) {',
