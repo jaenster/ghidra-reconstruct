@@ -3646,6 +3646,11 @@ function transformDecompiledCode(
           outParamWidth: (callee: string, index: number) => oracle.outParamWidthNonNull(callee, index),
           typeSize: (spelling: string) => oracle.typeSize(spelling),
           pushSlotInits: enclosing?.pushSlotInits ?? [],
+          unionNames: context.funcPtrArgCasts.unionNames,
+          aggregateSizes: context.funcPtrArgCasts.aggregateSizes,
+          aggregateMembers: context.funcPtrArgCasts.aggregateMembers,
+          structLayouts: context.funcPtrArgCasts.structLayouts,
+          convertingAggregates: context.funcPtrArgCasts.convertingAggregates,
         };
       }
       perPluginOptions['branchless-select'] = {
