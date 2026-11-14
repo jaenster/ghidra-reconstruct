@@ -75,7 +75,7 @@ describe('record-null-fold', () => {
   it('folds when the record guard tests more after the record, as `!X || ...`', () => {
     const r = run(MORE, layout(MORE, [2, 9]));
     assert.deepStrictEqual(r.sites, ['pUnit:pTxt']);
-    assert.ok(r.out.includes('int nId; Rec* pTxt = pUnit && (nId = pUnit->nClassId) >= 0 && nId < gT->nSize ? gT->pTxt + nId : nullptr; if (!pTxt || pTxt->nSub < 0) { return 1; }'), r.out);
+    assert.ok(r.out.includes('int nId; Rec* pTxt = pUnit && ((nId = pUnit->nClassId) >= 0 && nId < gT->nSize) ? gT->pTxt + nId : nullptr; if (!pTxt || pTxt->nSub < 0) { return 1; }'), r.out);
   });
 
   it('folds when the record guard is `!(X && ...)`', () => {
