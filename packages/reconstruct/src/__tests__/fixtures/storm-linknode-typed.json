@@ -1,6 +1,6 @@
 {
   "source": "7b70696f8b22e033a09b47cdfc24c37b5dad0c09",
-  "generatorControl": "81079e23c65bf570fded257ad0fd76627385b14c",
+  "generatorControl": "022e9a01265e22a61a6487190e6547454d5c241d",
   "dataTypes": [
     {
       "name": "CMDDEF",
@@ -275,6 +275,10 @@
       }
     }
   },
+  "comdatAddresses": [
+    "00601fc0",
+    "006c4180"
+  ],
   "options": {
     "outputDir": "./out",
     "format": "cpp",
@@ -779,12 +783,251 @@
       },
       "tu": "3rdparty/Storm/Source/stpl_CMDDEF",
       "dh": "adab1c24"
+    },
+    {
+      "fn": {
+        "name": "ARCHIVE_LinkNode",
+        "address": "0045bbe0",
+        "entryPoint": "0045bbe0",
+        "signature": "void ARCHIVE_LinkNode(int * * ppList, int * * ppNode, int32_t nMode, int * * ppTarget)",
+        "returnType": "void",
+        "callingConvention": "__fastcall",
+        "size": 161,
+        "isThunk": false,
+        "isExternal": false,
+        "hasVarArgs": false,
+        "namespace": "D2Client::Archive",
+        "comment": "@function ARCHIVE_LinkNode\n@address Game.exe.ram:0045bbe0\n@date 2026.06.06\n@params\n  ppNode: Stack[0x4]:4 (int * *)\n  nMode: Stack[0x8]:4 (int32_t)\n  ppTarget: Stack[0xc]:4 (int * *)\n  ppList: ECX:4 (int * *)\n@description Diablo 2 1.14d reverse team\nhttps://blizzhackers.dev\n\nFunction uses custom registers for function arguments!\n[int * * ppNode@Stack[0x4]:4]\n[int32_t nMode@Stack[0x8]:4]\n[int * * ppTarget@Stack[0xc]:4]\n[int * * ppList@ECX:4]",
+        "sourceFile": null,
+        "sourceLine": null,
+        "sourceInfo": null,
+        "parameters": [
+          {
+            "name": "ppList",
+            "dataType": "int * *",
+            "size": 4,
+            "ordinal": 0,
+            "storage": "ECX:4",
+            "stackOffset": null,
+            "resolvedType": null
+          },
+          {
+            "name": "ppNode",
+            "dataType": "int * *",
+            "size": 4,
+            "ordinal": 1,
+            "storage": "Stack[0x4]:4",
+            "stackOffset": 4,
+            "resolvedType": null
+          },
+          {
+            "name": "nMode",
+            "dataType": "int32_t",
+            "size": 4,
+            "ordinal": 2,
+            "storage": "Stack[0x8]:4",
+            "stackOffset": 8,
+            "resolvedType": null
+          },
+          {
+            "name": "ppTarget",
+            "dataType": "int * *",
+            "size": 4,
+            "ordinal": 3,
+            "storage": "Stack[0xc]:4",
+            "stackOffset": 12,
+            "resolvedType": null
+          }
+        ],
+        "localVariables": [
+          {
+            "name": "ppCurNode",
+            "dataType": "int * *",
+            "size": 4,
+            "storage": "EAX:4",
+            "stackOffset": null,
+            "resolvedType": "int * *"
+          },
+          {
+            "name": "pPrevLink",
+            "dataType": "int *",
+            "size": 4,
+            "storage": "ESI:4",
+            "stackOffset": null,
+            "resolvedType": "int *"
+          },
+          {
+            "name": "pNext",
+            "dataType": "int *",
+            "size": 4,
+            "storage": "HASH:5f310ca6d5:4",
+            "stackOffset": null,
+            "resolvedType": "int *"
+          },
+          {
+            "name": "piVar2",
+            "dataType": "undefined4",
+            "size": 4,
+            "storage": "HASH:5f89404e78:4",
+            "stackOffset": null,
+            "resolvedType": null
+          }
+        ],
+        "tags": [
+          {
+            "type": "llm-artifact-fix"
+          },
+          {
+            "type": "proto-asm-verified"
+          }
+        ],
+        "decompiled": "\n/* @function ARCHIVE_LinkNode\n   @address Game.exe.ram:0045bbe0\n   @date 2026.06.06\n   @params\n     ppNode: Stack[0x4]:4 (int * *)\n     nMode: Stack[0x8]:4 (int32_t)\n     ppTarget: Stack[0xc]:4 (int * *)\n     ppList: ECX:4 (int * *)\n   @description Diablo 2 1.14d reverse team\n   https://blizzhackers.dev\n   \n   Function uses custom registers for function arguments!\n   [int * * ppNode@Stack[0x4]:4]\n   [int32_t nMode@Stack[0x8]:4]\n   [int * * ppTarget@Stack[0xc]:4]\n   [int * * ppList@ECX:4] */\n\nvoid __fastcall\nD2Client::Archive::ARCHIVE_LinkNode(int **ppList,int **ppNode,int32_t nMode,int **ppTarget)\n\n{\n  int **ppCurNode;\n  int *pPrevLink;\n  int *pNext;\n  \n  ppCurNode = ppNode;\n  if (ppNode == (int **)0x0) {\n    ppCurNode = ppList + 1;\n  }\n  pNext = *ppCurNode;\n  if (pNext != (int *)0x0) {\n    pPrevLink = ppCurNode[1];\n    if ((int)pPrevLink < 0) {\n      pPrevLink = (int *)~(uint)pPrevLink;\n    }\n    else {\n      pPrevLink = (int *)((int)pPrevLink + ((int)ppCurNode - pNext[1]));\n    }\n    *pPrevLink = (int)pNext;\n    (*ppCurNode)[1] = (int)ppCurNode[1];\n    *ppCurNode = (int *)0x0;\n    ppCurNode[1] = (int *)0x0;\n  }\n  if (ppTarget == (int **)0x0) {\n    ppTarget = ppList + 1;\n  }\n  if (nMode != 1) {\n    pNext = *ppTarget;\n    *ppCurNode = pNext;\n    ppCurNode[1] = (int *)pNext[1];\n    pNext[1] = (int)ppNode;\n    *ppTarget = (int *)ppCurNode;\n    return;\n  }\n  *ppCurNode = (int *)ppTarget;\n  ppCurNode[1] = ppTarget[1];\n  pNext = *ppList;\n  pPrevLink = ppTarget[1];\n  if ((int)pPrevLink < 0) {\n    *(int ***)~(uint)pPrevLink = ppCurNode;\n    ppTarget[1] = (int *)ppNode;\n    return;\n  }\n  if ((int)pNext < 0) {\n    pNext = (int *)((int)ppTarget - (*ppTarget)[1]);\n  }\n  *(int ***)((int)pPrevLink + (int)pNext) = ppCurNode;\n  ppTarget[1] = (int *)ppNode;\n  return;\n}\n\n",
+        "branchLayout": {
+          "lineCount": 72,
+          "lines": [
+            [
+              28,
+              [
+                13
+              ]
+            ],
+            [
+              32,
+              [
+                22
+              ]
+            ],
+            [
+              34,
+              [
+                29
+              ]
+            ],
+            [
+              45,
+              [
+                70
+              ]
+            ],
+            [
+              48,
+              [
+                81
+              ]
+            ],
+            [
+              49,
+              [
+                83
+              ]
+            ],
+            [
+              56,
+              [
+                105
+              ]
+            ],
+            [
+              60,
+              [
+                120
+              ]
+            ],
+            [
+              65,
+              [
+                138
+              ]
+            ]
+          ],
+          "ifs": [
+            [
+              28,
+              13
+            ],
+            [
+              32,
+              22
+            ],
+            [
+              34,
+              29
+            ],
+            [
+              45,
+              70
+            ],
+            [
+              48,
+              81
+            ],
+            [
+              60,
+              120
+            ],
+            [
+              65,
+              138
+            ]
+          ],
+          "tests": [
+            [
+              28,
+              {
+                "op": "==",
+                "mnemonic": "TEST",
+                "reg": "EBX",
+                "k": 0,
+                "size": 4,
+                "at": 7
+              }
+            ],
+            [
+              32,
+              {
+                "op": "!=",
+                "mnemonic": "TEST",
+                "reg": "EDI",
+                "k": 0,
+                "size": 4,
+                "at": 20
+              }
+            ],
+            [
+              45,
+              {
+                "op": "==",
+                "mnemonic": "TEST",
+                "reg": "EDX",
+                "k": 0,
+                "size": 4,
+                "at": 68
+              }
+            ],
+            [
+              48,
+              {
+                "op": "!=",
+                "mnemonic": "SUB",
+                "reg": "ESI",
+                "k": 1,
+                "size": 4,
+                "at": 78,
+                "delta": 1
+              }
+            ]
+          ]
+        }
+      },
+      "tu": "Source/D2Client/Archive",
+      "dh": "f5057a7f"
     }
   ],
   "native": {
+    "functions": 3,
     "bytesPerFunction": 161,
     "instructionsPerFunction": 73,
     "rawSHA256": "3f533273f098c3cb7fad91a32b8fba6bbca2e5bc030435abaf0dd24b1c7b42d0"
   },
-  "provenance": "Current read-only live resolved function/type models and normal template/member model. All7conditional branches,4equality tokens and2insertion-arm entry instructions per function manually native-attested; both161-byte functions literally identical and equal the reference PE. Normal branch-layout mapper consumed these facts. This is not an owning extractor snapshot; native gains require full-TU replay."
+  "provenance": "Current read-only live resolved function/type models and normal template/member model; Archive is an ordinary function. All7conditional branches,4equality tokens and2insertion-arm entry instructions per function manually native-attested; all3original161-byte functions literally identical and equal the reference PE. Normal branch-layout mapper consumed these facts. This is not an owning extractor snapshot; native gains require full-TU replay."
 }

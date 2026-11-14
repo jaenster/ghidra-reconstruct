@@ -2,7 +2,7 @@
 import { NodeKind } from '../../../ast/kinds.js';
 import type {
   ASTNode, AssignExpr, BinaryExpr, CStyleCastExpr, CompoundStmt, DeclStmt, ExprStmt, Expression,
-  FunctionDecl, Identifier, IfStmt, IntegerLiteralExpr, MemberExpr, ReturnStmt, Statement,
+  FunctionDecl, Identifier, IfStmt, IntegerLiteralExpr, MemberExpr, ReturnStmt, Statement, SubscriptExpr,
   UnaryExpr, VariableDecl,
 } from '../../../ast/nodes.js';
 import { Expr, Type } from '../../../ast/factory.js';
@@ -172,14 +172,27 @@ export function createStormNextLinkInsertTransformer(options: StormNextLinkOptio
         const s = t && shapeOfNode(t, 0, resolve);
         return !!s && (s.stars > 0 || wordInteger.has(s.base));
       };
-      const headMember = (e: Expression, offset: number): MemberExpr | null => {
+      const wordElement = (e: Expression): boolean => {
+        const t = operandShape(e);
+        return !!t && (t.stars > 1 || (t.stars === 1 && wordInteger.has(t.base)));
+      };
+      /** A read at offset 0 or 4: members, or arrays of pointers/32-bit words. */
+      const headOfRead = (e: Expression, offset: number): Expression | null => {
         if (!safeCasts(e)) return null;
         const x = uncast(e);
+        if (x.kind === NodeKind.UnaryExpr && (x as UnaryExpr).operator === '*' && offset === 0) {
+          const pointer = (x as UnaryExpr).operand;
+          return wordElement(pointer) ? pointer : null;
+        }
+        if (x.kind === NodeKind.SubscriptExpr) {
+          const s = x as SubscriptExpr, i = unparen(s.index);
+          return wordElement(s.array) && i.kind === NodeKind.IntegerLiteral && (i as IntegerLiteralExpr).value * 4n === BigInt(offset) ? s.array : null;
+        }
         if (x.kind !== NodeKind.MemberExpr || fieldOffset(x as MemberExpr, operandShape) !== offset) return null;
         const m = x as MemberExpr;
         // `entry->link.next` reads the next word of the embedded link, whose
         // address (not the containing entry's) is the helper's receiver.
-        return m.isArrow ? m : updateNode(m, { object: Expr.unary('&', cloneNode(m.object)), isArrow: true });
+        return m.isArrow ? m.object : Expr.unary('&', cloneNode(m.object));
       };
       const addressBase = (e: Expression): Expression => {
         const x = uncast(e);
@@ -264,10 +277,10 @@ export function createStormNextLinkInsertTransformer(options: StormNextLinkOptio
         if (x.kind !== NodeKind.BinaryExpr || (x as BinaryExpr).operator !== '-') return false;
         const b = x as BinaryExpr;
         if (!sameHead(b.left, head)) return false;
-        const prevNext = headMember(b.right, 4);
+        const prevNext = headOfRead(b.right, 4);
         if (!prevNext) return false;
-        const prev = headMember(prevNext.object, 0);
-        return !!prev && sameHead(prev.object, head);
+        const prev = headOfRead(prevNext, 0);
+        return !!prev && sameHead(prev, head);
       };
       const match = (s: Statement[], i: number): Statement[] | null => {
         if (i + 6 >= s.length) return null;
@@ -289,9 +302,8 @@ export function createStormNextLinkInsertTransformer(options: StormNextLinkOptio
         // Their assignments disappear. Every surviving expression must read its inputs
         // independently of these locals, including the helper's head and offset inputs.
         if (readsRemoved(off.right) || readsRemoved(next.right)) return null;
-        const nextRead = headMember(next.right, 4);
-        if (!nextRead) return null;
-        const head = nextRead.object;
+        const head = headOfRead(next.right, 4);
+        if (!head) return null;
         const first = signTest(s[i + 2], nextName);
         if (!first || first.thenBranch.kind !== NodeKind.CompoundStmt) return null;
         const neg = (first.thenBranch as CompoundStmt).statements;
