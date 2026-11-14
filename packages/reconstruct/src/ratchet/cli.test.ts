@@ -1,20 +1,27 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const cli = fileURLToPath(new URL('./cli.ts', import.meta.url));
 const cwd = fileURLToPath(new URL('../../../../', import.meta.url));
 
-function run(args: string[]) {
-  const child = spawnSync(process.execPath, ['--import', 'tsx', cli, ...args], {
+function run(args: string[], entry = cli) {
+  const child = spawnSync(process.execPath, ['--import', 'tsx', entry, ...args], {
     cwd, encoding: 'utf8', timeout: 30_000, windowsHide: true,
   });
   assert.ifError(child.error);
   return child;
+}
+
+function removeTemp(root: string) {
+  const actual = realpathSync(root);
+  assert.equal(dirname(actual), realpathSync(tmpdir()));
+  assert.match(basename(actual), /^ratchet CLI /);
+  rmSync(actual, { recursive: true, force: true });
 }
 
 describe('ratchet CLI process entry', () => {
@@ -22,6 +29,30 @@ describe('ratchet CLI process entry', () => {
     const child = run(['not-a-command']);
     assert.equal(child.status, 2, child.stderr);
     assert.match(child.stderr, /usage: ratchet/);
+  });
+
+  it('runs the command through a symlinked directory', t => {
+    const root = mkdtempSync(join(tmpdir(), 'ratchet CLI link '));
+    const linked = join(root, 'linked ratchet');
+    let created = false;
+    try {
+      try {
+        symlinkSync(dirname(cli), linked, process.platform === 'win32' ? 'junction' : 'dir');
+        created = true;
+      } catch (error) {
+        if (['EPERM', 'EACCES', 'ENOTSUP'].includes((error as NodeJS.ErrnoException).code ?? '')) {
+          t.skip('directory symlinks are unavailable');
+          return;
+        }
+        throw error;
+      }
+      const child = run(['not-a-command'], join(linked, basename(cli)));
+      assert.equal(child.status, 2, child.stderr);
+      assert.match(child.stderr, /usage: ratchet/);
+    } finally {
+      if (created) unlinkSync(linked);
+      removeTemp(root);
+    }
   });
 
   it('captures a pin when invoked with native paths containing spaces', () => {
@@ -44,7 +75,7 @@ int Increment(int nValue) { return nValue + 1; }
       assert.equal(record.note, 'CLI fixture');
       assert.match(record.members[0].text, /return nValue \+ 1/);
     } finally {
-      rmSync(root, { recursive: true, force: true });
+      removeTemp(root);
     }
   });
 

@@ -236,6 +236,18 @@ export async function main(argv: string[]): Promise<number> {
   }
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
+function isEntryPoint(): boolean {
+  if (!process.argv[1]) return false;
+  const entry = path.resolve(process.argv[1]);
+  // Also accept the invoked path when Node preserves the main module's symlink.
+  if (import.meta.url === pathToFileURL(entry).href) return true;
+  try {
+    return import.meta.url === pathToFileURL(fs.realpathSync(entry)).href;
+  } catch {
+    return false; // The unresolved path was checked above.
+  }
+}
+
+if (isEntryPoint()) {
   main(process.argv.slice(2)).then(code => process.exit(code), err => { console.error(err instanceof Error ? err.message : err); process.exit(1); });
 }
