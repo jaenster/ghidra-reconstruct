@@ -313,8 +313,16 @@ describe('record-getter-split', () => {
     assert.deepStrictEqual(r.sites, []);
   });
 
-  it('leaves a bare null test with no read after it', () => {
+  // Skills_CltDoFunc_Ass_AuraLevel_CastAttackTarget 004f2720: the record is only null-tested.
+  it('takes a bare null test whose record nothing reads', () => {
     const src = [...BARE.slice(0, 11), '  return Use(i);', '}'];
+    const r = run(src, layout(src, [3]), TYPES);
+    assert.deepStrictEqual(r.sites, ['pTxtRecord:bare:2']);
+    assert.ok(r.out.includes('Rec* pTxtRecord = i >= 0 && i < gT->nSize ? gT->pTxt + i : nullptr; if (!pTxtRecord) { return 7; } return Use(i);'), r.out);
+  });
+
+  it('leaves a bare null test whose reads sit past a call', () => {
+    const src = [...BARE.slice(0, 11), '  Use(i);', '  return gT->pTxt[i].a;', '}'];
     const r = run(src, layout(src, [3]), TYPES);
     assert.deepStrictEqual(r.sites, []);
   });

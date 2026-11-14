@@ -107,6 +107,35 @@ describe('record-getter-guard', () => {
     assert.deepStrictEqual(r.sites, []);
   });
 
+  // Skills_CltDoFunc_Sor_SimpleMakeMissile 004e3a30: the record is only null-tested.
+  it('takes a guard whose record nothing reads', () => {
+    const r = run([
+      'int f(int n) {',
+      `  if (!(${GUARD})) {`,
+      '    return 0;',
+      '  }',
+      '  return Use(n);',
+      '}',
+    ]);
+    assert.deepStrictEqual(r.sites, ['pItemTypesTxt:0!']);
+    assert.ok(r.out.includes('ItemTypesTxt* pItemTypesTxt = n >= 0 && n < sgptDataTable->nTxtItemTypesSize ? sgptDataTable->pTxtItemTypes + n : nullptr; if (!pItemTypesTxt) { return 0; }'), r.out);
+  });
+
+  // Skills_CltDoFunc_Ass_AuraLevel_CastAttackTarget 004f2720: a condition before the
+  // getter is tested on its own first.
+  it('tests a condition before an unread getter on its own', () => {
+    const r = run([
+      'int f(int *p, int n) {',
+      `  if (!(p && ${GUARD})) {`,
+      '    return 0;',
+      '  }',
+      '  return Use(n);',
+      '}',
+    ]);
+    assert.deepStrictEqual(r.sites, ['pItemTypesTxt:0!']);
+    assert.ok(r.out.includes('if (!p) { return 0; } ItemTypesTxt* pItemTypesTxt = n >= 0 && n < sgptDataTable->nTxtItemTypesSize ? sgptDataTable->pTxtItemTypes + n : nullptr; if (!pItemTypesTxt) { return 0; }'), r.out);
+  });
+
   it('leaves a `!` guard that falls through', () => {
     const r = run([
       'int f(int n) {',
