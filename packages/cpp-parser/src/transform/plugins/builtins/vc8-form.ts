@@ -44,6 +44,12 @@
  *                        reads read B and its copies go (copy-coalesce's proof). Refused
  *                        unless A == B holds at every read of A on every path, neither is
  *                        written any other way there, and neither's address is taken.
+ *   coalesce(A,P->F)     `T A = E; P->F = A; use(A);` becomes `P->F = E; use(P->F);`.
+ *                        The field and local have the same integer type, and the field is
+ *                        a plain nonvolatile member of a pointer parameter. Only one
+ *                        immediately following expression may read A; nothing in it can
+ *                        write before the reads, including other call arguments. Typed
+ *                        scalar/pointer call parameters rule out hidden conversions.
  *   cache(E,N,T[,@A])    a new local `T N = E;` before the statement storing A, or the
  *                        if/while/switch testing A (default: before the first statement
  *                        that evaluates E, in the innermost block holding every E), and
@@ -577,7 +583,8 @@ export function parseVc8Form(text: string): Vc8Form | undefined {
       return args.length >= 2 && (n === 0 || n >= 1) ? { op: 'seq', targets: args, ...(n ? { index: n } : {}) } : undefined;
     }
     case 'fold': return args.length === 1 && !anchor ? { op: 'fold', name: args[0] } : undefined;
-    case 'coalesce': return (args.length === 1 || args.length === 2) && !anchor && args.every(a => /^[A-Za-z_]\w*$/.test(a))
+    case 'coalesce': return (args.length === 1 || args.length === 2) && !anchor && /^[A-Za-z_]\w*$/.test(args[0])
+      && (args.length === 1 || /^[A-Za-z_]\w*(?:->[A-Za-z_]\w*)?$/.test(norm(args[1])))
       ? { op: 'coalesce', name: args[0], ...(args[1] ? { from: args[1] } : {}) } : undefined;
     case 'nullfield':
       return !anchor && args.length === 3 && args[0] !== '' && /^[A-Za-z_]\w*$/.test(args[1]) && /^[A-Za-z_]\w*$/.test(args[2])
@@ -1266,9 +1273,116 @@ function removeDecl(fn: FunctionDecl, v: string): void {
 /** Join one measured value lifetime back into the signed word that produced it. */
 /** copy-coalesce's proven fold of local `name` into the variable it copies (`from`). */
 function doCoalesce(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'coalesce' }>): void {
+  if (f.from?.includes('->')) return doFieldCoalesce(fn, f.name, f.from);
   const r = coalesceLocal(fn, f.name, f.from);
   if (typeof r === 'string') refuse(r);
   fn.body = (r as FunctionDecl).body;
+}
+
+/** A measured local lifetime whose converted value is already stored in a field. */
+function doFieldCoalesce(fn: FunctionDecl, name: string, target: string): void {
+  const types = localTypesOf(fn);
+  const resolve = (t: string) => selectTables?.typedefTargets?.[t];
+  const shapeOf = createExprShape(types, { resolve });
+  const qualified = (t: string): boolean => {
+    for (let i = 0; i < 8; i++) {
+      if (/\b(?:const|volatile|restrict|_Atomic)\b|[&()[\]]/.test(t)) return true;
+      const next = resolve(t.replace(/\*/g, '').trim());
+      if (!next) return false;
+      t = next;
+    }
+    return true;
+  };
+  const scalar = (t: string): boolean => !qualified(t)
+    && (!!intType(t, false) || (shapeOfSpelling(t, resolve)?.stars ?? 0) > 0);
+  const fieldType = (e: Expression): string | undefined => {
+    const m = unparen(e);
+    if (m.kind !== NodeKind.MemberExpr || !(m as MemberExpr).isArrow) return undefined;
+    const object = unparen((m as MemberExpr).object), member = (m as MemberExpr).member;
+    if (!isId(object) || !isId(member)) return undefined;
+    const params = fn.parameters.filter(p => p.name?.name === object.name);
+    if (params.length !== 1 || qualified(emit(params[0].type as never)) || addressTaken(fn, object.name)) return undefined;
+    if ([...walk(fn.body!)].some(({ node }) => node.kind === NodeKind.VariableDecl && (node as VariableDecl).name.name === object.name)) return undefined;
+    const s = shapeOf(object);
+    if (!s || s.stars !== 1 || selectTables?.unionNames?.includes(s.base)) return undefined;
+    const layout = selectTables?.structLayouts?.[s.base];
+    const fields = layout?.filter(f => f.name === member.name);
+    const t = selectTables?.structFields?.[s.base]?.[member.name];
+    if (!fields || fields.length !== 1 || fields[0].bitSize != null || !t || qualified(t)
+        || qualified(fields[0].type) || norm(fields[0].type) !== norm(t)) return undefined;
+    return t;
+  };
+  const read = (value: Expression): boolean => {
+    const e = unparen(value);
+    if (e.kind === NodeKind.IntegerLiteral || e.kind === NodeKind.StringLiteral || e.kind === NodeKind.CharLiteral) return true;
+    if (isId(e)) return types.has(e.name) && scalar(emit(types.get(e.name)! as never));
+    if (e.kind === NodeKind.MemberExpr) { const t = fieldType(e); return !!t && scalar(t); }
+    if (e.kind === NodeKind.CStyleCastExpr) return scalar(emit((e as CStyleCastExpr).type as never)) && read((e as CStyleCastExpr).expression);
+    if (e.kind === NodeKind.UnaryExpr) return ['+', '-', '~', '!'].includes((e as UnaryExpr).operator) && read((e as UnaryExpr).operand);
+    if (e.kind === NodeKind.BinaryExpr) {
+      const b = e as BinaryExpr;
+      return ['+', '-', '*', '/', '%', '<<', '>>', '&', '|', '^', '==', '!=', '<', '<=', '>', '>=', '&&', '||'].includes(b.operator)
+        && read(b.left) && read(b.right);
+    }
+    return false;
+  };
+  const consumerSafe = (value: Expression): boolean => {
+    let e = unparen(value);
+    while (e.kind === NodeKind.CStyleCastExpr) {
+      if (!scalar(emit((e as CStyleCastExpr).type as never))) return false;
+      e = unparen((e as CStyleCastExpr).expression);
+    }
+    if (e.kind !== NodeKind.CallExpr) return read(e);
+    const call = e as CallExpr, callee = calleeName(call.callee);
+    if (!callee || types.has(callee) || !call.arguments.every(read)) return false;
+    let params = scopedLookup(selectTables?.functionParamTypes ?? {}, callee, selectTables?.enclosingSegments ?? []);
+    // alloc-macros writes this five-argument wrapper of the six-argument Fog call.
+    if (!params && callee === 'D2_REALLOC_POOL_AT') {
+      const original = selectTables?.functionParamTypes?.['Fog::Memory::ReAllocServerMemory'];
+      if (original?.length === 6) params = original.slice(0, 5);
+    }
+    return !!params && params.length === call.arguments.length && params.every(scalar);
+  };
+  for (const { node } of walk(fn.body!)) {
+    if ([NodeKind.GotoStmt, NodeKind.LabelStmt, NodeKind.CaseStmt, NodeKind.DefaultStmt,
+      NodeKind.LambdaExpr, NodeKind.AsmDecl, NodeKind.TryStmt, NodeKind.SehTryStmt].includes(node.kind)) refuse('unmodelled field-coalesce control');
+  }
+  if (fn.parameters.some(p => p.name?.name === name)) refuse('field coalesce needs a local');
+  const declarations = [...walk(fn.body!)].filter(({ node }) => node.kind === NodeKind.VariableDecl && (node as VariableDecl).name.name === name);
+  if (declarations.length !== 1 || addressTaken(fn, name)) refuse('field coalesce needs one unaddressed local');
+  for (const block of blocks(fn)) {
+    for (let i = 0; i + 2 < block.statements.length; i++) {
+      const d = declOf(block.statements[i]), store = storeOf(block.statements[i + 1]);
+      if (!d || d.name.name !== name || !store || store.operator !== '=' || text(store.left) !== norm(target)
+          || !isId(unparen(store.right), name)) continue;
+      if (d.specifiers.length || d.attributes.length || d.directInit || d.copyListInit || d.bitWidth
+          || !d.initializer || d.initializer.kind === NodeKind.InitListExpr || qualified(emit(d.type as never))) refuse('not a plain initialized integer');
+      const member = fieldType(store.left), local = intType(text(d.type), false), field = member && intType(member, false);
+      if (!local || !field || local.w !== field.w || local.r.lo !== field.r.lo || local.r.hi !== field.r.hi) refuse('field and local types differ or field facts are incomplete');
+      if (!read(d.initializer as Expression) || mentions(d.initializer, name)) refuse('initializer is not a pure typed read');
+      const next = block.statements[i + 2];
+      const expr = next.kind === NodeKind.IfStmt && !(next as IfStmt).init ? (next as IfStmt).condition
+        : next.kind === NodeKind.ReturnStmt ? (next as ReturnStmt).value
+        : next.kind === NodeKind.ExprStmt ? (next as ExprStmt).expression
+        : declOf(next)?.initializer;
+      if (!expr || expr.kind === NodeKind.InitListExpr || !mentions(expr, name) || !consumerSafe(expr as Expression)) refuse('next expression may write before the field read');
+      const allowed = new Set<ASTNode>([d.name, unparen(store.right), ...[...walk(expr)].filter(({ node }) => isId(node, name)).map(({ node }) => node)]);
+      if ([...walk(fn.body!)].some(({ node }) => isId(node, name) && !allowed.has(node))) refuse('local has another lifetime or read');
+      if ([...walk(expr)].some(({ node }) => node === expr && isId(node, name))) {
+        // A root identifier has no child slot: replace it through its owner below.
+        if (next.kind === NodeKind.ReturnStmt) (next as ReturnStmt).value = cloneNode(store.left);
+        else if (next.kind === NodeKind.IfStmt) (next as IfStmt).condition = cloneNode(store.left);
+        else if (next.kind === NodeKind.ExprStmt) (next as ExprStmt).expression = cloneNode(store.left);
+        else declOf(next)!.initializer = cloneNode(store.left);
+      } else {
+        for (const { node, slot } of [...walk(expr)]) if (slot && isId(node, name)) put(slot, cloneNode(store.left));
+      }
+      store.right = cloneNode(d.initializer as Expression);
+      block.statements.splice(i, 1);
+      return;
+    }
+  }
+  refuse('no adjacent local initialization, field store, and read');
 }
 
 function doRecordwalk(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'recordwalk' }>): void {
