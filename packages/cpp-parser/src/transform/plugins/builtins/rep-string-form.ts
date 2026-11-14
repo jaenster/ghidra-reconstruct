@@ -38,10 +38,14 @@
  *    moves to the first of them;
  *  - two objects are also apart when the source is a string literal, or when one is a frame
  *    object nothing names before the loop but its own pointer's start (no pointer from
- *    outside can reach into it);
+ *    outside can reach into it), or when one is a frame object and the other a local written
+ *    once outside the loop, from an expression not naming the object, before anything names
+ *    it (SaveQuests 00569320: the save buffer pointer read from the caller before the record
+ *    is filled);
  *  - a `movsw`/`movsb` tail (the same copy continued through both pointers right after the
  *    loop, over fewer bytes than one unit) is part of the memcpy, and the pointers must be
- *    dead after the tail instead.
+ *    dead after the tail instead. A tail read narrowed by a cast (`(short)pSrc->nMagic`) is
+ *    the low bytes of the member.
  * VC8 never turns a copy loop into a string instruction (an index copy loop compiles
  * unrolled or as a loop), so a tied REP MOVS is the source's memcpy or struct assignment.
  *
@@ -105,7 +109,7 @@ export interface RepStringFormOptions extends PluginOptions {
 }
 
 const SIZE_1 = /^(char|signed char|unsigned char|byte|uchar|uint8_t|int8_t|BYTE|CHAR|UCHAR|undefined1|undefined|bool)$/;
-const SIZE_2 = /^(WCHAR|wchar_t|short|ushort|unsigned short|uint16_t|int16_t|wchar16|WORD|SHORT|USHORT|undefined2)$/;
+const SIZE_2 = /^(WCHAR|wchar_t|short|short int|signed short|signed short int|ushort|unsigned short|unsigned short int|uint16_t|int16_t|wchar16|WORD|SHORT|USHORT|undefined2)$/;
 const SIZE_4 = /^(int|uint|unsigned|unsigned int|long|ulong|unsigned long|uint32_t|int32_t|DWORD|LONG|ULONG|UINT|INT|BOOL|undefined4|float)$/;
 
 /** The size of a scalar type, from its spelling; null when not known here. */
@@ -494,9 +498,41 @@ export function createRepStringFormTransformer(options?: PluginOptions): Transfo
             return o < loopAt && !mine.has(n);
           });
         };
+        // A local written once outside the loop, before anything names the frame object: the
+        // value it holds was computed while the object's address had not left the frame.
+        const firstMention = (r: string): number | undefined => {
+          let at: number | undefined;
+          for (const n of findNodesByKind(fnBody, NodeKind.Identifier)) {
+            if ((n as Identifier).name !== r || declNames.has(n)) continue;
+            const o = n.location?.start?.offset;
+            if (o === undefined) return -1;
+            if (at === undefined || o < at) at = o;
+          }
+          return at;
+        };
+        const earlyLocal = (v: string, r: string | null): boolean => {
+          if (!frameObject(r) || params.has(v) || !types.has(v) || inits.has(v)) return false;
+          const outside = [
+            ...findNodesByKind(fnBody, NodeKind.AssignExpr).filter(x => !inLoop.has(x) && identName((x as AssignExpr).left) === v),
+            ...findNodesByKind(fnBody, NodeKind.PostfixExpr).filter(x => !inLoop.has(x) && identName((x as PostfixExpr).operand) === v),
+            ...findNodesByKind(fnBody, NodeKind.UnaryExpr).filter(x => !inLoop.has(x) && ['++', '--', '&'].includes((x as UnaryExpr).operator)
+              && identName((x as UnaryExpr).operand) === v),
+          ];
+          const decls = findNodesByKind(fnBody, NodeKind.VariableDecl).filter(x => (x as VariableDecl).name.name === v) as VariableDecl[];
+          if (decls.length !== 1) return false;
+          const def: ASTNode | null = outside.length === 1 && !decls[0].initializer ? outside[0]
+            : outside.length === 0 && decls[0].initializer ? decls[0] : null;
+          if (!def || (def.kind === NodeKind.AssignExpr && (def as AssignExpr).operator !== '=')) return false;
+          const rhs = def.kind === NodeKind.AssignExpr ? (def as AssignExpr).right : decls[0].initializer as Expression;
+          if (findNodesByKind(rhs as ASTNode, NodeKind.Identifier).some(n => (n as Identifier).name === r!)) return false;
+          const at = def.location?.end?.offset, first = firstMention(r!);
+          return at !== undefined && first !== undefined && first >= 0 && at < first;
+        };
         const separate = (dRoot !== null && sRoot !== null && dRoot !== sRoot)
           || (frameObject(dRoot) && untouchedParam(s))
           || (frameObject(sRoot) && untouchedParam(d))
+          || (frameObject(dRoot) && earlyLocal(s, dRoot))
+          || (frameObject(sRoot) && earlyLocal(d, sRoot))
           || (literal(s) && (dRoot === null || !literal(d)))
           || unnamedBefore(dRoot, d) || unnamedBefore(sRoot, s);
         return separate;
@@ -657,6 +693,13 @@ export function createRepStringFormTransformer(options?: PluginOptions): Transfo
       /** The bytes of *p an lvalue (or the same expression read) covers. */
       const pieceOf = (e: Expression, p: string): { off: number; size: number } | null => {
         const x = unwrap(e);
+        // A read narrowed by a cast is the low bytes of the piece (the target is little-endian):
+        // a `movsw` tail printed as `*(short *)d = (short)s->f`.
+        if (x.kind === NodeKind.CStyleCastExpr && (x as CStyleCastExpr).type.kind !== NodeKind.PointerType) {
+          const w = typeSize((x as CStyleCastExpr).type);
+          const inner = pieceOf((x as CStyleCastExpr).expression, p);
+          return w !== null && inner !== null && w < inner.size ? { off: inner.off, size: w } : null;
+        }
         if (!fieldsOf(pointeeName(p))) {
           const el = pointee(p);
           const t = el === null ? null : storeThrough(x, p, el, typeSize);
