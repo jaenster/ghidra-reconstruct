@@ -19,6 +19,7 @@ import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 import { advance, formatAdvanceReport, readAudit } from './advance.js';
 import { followHandFile } from './follow.js';
@@ -235,6 +236,6 @@ export async function main(argv: string[]): Promise<number> {
   }
 }
 
-if (import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith('ratchet/cli.ts') || process.argv[1]?.endsWith('ratchet/cli.js')) {
+if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
   main(process.argv.slice(2)).then(code => process.exit(code), err => { console.error(err instanceof Error ? err.message : err); process.exit(1); });
 }
