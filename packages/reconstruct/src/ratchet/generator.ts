@@ -12,16 +12,48 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 
 import type { ReconstructedProject, ReconstructOptions } from '../types.js';
+import { previousTree, type PreviousTree } from './previous.js';
 import { applyRecords, formatApplyReport, summarize } from './ratchet.js';
 import { RatchetStore, normalizeAddress } from './store.js';
-import { GLOBALS_INDEX_FILE, SymbolIndex, formatGlobalsIndex, memoryTree } from './symbol-index.js';
+import { GLOBALS_INDEX_FILE, SymbolIndex, diskTree, formatGlobalsIndex, memoryTree } from './symbol-index.js';
+
+function resolveDir(raw: string, options: ReconstructOptions): string {
+  const expanded = raw.startsWith('~/') ? path.join(os.homedir(), raw.slice(2)) : raw;
+  return path.resolve(options.projectDir ?? options.outputDir, expanded);
+}
 
 export function ratchetStoreDir(options: ReconstructOptions): string | undefined {
   if (process.env.RECON_RATCHET === '0') return undefined;
   const raw = process.env.RECON_RATCHET_STORE ?? options.projectConfig?.ratchet?.store;
-  if (!raw) return undefined;
-  const expanded = raw.startsWith('~/') ? path.join(os.homedir(), raw.slice(2)) : raw;
-  return path.resolve(options.projectDir ?? options.outputDir, expanded);
+  return raw ? resolveDir(raw, options) : undefined;
+}
+
+/**
+ * The tree the regen replaces (previous.ts): `RECON_RATCHET_PREVIOUS` (empty: none), the
+ * project's `ratchet.previous`, else the tree the store sits in (`<modified>/ratchet`) when
+ * it carries a globals index.
+ */
+export function ratchetPreviousDir(options: ReconstructOptions, storeDir: string | undefined): string | undefined {
+  const env = process.env.RECON_RATCHET_PREVIOUS;
+  if (env !== undefined) return env ? resolveDir(env, options) : undefined;
+  const raw = options.projectConfig?.ratchet?.previous;
+  if (raw) return resolveDir(raw, options);
+  if (!storeDir) return undefined;
+  const parent = path.dirname(storeDir);
+  return fs.existsSync(path.join(parent, GLOBALS_INDEX_FILE)) ? parent : undefined;
+}
+
+/** Generated paths of a tree: hand-written directories are not part of its index. */
+const GENERATED = (rel: string) => !rel.startsWith('Redivivus/') && !rel.startsWith('asm_matching/') && !rel.startsWith('ratchet/') && !rel.startsWith('support/');
+
+function loadPrevious(dir: string | undefined, current: SymbolIndex): PreviousTree | undefined {
+  if (!dir || !fs.existsSync(dir)) return undefined;
+  try {
+    return previousTree(SymbolIndex.build(diskTree(dir), GENERATED), current);
+  } catch (e) {
+    console.warn(`ratchet: the previous tree ${dir} could not be read (${(e as Error).message}); records are applied without it`);
+    return undefined;
+  }
 }
 
 /** The globals index every tree carries (symbol-index.ts reads it back). */
@@ -52,12 +84,13 @@ export function applyRatchetToProject(project: ReconstructedProject, options: Re
   texts.set(GLOBALS_INDEX_FILE, globalsText);
   const index = SymbolIndex.build(memoryTree(texts));
   index.addParamStorage([...project.sourceMaps.values()].flatMap(m => m.functions ?? []));
+  const previous = loadPrevious(ratchetPreviousDir(options, dir), index);
   const releases = new Set(store.releases().map(r => r.address));
   for (const m of project.sourceMaps.values()) {
     for (const f of m.functions ?? []) if (f.ratchet === 'release') releases.add(normalizeAddress(f.address));
   }
   const records = store.list().filter(r => r.kind === 'match');
-  const out = applyRecords(index, records, { releases });
+  const out = applyRecords(index, records, { releases, previous });
   for (const [p, text] of out.changed) {
     const f = project.files.get(p);
     if (f) f.content = text;
@@ -79,6 +112,7 @@ export function applyRatchetToProject(project: ReconstructedProject, options: Re
     }
   }
   console.log(`ratchet: ${records.length} match records from ${dir}: kept ${counts.kept}, equal ${counts.equal}, released ${counts.released}, `
-    + `unresolved ${counts.unresolved}, stale ${counts.stale}, gone ${counts.gone} (${Date.now() - t0} ms)${reportPath ? `; report ${reportPath}` : ''}`);
+    + `unresolved ${counts.unresolved}, stale ${counts.stale}, gone ${counts.gone} (${Date.now() - t0} ms)`
+    + `${previous ? `; previous tree ${ratchetPreviousDir(options, dir)}, ${previous.types.size} type renames` : '; no previous tree'}${reportPath ? `; report ${reportPath}` : ''}`);
   return { applied: true, counts, reportPath };
 }

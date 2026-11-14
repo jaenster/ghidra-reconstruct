@@ -114,6 +114,8 @@ export class SymbolIndex {
   readonly enumConsts = new Map<string, { e: string; v: string }>();
   /** (enum qname, value) -> constant qualified names. */
   readonly enumByValue = new Map<string, string[]>();
+  /** Enum qname -> its constants' values by name. */
+  readonly enums = new Map<string, Map<string, string>>();
   readonly types = new Set<string>();
   /** The scans the index was built from, by file: the ratchet reuses them for extents. */
   readonly scans = new Map<string, CppScan>();
@@ -235,12 +237,26 @@ export class SymbolIndex {
       }
     }
     for (const e of h.enums) {
-      if (e.qname) this.types.add(e.qname);
+      if (e.qname) {
+        this.types.add(e.qname);
+        const vals = this.enums.get(e.qname) ?? new Map<string, string>();
+        for (const c of e.consts) if (!vals.has(c.name)) vals.set(c.name, c.value);
+        this.enums.set(e.qname, vals);
+      }
       for (const c of e.consts) {
         const key = { e: e.qname, v: c.value };
-        // An unscoped constant is visible in the enum's scope and as Enum::C.
-        const names = [[...e.scope, c.name].join('::')];
-        if (e.qname) names.push(`${e.qname}::${c.name}`);
+        let names: string[];
+        if (e.ns) {
+          // The generator's form: declared in `E_ns`, visible in the enum's scope only where a
+          // `using` exports it (scan.ts HeaderEnum).
+          names = [];
+          if (e.exportAll || e.exported?.has(c.name)) names.push([...e.scope, c.name].join('::'));
+          names.push([...e.ns, c.name].join('::'));
+        } else {
+          // An unscoped constant is visible in the enum's scope and as Enum::C.
+          names = [[...e.scope, c.name].join('::')];
+          if (e.qname) names.push(`${e.qname}::${c.name}`);
+        }
         for (const n of names) if (!this.enumConsts.has(n)) this.enumConsts.set(n, key);
         const vk = `${e.qname}\0${c.value}`;
         const l = this.enumByValue.get(vk) ?? [];
