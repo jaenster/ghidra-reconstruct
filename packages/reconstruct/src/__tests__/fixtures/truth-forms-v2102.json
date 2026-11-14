@@ -1,0 +1,195 @@
+{
+  "source": "5353737a1de3e63d59a815044bd3cea65f9c6e3e",
+  "generatorBase": "c2a508a7374e7868c69fbd06efd341e14ef50a52",
+  "scope": "Two live v2102 hash-matched existing truth tags, resolved MCP locals, exact unchanged emitted bodies against current pure c2a. Same declared global/field context plus live00430b50 char* return fact required by the deployed guard. This is a bounded compatibility fixture, not a14tag or whole-program replay.",
+  "tables": {
+    "globalTypes": {
+      "gnCharSelSelectedIndex": "uint32_t",
+      "gbPanelRunButtonPressed": "BOOL",
+      "ScreenSizeX": "int",
+      "ScreenSizeY": "int",
+      "ui::ScreenSizeX": "int",
+      "Inv::ScreenSizeY": "int"
+    },
+    "structFields": {
+      "D2GfxDataStrc": {
+        "nFrameNumber": "int"
+      }
+    },
+    "functionReturnTypes": {
+      "MAINMENU_GetRealmName": "char *",
+      "MainMenus::MAINMENU_GetRealmName": "char *",
+      "D2Launch::MainMenus::MAINMENU_GetRealmName": "char *"
+    }
+  },
+  "options": {
+    "outputDir": "./out",
+    "format": "cpp",
+    "organization": "namespace",
+    "generateCMake": false,
+    "generateSourceMaps": false,
+    "transformPreset": "full",
+    "includeAddressComments": false,
+    "promoteStaticGlobals": false
+  },
+  "rows": [
+    {
+      "fn": {
+        "name": "CHARSEL_SelectRealmInDropdown",
+        "address": "00437cb0",
+        "entryPoint": "00437cb0",
+        "signature": "void CHARSEL_SelectRealmInDropdown(char * szText)",
+        "returnType": "void",
+        "callingConvention": "__cdecl",
+        "size": 74,
+        "isThunk": false,
+        "isExternal": false,
+        "hasVarArgs": false,
+        "namespace": "D2Launch::CharSel",
+        "comment": "@function CHARSEL_SelectRealmInDropdown\n@address Game.exe.ram:00437cb0\n@date 2026.06.13\n@params\n  szText: EDI:4 (char *)\n@description Diablo 2 1.14d reverse team\nhttps://blizzhackers.dev\n\nFunction uses custom registers for function arguments!\n[char * szText@EDI:4]",
+        "sourceFile": null,
+        "sourceLine": null,
+        "sourceInfo": null,
+        "parameters": [
+          {
+            "name": "szText",
+            "dataType": "char *",
+            "size": 4,
+            "ordinal": 0,
+            "storage": "EDI:4",
+            "stackOffset": null,
+            "resolvedType": null
+          }
+        ],
+        "localVariables": [
+          {
+            "name": "nIndex",
+            "dataType": "int",
+            "size": 4,
+            "storage": "ESI:4",
+            "stackOffset": null,
+            "resolvedType": "int"
+          },
+          {
+            "name": "nRealmCount",
+            "dataType": "int",
+            "size": 4,
+            "storage": "EAX:4",
+            "stackOffset": null,
+            "resolvedType": "int"
+          },
+          {
+            "name": "pszRealmName",
+            "dataType": "char *",
+            "size": 4,
+            "storage": "EAX:4",
+            "stackOffset": null,
+            "resolvedType": "char *"
+          },
+          {
+            "name": "nCmp",
+            "dataType": "int32_t",
+            "size": 4,
+            "storage": "EAX:4",
+            "stackOffset": null,
+            "resolvedType": "int32_t"
+          },
+          {
+            "name": "byTmp",
+            "dataType": "undefined1",
+            "size": 1,
+            "storage": "Stack[-0x4]:1",
+            "stackOffset": -4,
+            "resolvedType": null
+          }
+        ],
+        "tags": [
+          {
+            "type": "llm-artifact-fix"
+          },
+          {
+            "type": "vc8form",
+            "data": "zero(nIndex < nRealmCount && (pszRealmName = MainMenus::MAINMENU_GetRealmName(nIndex) , pszRealmName != 0));ev=307685c1f0;bh=74-a633e4f5;dh=c2feaa0a"
+          }
+        ],
+        "decompiled": "\n/* @function CHARSEL_SelectRealmInDropdown\n   @address Game.exe.ram:00437cb0\n   @date 2026.06.13\n   @params\n     szText: EDI:4 (char *)\n   @description Diablo 2 1.14d reverse team\n   https://blizzhackers.dev\n   \n   Function uses custom registers for function arguments!\n   [char * szText@EDI:4] */\n\nvoid __cdecl D2Launch::CharSel::CHARSEL_SelectRealmInDropdown(char *szText)\n\n{\n  int nRealmCount;\n  char *pszRealmName;\n  int32_t nCmp;\n  int nIndex;\n  \n  if (gnCharSelSelectedIndex != 0) {\n    nIndex = 0;\n    while ((nRealmCount = D2Launch::MainMenus::MAINMENU_GetRealmCount(), nIndex < nRealmCount &&\n           (pszRealmName = D2Launch::MainMenus::MAINMENU_GetRealmName(nIndex),\n           pszRealmName != (char *)0x0))) {\n      nCmp = Storm::Source::SSTR::SStrCmpI(szText,pszRealmName,0x7fffffff);\n      if (nCmp == 0) {\n        D2Win::Src::D2WinTextBox::D2WINTEXTBOX_SetLineColor\n                  (D2Launch::CharSel::gpWinTextBoxRealmSelect,nIndex,1);\n      }\n      nIndex = nIndex + 1;\n    }\n  }\n  return;\n}\n\n"
+      },
+      "tu": "Source/D2Launch/CharSel",
+      "dh": "c2feaa0a",
+      "expected": "// 1.14d: 00437cb0\nvoid CHARSEL_SelectRealmInDropdown(char * szText) {\n    char* pszRealmName;\n    int32_t nCmp;\n    if (!gnCharSelSelectedIndex) {\n      return;\n    }\n\n    int nIndex = 0;\n    while (true) {\n      int nRealmCount;\n      nRealmCount = D2Launch::MainMenus::MAINMENU_GetRealmCount();\n      if ((nIndex < nRealmCount && (pszRealmName = D2Launch::MainMenus::MAINMENU_GetRealmName(nIndex) , pszRealmName != 0)) == 0) {\n        break;\n      }\n\n      nCmp = Storm::Source::SSTR::SStrCmpI(szText, pszRealmName, 0x7fffffff);\n      if (!nCmp) {\n        D2Win::Src::D2WinTextBox::D2WINTEXTBOX_SetLineColor(D2Launch::CharSel::gpWinTextBoxRealmSelect, nIndex, 1);\n      }\n\n      nIndex++;\n    }\n}"
+    },
+    {
+      "fn": {
+        "name": "PANEL_DrawRunButton",
+        "address": "00497480",
+        "entryPoint": "00497480",
+        "signature": "void PANEL_DrawRunButton(void)",
+        "returnType": "void",
+        "callingConvention": "__stdcall",
+        "size": 292,
+        "isThunk": false,
+        "isExternal": false,
+        "hasVarArgs": false,
+        "namespace": "D2Client::UI::Panel",
+        "comment": "@function PANEL_DrawRunButton\n@address Game.exe.ram:00497480\n@date 2026.06.06\n@calling __stdcall\n@description Diablo 2 1.14d reverse team\nhttps://blizzhackers.dev",
+        "sourceFile": null,
+        "sourceLine": null,
+        "sourceInfo": null,
+        "parameters": [],
+        "localVariables": [
+          {
+            "name": "nMouseX",
+            "dataType": "int",
+            "size": 4,
+            "storage": "EAX:4",
+            "stackOffset": null,
+            "resolvedType": "int"
+          },
+          {
+            "name": "nMouseY",
+            "dataType": "int",
+            "size": 4,
+            "storage": "EAX:4",
+            "stackOffset": null,
+            "resolvedType": "int"
+          },
+          {
+            "name": "bAlwaysRun",
+            "dataType": "BOOL",
+            "size": 4,
+            "storage": "EAX:4",
+            "stackOffset": null,
+            "resolvedType": "BOOL"
+          },
+          {
+            "name": "sGfxData",
+            "dataType": "D2GfxDataStrc",
+            "size": 72,
+            "storage": "Stack[-0x4c]:72",
+            "stackOffset": -76,
+            "resolvedType": null
+          }
+        ],
+        "tags": [
+          {
+            "type": "vc8form",
+            "data": "nonzero(!gbPanelRunButtonPressed || nMouseX < ui::ScreenSizeX / 2 - 0x91,1);ev=45733a78de;bh=292-8076889a;dh=8b3c377a"
+          }
+        ],
+        "decompiled": "\n/* @function PANEL_DrawRunButton\n   @address Game.exe.ram:00497480\n   @date 2026.06.06\n   @calling __stdcall\n   @description Diablo 2 1.14d reverse team\n   https://blizzhackers.dev */\n\nvoid D2Client::UI::Panel::PANEL_DrawRunButton(void)\n\n{\n  int nMouseX;\n  int nMouseY;\n  BOOL bAlwaysRun;\n  D2GfxDataStrc sGfxData;\n  \n  nMouseX = D2Client::Cursor::GetMouseX();\n  nMouseY = D2Client::Cursor::GetMouseY();\n  compiler::memset(&sGfxData,0,0x48);\n  sGfxData.pDC6 = D2Client::UI::Panel::runbutton;\n  sGfxData.nDirection = 0;\n  bAlwaysRun = D2Client::GAME::Game::GetGlobalAlwaysRun();\n  if (bAlwaysRun == 0) {\n    if ((((gbPanelRunButtonPressed == 0) || (nMouseX < D2Client::UI::ui::ScreenSizeX / 2 + -0x91))\n        || (D2Client::UI::ui::ScreenSizeX / 2 + -0x80 < nMouseX)) ||\n       ((nMouseY < D2Client::UI::Inv::ScreenSizeY + -0x1c ||\n        (sGfxData.nFrameNumber = 1, D2Client::UI::Inv::ScreenSizeY + -8 < nMouseY)))) {\n      sGfxData.nFrameNumber = 0;\n    }\n  }\n  else if (((gbPanelRunButtonPressed == 0) || (nMouseX < D2Client::UI::ui::ScreenSizeX / 2 + -0x91))\n          || ((D2Client::UI::ui::ScreenSizeX / 2 + -0x80 < nMouseX ||\n              ((nMouseY < D2Client::UI::Inv::ScreenSizeY + -0x1c ||\n               (D2Client::UI::Inv::ScreenSizeY + -8 < nMouseY)))))) {\n    sGfxData.nFrameNumber = 2;\n  }\n  else {\n    sGfxData.nFrameNumber = 3;\n  }\n  D2gfx::D2GFX::D2GFX_DrawImage\n            (&sGfxData,D2Client::UI::ui::ScreenSizeX / 2 + -0x91,\n             D2Client::UI::Inv::ScreenSizeY + -10,-1,DRAW_SOLID,(D2GamePalShiftGreenBloodStrc *)0x0)\n  ;\n  if ((((D2Client::UI::ui::ScreenSizeX / 2 + -0x91 <= nMouseX) &&\n       (nMouseX <= D2Client::UI::ui::ScreenSizeX / 2 + -0x80)) &&\n      (D2Client::UI::Inv::ScreenSizeY + -0x1c <= nMouseY)) &&\n     (nMouseY <= D2Client::UI::Inv::ScreenSizeY + -8)) {\n    D2Client::UI::Panel::PANEL_ShowRunButtonTooltip();\n  }\n  return;\n}\n\n"
+      },
+      "tu": "Source/D2Client/UI/Panel",
+      "dh": "8b3c377a",
+      "expected": "// 1.14d: 00497480\nvoid __stdcall PANEL_DrawRunButton() {\n    D2GfxDataStrc sGfxData;\n    int nMouseX = D2Client::Cursor::GetMouseX();\n    int nMouseY = D2Client::Cursor::GetMouseY();\n    memset(&sGfxData, 0, 0x48);\n    sGfxData.pDC6 = D2Client::UI::Panel::runbutton;\n    sGfxData.nDirection = 0;\n    BOOL bAlwaysRun = D2Client::GAME::Game::GetGlobalAlwaysRun();\n    if (!bAlwaysRun) {\n      if ((!gbPanelRunButtonPressed || nMouseX < D2Client::UI::ui::ScreenSizeX / 2 - 0x91) != 0 || D2Client::UI::ui::ScreenSizeX / 2 - 0x80 < nMouseX || nMouseY < D2Client::UI::Inv::ScreenSizeY - 0x1c || (sGfxData.nFrameNumber = 1 , D2Client::UI::Inv::ScreenSizeY - 8 < nMouseY)) {\n        sGfxData.nFrameNumber = 0;\n      }\n    } else if (!gbPanelRunButtonPressed || nMouseX < D2Client::UI::ui::ScreenSizeX / 2 - 0x91 || D2Client::UI::ui::ScreenSizeX / 2 - 0x80 < nMouseX || nMouseY < D2Client::UI::Inv::ScreenSizeY - 0x1c || D2Client::UI::Inv::ScreenSizeY - 8 < nMouseY) {\n      sGfxData.nFrameNumber = 2;\n    } else {\n      sGfxData.nFrameNumber = 3;\n    }\n\n    D2gfx::D2GFX::D2GFX_DrawImage(&sGfxData, D2Client::UI::ui::ScreenSizeX / 2 - 0x91, D2Client::UI::Inv::ScreenSizeY - 10, -1, DRAW_SOLID, nullptr);\n    if (!(D2Client::UI::ui::ScreenSizeX / 2 - 0x91 <= nMouseX && nMouseX <= D2Client::UI::ui::ScreenSizeX / 2 - 0x80 && D2Client::UI::Inv::ScreenSizeY - 0x1c <= nMouseY && nMouseY <= D2Client::UI::Inv::ScreenSizeY - 8)) {\n      return;\n    }\n\n    D2Client::UI::Panel::PANEL_ShowRunButtonTooltip();\n}"
+    }
+  ],
+  "calleeFacts": [
+    {
+      "address": "00430b50",
+      "name": "MAINMENU_GetRealmName",
+      "namespace": "D2Launch::MainMenus",
+      "returnType": "char *",
+      "signature": "char * MAINMENU_GetRealmName(int32_t nIndex)"
+    }
+  ]
+}

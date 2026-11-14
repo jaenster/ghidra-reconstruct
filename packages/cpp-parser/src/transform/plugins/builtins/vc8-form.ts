@@ -1,3 +1,4 @@
+import { builtinTruthSite } from './truth-form-safety.js';
 /**
  * VC8 source forms recorded per function.
  *
@@ -2561,85 +2562,9 @@ function doTarms(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'tarms' }>): void {
   c.elseExpr = t;
 }
 
-/** Arithmetic and pointer-sized bases, after typedefs resolve, whose operators are all builtin. */
-const BUILTIN_SCALAR = new Set(['bool', 'char', 'signed char', 'unsigned char', 'wchar_t', 'char16_t', 'char32_t',
-  'short', 'short int', 'signed short', 'signed short int', 'unsigned short', 'unsigned short int',
-  'int', 'signed', 'signed int', 'unsigned', 'unsigned int', 'long', 'long int', 'signed long', 'unsigned long', 'unsigned long int',
-  'long long', 'long long int', 'unsigned long long', 'unsigned long long int', '__int64', 'unsigned __int64',
-  'int8_t', 'uint8_t', 'int16_t', 'uint16_t', 'int32_t', 'uint32_t', 'int64_t', 'uint64_t', 'intptr_t', 'uintptr_t', 'size_t', 'ptrdiff_t',
-  'float', 'double', 'long double',
-  'BYTE', 'WORD', 'DWORD', 'UINT', 'INT', 'BOOL', 'LONG', 'ULONG', 'SHORT', 'USHORT', 'UCHAR', 'CHAR', 'WCHAR',
-  'byte', 'uchar', 'ushort', 'uint', 'ulong', 'dword', 'sdword']);
-
-/**
- * Whether every operator in `e` is a builtin one and its value a scalar: an integer,
- * floating, enumeration or pointer type the type tables prove, never a class. A truth
- * form rewrites the operators around E (`!E` to `E == 0`, E to `(bool)(E)` or `E != 0`);
- * that keeps the meaning only when no overload can be selected, before or after. Unknown
- * is refused: a class E, or a class on the other side of the `&&`/`||` E stands in, can
- * pick a user-defined operator the new spelling does not reach (redivivus#472).
- */
+/** Prove the binding and builtin value type at the actual expression's scope. */
 function builtinScalar(e: Expression, fn: FunctionDecl): boolean {
-  const tables = selectTables;
-  const resolve = (n: string) => tables?.typedefTargets?.[n];
-  const shapeOf = createExprShape(localTypesOf(fn), {
-    globalTypes: tables?.globalTypes ?? {}, enclosingVarTypes: tables?.enclosingVarTypes ?? {},
-    structFields: tables?.structFields ?? {}, fieldTypes: tables?.fieldTypes ?? {},
-    returnTypes: tables?.functionReturnTypes ?? {}, resolve,
-  });
-  const scalarShape = (s: { base: string; stars: number } | null) => !!s && (s.stars > 0 || BUILTIN_SCALAR.has(s.base));
-  const enumConstant = (x: Expression) => {
-    const name = calleeName(x);
-    if (!name || localTypesOf(fn).has(name)) return false;
-    const values = tables?.enumValues;
-    if (values && (Number.isSafeInteger(values[name]) || Number.isSafeInteger(values[name.replace(/^.*::/, '')]))) return true;
-    // The generator's enum form: `typedef T E; namespace E_ns { constexpr E C = v; }`. A
-    // constant named through E_ns has E's type even where its bare name is ambiguous.
-    const ns = /(?:^|::)([A-Za-z_]\w*)_ns::[A-Za-z_]\w*$/.exec(name);
-    return !!ns && scalarShape(shapeOfSpelling(ns[1], resolve)) && !!resolve(ns[1]);
-  };
-  const ok = (x: Expression): boolean => {
-    x = unparen(x);
-    switch (x.kind) {
-      case NodeKind.IntegerLiteral: case NodeKind.FloatingLiteral: case NodeKind.CharLiteral:
-      case NodeKind.BoolLiteral: case NodeKind.NullptrLiteral: case NodeKind.StringLiteral:
-        return true;
-      case NodeKind.UnaryExpr: {
-        const u = x as UnaryExpr;
-        // `*p` and `&v` read through the operand's own type; the rest act on its value.
-        if (u.operator === '*') return ok(u.operand) && scalarShape(shapeOf(x));
-        return ok(u.operand);
-      }
-      case NodeKind.PostfixExpr:
-        return ok((x as unknown as { operand: Expression }).operand);
-      case NodeKind.BinaryExpr: {
-        const b = x as BinaryExpr;
-        return ok(b.left) && ok(b.right);
-      }
-      case NodeKind.AssignExpr: {
-        const a = x as unknown as { left: Expression; right: Expression };
-        return ok(a.left) && ok(a.right);
-      }
-      case NodeKind.CommaExpr:
-        return (x as unknown as { expressions: Expression[] }).expressions.every(ok);
-      case NodeKind.ConditionalExpr: {
-        const c = x as ConditionalExpr;
-        return ok(c.condition) && ok(c.thenExpr) && ok(c.elseExpr);
-      }
-      case NodeKind.CStyleCastExpr: case NodeKind.StaticCastExpr: case NodeKind.ReinterpretCastExpr: {
-        // The cast's own type decides what the operators around it see.
-        const s = shapeOfNode((x as CStyleCastExpr).type, 0, resolve);
-        return scalarShape(s);
-      }
-      case NodeKind.Identifier: case NodeKind.QualifiedId:
-        return scalarShape(shapeOf(x)) || enumConstant(x);
-      case NodeKind.MemberExpr: case NodeKind.SubscriptExpr: case NodeKind.CallExpr:
-        return scalarShape(shapeOf(x));
-      default:
-        return false;
-    }
-  };
-  return ok(e);
+  return builtinTruthSite(fn, e, e, selectTables);
 }
 
 /**
