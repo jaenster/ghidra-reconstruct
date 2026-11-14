@@ -19,7 +19,9 @@
  *     if (pItemTypesTxt) { .. pItemTypesTxt->f .. }
  *
  * and the same under `!` with the reads after the guard. With the reads left as indexes
- * VC8 keeps its old code, so a guard none of whose reads can move is left as printed.
+ * VC8 keeps its old code, so a guard none of whose reads can move is left as printed,
+ * except a leaving `!`-guard with no read of the record anywhere after it: it still tests the sum as a value
+ * (`p = getter; if (!p) return;`), which the printed chain does not.
  *
  * The getter can also be one run of a longer chain: conditions before it, conditions
  * after it that read the record, an else-if arm, the index loaded by the chain itself as
@@ -599,7 +601,12 @@ function rewriteFunction(fn: FunctionDecl, opts: RecordGetterGuardOptions): Func
       }
       return n;
     };
-    if (routeReads(reads, g, '', true) + postReads(true, '') === 0) return null;
+    // A leaving `!`-guard is the getter's own failure test even when nothing reads the record
+    // after it: the decompile prints `base + i` as an operand only because the original tests
+    // the sum, and VC8 tests it only when it is a value of its own.
+    const bare = plain && (negated || failure) && !ifs.elseBranch
+      && block.statements.slice(b + 1).every(s => countReads(s, g) === 0);
+    if (routeReads(reads, g, '', true) + postReads(true, '') === 0 && !bare) return null;
     const name = fresh(recordName(g.last));
     const routed = routeReads(reads, g, name, false) + postReads(false, name);
     const sum = Expr.binary(cloneNode(g.base), '+', cloneNode(g.index));
