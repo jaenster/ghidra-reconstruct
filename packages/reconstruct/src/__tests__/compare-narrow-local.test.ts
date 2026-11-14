@@ -25,11 +25,13 @@ it('recovers both Arena comparisons, including the second reader of the same CMP
   assert.match(out, /if \(nLevel < nPrevLevel\)/);
   assert.match(out, /if \(nLevel > nPrevLevel\)/);
   assert.doesNotMatch(out, /\(u?int(?:32_t)?\)n(?:Level|PrevLevel)/);
-  // Without the second setter, its unsigned spelling is still refused a signed tag.
+  // Without the second setter, operand order is unknown. Upstream's nonnegative
+  // proof may still remove the casts, but cannot invent the original CMP order.
   const missing = fn.compareSites!.split('\n');
   missing[2] = '2\t<\tINT_LESS\t4\t-1\t-\tv:nPrevLevel\tv:nLevel\t00664b3d\t00664b3d\tJLE\t-\t-\t0\t-\t-\t-\t0';
   const partial = generateFunctionImplementation({ ...fn, compareSites: missing.join('\n') }, undefined, options, context);
-  assert.match(partial, /\(uint32_t\)nPrevLevel < \(uint32_t\)nLevel/);
+  assert.match(partial, /if \(nPrevLevel < nLevel\)/);
+  assert.doesNotMatch(partial, /if \(nLevel > nPrevLevel\)/);
 });
 
 it('recovers Room depth versus its byte field despite the later goto label', () => {

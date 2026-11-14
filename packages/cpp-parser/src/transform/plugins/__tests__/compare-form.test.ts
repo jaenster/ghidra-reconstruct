@@ -83,13 +83,17 @@ describe('signed comparisons of narrow values carried in int locals', () => {
     }
   });
 
-  it('keeps unrelated and wider unsigned values outside the narrow proof', () => {
+  it('keeps unknown and non-integral values outside the narrow proof', () => {
     const out = recover('void f(unsigned int a, unsigned int b) { int level = a; int prev = b; if ((unsigned int)level < (unsigned int)prev) g(); }');
     assert.match(out, /\(unsigned int\)level < \(unsigned int\)prev/);
-    const wide = recover('void f(unsigned char a) { int level = 65536; int prev = a; if ((unsigned int)level < (unsigned int)prev) g(); }');
-    assert.match(wide, /\(unsigned int\)level < \(unsigned int\)prev/);
     const floating = recover('void f(unsigned char a, unsigned char b) { float level = a; float prev = b; if ((unsigned int)level < (unsigned int)prev) g(); }');
     assert.match(floating, /\(unsigned int\)level < \(unsigned int\)prev/);
+  });
+
+  it('retains the upstream nonnegative proof above the narrow domain', () => {
+    const out = recover('void f(unsigned char a) { int level = 65536; int prev = a; if ((unsigned int)level < (unsigned int)prev) g(); }');
+    assert.match(out, /if \(level < prev\)/);
+    assert.doesNotMatch(out, /\(unsigned int\)/);
   });
 });
 

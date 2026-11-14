@@ -5,6 +5,14 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { COMPARE_SETTER_JAVA, COMPARE_SITES_SCRIPT } from './compare-sites.js';
+import { FUNCTION_FACTS_SCRIPT } from './function-facts.js';
+
+it('uses the exact flags-setter helper in both extraction paths', () => {
+  for (const script of [COMPARE_SITES_SCRIPT, FUNCTION_FACTS_SCRIPT]) {
+    assert.ok(script.includes(COMPARE_SETTER_JAVA));
+    assert.equal(script.match(/compareSetter\.find\(user, L, rm, passive\)/g)?.length, 1);
+  }
+});
 
 // Exercise the exact script helper. Only the Ghidra package qualifiers are removed so
 // that its listing/reference interfaces can be supplied by these small Java stubs.
