@@ -211,6 +211,18 @@ describe('compare-form derivation', () => {
     assert.strictEqual(decide(site({ ...vv, text: '<', opcode: 'INT_LESS', user: 'JNC' }))?.zextPair, undefined);
   });
 
+  it('two variables, a signed Jcc on flags an earlier CMP set: decided signed for the pass to prove', () => {
+    // TXT_BuildCharTemplateLevelIndex 00664b10: CMP EAX,EDX; JL; JLE - the JLE has no CMP of its own.
+    const reused = { constSide: -1, k: undefined, fp: ['v:nPrevLevel', 'v:nLevel'] as [string, string], bKind: '-', setter: undefined, width: 0, onPair: false };
+    const d = decide(site({ ...reused, text: '<', opcode: 'INT_LESS', user: 'JLE' }))!;
+    assert.deepStrictEqual([d.keep, d.signed, d.zextPair, d.width], [true, true, true, 4]);
+    // An unsigned Jcc, a signed op, a constant operand or a narrow op: nothing to decide.
+    assert.strictEqual(decide(site({ ...reused, text: '<', opcode: 'INT_LESS', user: 'JBE' })), null);
+    assert.strictEqual(decide(site({ ...reused, text: '<', opcode: 'INT_SLESS', user: 'JLE' })), null);
+    assert.strictEqual(decide(site({ ...reused, fp: ['v:n', 'c:5'], text: '<', opcode: 'INT_LESS', user: 'JLE' })), null);
+    assert.strictEqual(decide(site({ ...reused, size: 2, text: '<', opcode: 'INT_LESS', user: 'JLE' })), null);
+  });
+
   it('a sign-flag branch is a signed compare against 0: -1 < n -> n >= 0, n < 0 kept', () => {
     // 005daa40: `-1 < n` read by JS straight after the SUB that computed n (no CMP/TEST).
     let d = decide(site({ text: '<', opcode: 'INT_SLESS', constSide: 0, k: 0xffffffffn, setter: undefined, width: 0, onPair: false, user: 'JS' }))!;

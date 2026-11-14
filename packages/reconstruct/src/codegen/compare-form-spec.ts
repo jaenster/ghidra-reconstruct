@@ -87,6 +87,8 @@ export function compareFormDecision(site: CompareSite): CompareFormOutcome {
   if (form.text !== site.text) return { reason: `printed ${site.text} for ${site.opcode}` };
   const sign = signTest(site, form);
   if (sign) return sign;
+  const reused = flagsReusedPair(site, form);
+  if (reused) return reused;
   if (!site.user || !site.setter || !site.onPair) return { reason: 'no CMP/TEST and Jcc pair' };
   const cc = conditionCode(site.user.mnemonic);
   if ((site.width !== site.size && !widenedEquality(site, cc)) || ![1, 2, 4].includes(site.width)) {
@@ -256,6 +258,27 @@ function heldZeroEquality(site: CompareSite, cc: string, base: Omit<CompareFormD
  * 005daa40: `-1 < n` after a SUB and JS). Any other setter (a CMP, a bit test), or an
  * unsigned opcode, gets no decision.
  */
+/**
+ * An unsigned op of two 32-bit variables whose Jcc is signed and reads the flags of an
+ * earlier CMP rather than one of its own (TXT_BuildCharTemplateLevelIndex 00664b10:
+ * `CMP EAX,EDX; JL; JLE`, the JLE printed as the second compare `nPrevLevel < nLevel`).
+ * It has no operand order or constant to decide, only the signedness: `zextPair`, so
+ * the pass writes it signed where it proves both operands non-negative, as for the
+ * compare that owns the CMP. Null for anything else.
+ */
+function flagsReusedPair(site: CompareSite, form: { text: string; signed?: boolean }): CompareFormOutcome | null {
+  if (!site.user || site.setter || form.signed !== false || site.size !== 4) return null;
+  const cc = conditionCode(site.user.mnemonic);
+  if (!cc || !SIGNED_CC.has(cc)) return null;
+  if (!site.fp[0].startsWith('v:') || !site.fp[1].startsWith('v:')) return null;
+  return {
+    decision: {
+      ord: site.ord, text: site.text, fp: site.fp, width: 4, address: site.user.at,
+      keep: true, signed: true, zextPair: true,
+    },
+  };
+}
+
 function signTest(site: CompareSite, form: { text: string; signed?: boolean }): CompareFormOutcome | null {
   const um = site.user?.mnemonic.toUpperCase();
   if (um !== 'JS' && um !== 'JNS') return null;

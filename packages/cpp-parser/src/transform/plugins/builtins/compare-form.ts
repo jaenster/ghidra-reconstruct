@@ -58,8 +58,8 @@
 
 import { NodeKind } from '../../../ast/kinds.js';
 import type {
-  ASTNode, BinaryExpr, BinaryOperator, BoolLiteralExpr, BuiltinType, ReturnStmt, CharLiteralExpr, CommaExpr, CStyleCastExpr, Expression, FunctionDecl, Identifier,
-  IntegerLiteralExpr, MemberExpr, ParameterDecl, ParenExpr, SubscriptExpr, TypeNode, TypedefType, UnaryExpr, VariableDecl,
+  ASTNode, AssignExpr, BinaryExpr, BinaryOperator, BoolLiteralExpr, BuiltinType, ReturnStmt, CharLiteralExpr, CommaExpr, CStyleCastExpr, Expression, FunctionDecl, Identifier,
+  IntegerLiteralExpr, MemberExpr, ParameterDecl, ParenExpr, PostfixExpr, SubscriptExpr, TypeNode, TypedefType, UnaryExpr, VariableDecl,
 } from '../../../ast/nodes.js';
 import { findNodesByKind } from '../../../ast/visitor.js';
 import { createTransformer, updateNode, type Transformer } from '../../transformer.js';
@@ -481,6 +481,7 @@ export function createCompareFormTransformer(options?: PluginOptions): Transform
       let rewritten = 0;
       let tagged = 0;
       const shapeOf = createExprShape(localTypes, tables);
+      let nonNegative: Set<string> | undefined;
       // The comparisons that close a comma expression: Ghidra's copy test `(p = x, p != 0)`,
       // which later passes fold back into the assignment it tests.
       const commaTests = new Set<string>();
@@ -520,7 +521,8 @@ export function createCompareFormTransformer(options?: PluginOptions): Transform
           if (d.zextPair) {
             // Unproven, the compare is left as printed and carries no facts.
             const pair = narrowZextPair(be, shapeOf)
-              ?? (belowSignBit(be.left, shapeOf) && belowSignBit(be.right, shapeOf) ? be : null);
+              ?? (belowSignBit(be.left, shapeOf) && belowSignBit(be.right, shapeOf) ? be : null)
+              ?? nonNegativePair(be, shapeOf, nonNegative ??= nonNegativeLocals(node.body!, shapeOf));
             if (!pair) return undefined;
             be = pair;
             out = pair;
@@ -771,6 +773,120 @@ function narrowZextPair(be: BinaryExpr, shapeOf: ExprShape): BinaryExpr | null {
   };
   const left = strip(be.left), right = strip(be.right);
   if (!left || !right) return null;
+  if (left === be.left && right === be.right) return be;
+  return updateNode(be, { left, right } as Partial<BinaryExpr>);
+}
+
+/** The signed 32-bit integer spellings a non-negative local may be declared with. */
+const SIGNED_WORD = /^(?:int|int32_t|INT|LONG|long|signed|signed int|long int)$/;
+
+/**
+ * The signed 32-bit locals of `body` that only ever hold a value in 0..0x7fffffff: each is
+ * declared in the body (never a parameter, whose value the caller decides), its address is
+ * never taken, it is never stepped (`++`, `--`) or updated by a compound store, and every
+ * value stored to it is proven non-negative by its form - a value zero-extended from 8 or
+ * 16 bits (`(int)p->level` of a `uint8_t` field), a constant in 0..0x7fffffff, a
+ * `belowSignBit` form, or another such local (TXT_BuildCharTemplateLevelIndex 00664b10:
+ * `nPrevLevel = 0` and `nPrevLevel = nLevel`, `nLevel = (int)p->level`). The least fixpoint:
+ * a local enters once all its stores are proven, so a cycle of copies proves nothing.
+ */
+function nonNegativeLocals(body: ASTNode, shapeOf: ExprShape): Set<string> {
+  const decls = new Map<string, VariableDecl[]>();
+  for (const d of findNodesByKind(body, NodeKind.VariableDecl)) {
+    const v = d as VariableDecl;
+    const list = decls.get(v.name.name) ?? [];
+    list.push(v);
+    decls.set(v.name.name, list);
+  }
+  const values = new Map<string, Expression[]>();
+  const banned = new Set<string>();
+  for (const [name, list] of decls) {
+    const v = list[0];
+    const shape = shapeOf({ kind: NodeKind.Identifier, name } as Identifier);
+    if (list.length !== 1 || v.specifiers.length > 0 || !shape || shape.stars !== 0 || !SIGNED_WORD.test(shape.base)
+      || JSON.stringify(v.type).includes('volatile') || (v.initializer && v.initializer.kind === NodeKind.InitListExpr)) {
+      banned.add(name);
+      continue;
+    }
+    values.set(name, v.initializer ? [v.initializer as Expression] : []);
+  }
+  const nameOf = (e: Expression): string | undefined => {
+    const x = unwrapParens(e);
+    return x.kind === NodeKind.Identifier ? (x as Identifier).name : undefined;
+  };
+  for (const n of findNodesByKind(body, NodeKind.UnaryExpr)) {
+    const u = n as UnaryExpr;
+    if (u.operator === '&' || u.operator === '++' || u.operator === '--') {
+      const name = nameOf(u.operand);
+      if (name) banned.add(name);
+    }
+  }
+  for (const n of findNodesByKind(body, NodeKind.PostfixExpr)) {
+    const name = nameOf((n as PostfixExpr).operand);
+    if (name) banned.add(name);
+  }
+  for (const n of findNodesByKind(body, NodeKind.AssignExpr)) {
+    const a = n as AssignExpr;
+    const name = nameOf(a.left);
+    if (!name) continue;
+    if (a.operator !== '=') banned.add(name);
+    else values.get(name)?.push(a.right);
+  }
+  const proven = new Set<string>();
+  const nonNegative = (e: Expression): boolean => {
+    const x = unwrapParens(e);
+    const c = literalOf(x);
+    if (c) return !c.char && c.value >= 0n && c.value <= 0x7fffffffn;
+    const name = nameOf(x);
+    if (name && proven.has(name)) return true;
+    if (x.kind === NodeKind.CStyleCastExpr) {
+      const t = shapeOf(x);
+      if (t && t.stars === 0 && SIGNED_WORD.test(t.base) && nonNegative((x as CStyleCastExpr).expression)) return true;
+    }
+    return belowSignBit(x, shapeOf);
+  };
+  for (let grew = true; grew;) {
+    grew = false;
+    for (const [name, stored] of values) {
+      if (proven.has(name) || banned.has(name) || stored.length === 0) continue;
+      if (stored.every(nonNegative)) {
+        proven.add(name);
+        grew = true;
+      }
+    }
+  }
+  return proven;
+}
+
+/**
+ * `(uint32_t)a < (uint32_t)b` where each operand is a proven non-negative local
+ * (`nonNegativeLocals`) or a `belowSignBit` value, at least one of them a local: `a < b`,
+ * without the casts. Both values lie in 0..0x7fffffff, so the signed compare the
+ * instructions make (`MOVZX EAX,byte; CMP EAX,EDX; JL`, 00664b10) is the unsigned one the
+ * decompiler printed. Null unless both operands are proven.
+ */
+function nonNegativePair(be: BinaryExpr, shapeOf: ExprShape, locals: Set<string>): BinaryExpr | null {
+  if (locals.size === 0) return null;
+  let usedLocal = false;
+  const proven = (y: Expression): boolean => {
+    const u = unwrapParens(y);
+    if (u.kind === NodeKind.Identifier && locals.has((u as Identifier).name)) {
+      usedLocal = true;
+      return true;
+    }
+    return belowSignBit(u, shapeOf);
+  };
+  const strip = (x: Expression): Expression | null => {
+    const c = unwrapParens(x);
+    if (c.kind === NodeKind.CStyleCastExpr) {
+      const t = shapeOf(c);
+      const inner = (c as CStyleCastExpr).expression;
+      if (t && t.stars === 0 && UNSIGNED_WORD.test(t.base) && proven(inner)) return inner;
+    }
+    return proven(c) ? x : null;
+  };
+  const left = strip(be.left), right = strip(be.right);
+  if (!left || !right || !usedLocal) return null;
   if (left === be.left && right === be.right) return be;
   return updateNode(be, { left, right } as Partial<BinaryExpr>);
 }
