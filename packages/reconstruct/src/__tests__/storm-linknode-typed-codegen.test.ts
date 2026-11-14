@@ -33,32 +33,45 @@ function context(): ImplGenContext {
   } };
 }
 const options = fixture.options as ReconstructOptions;
-it('full emission recognizes the three native-identical LinkNode variants', () => {
+it('full emission recognizes all thirteen native-identical LinkNode variants', () => {
   const facts = context(), count = getParseErrorCount();
   for (const r of fixture.functions) {
     assert.equal(vc8formBodyHash(r.fn.decompiled), r.dh);
     const code = generateFunctionImplementation(r.fn, undefined, options, facts);
-    assert.match(code, r.fn.address === '0045bbe0' ? /switch \(nMode\)/ : /switch \(nLinkType\)/, 'the normal native branch facts recover the existing switch');
+    const mode = r.fn.parameters[2].name;
+    assert.ok(code.includes(`switch (${mode})`), 'the normal native branch facts recover the existing switch');
     assert.equal(code.match(/D2_StormNextLink/g)?.length, 2, 'unlink and insert both use the existing helper');
     assert.doesNotMatch(code, /if \(nLinkBase < 0\)|if \(pListHead < 0\)|szName \+ pListHead/);
-    if (r.fn.address === '0045bbe0') {
+    if (r.fn.address === '0045bbe0' || r.fn.address === '0040fbb0') {
+      const backlink = r.fn.address === '0045bbe0' ? 'pPrevLink' : 'pBackLink';
+      const list = r.fn.parameters[0].name;
       assert.match(code, /D2_StormNextLink\(ppCurNode, -1\)/);
-      assert.match(code, /D2_StormNextLink\(ppTarget, \(intptr_t\)\*ppList\)/);
-      assert.doesNotMatch(code, /pPrevLink = ppCurNode\[1\]/);
-      assert.match(code, /int\*\* pPrevLink;/, 'normal slot typing no longer has to also carry the raw next word');
-      assert.match(code, /\*pPrevLink = pNext;/);
-    } else assert.match(code, r.fn.address === '00601fc0'
+      assert.ok(code.includes(`D2_StormNextLink(ppTarget, (intptr_t)*${list})`));
+      assert.ok(!code.includes(`${backlink} = ppCurNode[1]`));
+      assert.ok(code.includes(`int** ${backlink};`), 'normal slot typing no longer has to also carry the raw next word');
+      assert.ok(code.includes(`*${backlink} = pNext;`));
+    } else if (!r.existingMatchControl) assert.match(code, r.fn.address === '00601fc0'
         ? /D2_StormNextLink\(&pExisting->m_link, this->m_linkoffset\)/
         : /D2_StormNextLink\(pExisting, this->m_linkoffset\)/);
   }
   assert.equal(getParseErrorCount(), count);
 });
+it('all nine previously matching sibling models keep their current-main C++ exactly', () => {
+  const facts = context();
+  const controls = fixture.functions.filter((r: { existingMatchControl: boolean }) => r.existingMatchControl);
+  assert.equal(controls.length, 9);
+  for (const r of controls) {
+    assert.equal(generateFunctionImplementation(r.fn, undefined, options, facts), r.expectedCurrentMain, r.fn.address);
+  }
+});
 it('word-array recovery needs no invented structure fields', () => {
   const facts = context();
-  const code = generateFunctionImplementation(functions[2], undefined, options, {
-    ...facts, funcPtrArgCasts: { ...facts.funcPtrArgCasts!, structFields: {}, structFieldOffsets: {}, structLayouts: {}, aggregateSizes: {} },
-  });
-  assert.equal(code.match(/D2_StormNextLink/g)?.length, 2);
+  for (const fn of functions.slice(2, 4)) {
+    const code = generateFunctionImplementation(fn, undefined, options, {
+      ...facts, funcPtrArgCasts: { ...facts.funcPtrArgCasts!, structFields: {}, structFieldOffsets: {}, structLayouts: {}, aggregateSizes: {} },
+    });
+    assert.equal(code.match(/D2_StormNextLink/g)?.length, 2);
+  }
 });
 it('the owning emitter refuses an unknown byte-array extent or a shifted embedded link', () => {
   const facts = context(), tables = facts.funcPtrArgCasts!;
