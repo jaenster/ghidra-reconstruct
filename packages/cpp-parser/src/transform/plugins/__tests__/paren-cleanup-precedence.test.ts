@@ -182,19 +182,19 @@ describe('Paren cleanup: binary operator precedence', () => {
     );
   });
 
-  it('removes parens for same-op associative right child (addition)', () => {
-    // a + (b + c) = a + b + c — + is associative, same operator on both sides
+  it('preserves grouping for a right-nested addition', () => {
+    // Even signed integer addition can overflow under left grouping alone.
     expectClean(
       'int f(int a, int b, int c) { return a + (b + c); }',
-      'int f(int a, int b, int c) {\n  return a + b + c;\n}',
+      'int f(int a, int b, int c) {\n  return a + (b + c);\n}',
     );
   });
 
-  it('removes parens for same-op associative right child (multiply)', () => {
-    // a * (b * c) = a * b * c — * is associative
+  it('preserves grouping for a right-nested multiply', () => {
+    // Even signed integer multiplication can overflow under left grouping alone.
     expectClean(
       'int f(int a, int b, int c) { return a * (b * c); }',
-      'int f(int a, int b, int c) {\n  return a * b * c;\n}',
+      'int f(int a, int b, int c) {\n  return a * (b * c);\n}',
     );
   });
 });

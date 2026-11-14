@@ -231,6 +231,36 @@ describe('CppEmitter', () => {
       const mulAdd = Expr.add(a, Expr.mul(b, c));
       assert.strictEqual(emit(mulAdd), 'a + b * c');
     });
+
+    it('keeps right-nested floating arithmetic grouping', () => {
+      const plus = emit(parse('float f(float a, float b, float c) { return a + (b + c); }'));
+      const times = emit(parse('float f(float a, float b, float c) { return a * (b * c); }'));
+      assert.match(plus, /return a \+ \(b \+ c\);/);
+      assert.match(times, /return a \* \(b \* c\);/);
+
+    });
+
+    it('keeps right grouping for operators that C++ types may overload', () => {
+      const a = Expr.identifier('a');
+      const b = Expr.identifier('b');
+      const c = Expr.identifier('c');
+      for (const op of ['+', '*', '&', '|', '^'] as const) {
+        assert.strictEqual(emit(Expr.binary(a, op, Expr.binary(b, op, c))), `a ${op} (b ${op} c)`);
+        assert.strictEqual(emit(Expr.binary(Expr.binary(a, op, b), op, c)), `a ${op} b ${op} c`);
+      }
+    });
+
+    it('keeps the mixed-width arithmetic and bitwise conversion order', () => {
+      assert.match(emit(parse('long long f(long long ll, unsigned int u1, unsigned int u2) { return ll + (u1 + u2); }')), /return ll \+ \(u1 \+ u2\);/);
+      assert.match(emit(parse('long long f(long long ll, unsigned int u, int i) { return ll | (u | i); }')), /return ll \| \(u \| i\);/);
+    });
+
+    it('retains flattened built-in logical guard chains', () => {
+      const a = Expr.identifier('a'), b = Expr.identifier('b'), c = Expr.identifier('c');
+      for (const op of ['&&', '||'] as const) {
+        assert.strictEqual(emit(Expr.binary(a, op, Expr.binary(b, op, c))), `a ${op} b ${op} c`);
+      }
+    });
   });
 
   describe('Unary Expressions', () => {
