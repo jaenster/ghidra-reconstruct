@@ -699,7 +699,8 @@ describe('vc8-form: arms', () => {
     const src = ['void f(P* p) {', '  if (p && p->q) {', '    g();', '  } else {', '    h();', '  }', '}'];
     assert.strictEqual(run(src, 'arms(p && p->q)').out, 'void f(P* p) { if (!p || !p->q) { h(); } else { g(); } }');
     // NPCMENU_OpenNpcShop 004b3d40: `(p && p->q) == 0` with zero.
-    assert.strictEqual(run(src, 'arms(p && p->q,wrap)', 'zero(p && p->q)').out, 'void f(P* p) { if ((p && p->q) == 0) { h(); } else { g(); } }');
+    const typed = { structFields: { P: { q: 'int' } } };
+    assert.strictEqual(runWith(typed, src, 'arms(p && p->q,wrap)', 'zero(p && p->q)').out, 'void f(P* p) { if ((p && p->q) == 0) { h(); } else { g(); } }');
   });
 });
 
