@@ -163,6 +163,8 @@ export interface ExtractedFunction {
    * Absent when there are none, the text changed since, or the snapshot predates the field.
    */
   signedDivides?: import('./extract/signed-divides.js').SignedDivideFacts;
+  /** ROUND tokens whose FISTP explicitly selects RC=truncate; exact-text gated. */
+  truncatingRounds?: import('./extract/truncating-rounds.js').TruncatingRoundFacts;
   /**
    * The constants the original stores to memory from a register, by the name the left side
    * ends in, with the immediate stores of the same function (extract/register-stores.ts).
@@ -643,6 +645,15 @@ export interface FunctionMapping {
   ifdef?: string;
   /** Same-named function in other binary */
   crossPlatformMatch?: CrossPlatformMatch;
+  /** The decompile hash (vc8form `dh`) of the body this map's text was emitted from. */
+  dh?: string;
+  /** `release` when the function carries the Ghidra tag `ratchet:release` (docs/ratchet.md). */
+  ratchet?: 'release';
+  /**
+   * Each parameter's emitted name and Ghidra storage (`ECX:4`, `Stack[0x8]:4`): the ratchet
+   * follows a parameter through a re-order by it (ratchet/params.ts).
+   */
+  paramStorage?: Array<[string, string]>;
 }
 
 export interface LineMapping {

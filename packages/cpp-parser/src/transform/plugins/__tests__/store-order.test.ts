@@ -165,6 +165,35 @@ describe('storeOrderPlugin', () => {
     assert.deepStrictEqual(sites, []);
   });
 
+  // AddAct124SecondaryBorder, 006752a0: `&pData->x` reads pData, it does not take its address,
+  // so pData stays a plain local beside the fields of the escaped block.
+  it('orders fields of an escaped local beside field addresses through a local pointer', () => {
+    const { out, sites } = run([
+      'void f(Node *pLevel, Node *pData) {',
+      '  Gfx g;',
+      '  Use(&g);',
+      '[@0x26] g.nFrame = (int)&pData->pNext;',
+      '[@0x35] g.nDir = (int)&pData->pPrev;',
+      '[@0x32] g.pDC6 = pLevel;',
+      '  Use(&g);',
+      '}',
+    ]);
+    assert.deepStrictEqual(sites, ['order3']);
+    assert.ok(out.includes('g.nFrame = (int)&pData->pNext; g.pDC6 = pLevel; g.nDir = (int)&pData->pPrev;'), out);
+  });
+
+  it('leaves a field address read through the pointer field the other store writes', () => {
+    const { sites } = run([
+      'void f(Node *pLevel) {',
+      '  Node n;',
+      '  Use(&n);',
+      '[@0x26] n.nId = (int)&n.pPrev->pNext;',
+      '[@0x20] n.pPrev = pLevel;',
+      '}',
+    ]);
+    assert.deepStrictEqual(sites, []);
+  });
+
   it('leaves fields of a local read beside a pointer once its address is out', () => {
     const { sites } = run([
       'void f(Node *pMapStrc) {',

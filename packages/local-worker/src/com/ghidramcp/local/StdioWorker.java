@@ -114,9 +114,13 @@ public final class StdioWorker {
 
         Writer out = new OutputStreamWriter(protocolOut, StandardCharsets.UTF_8);
         // The journal this read-only worker can offer: the server's version history.
+        String pinEnv = System.getenv("GHIDRA_LOCAL_WORKER_PIN_VERSION");
+        int pin = pinEnv == null || pinEnv.isEmpty() ? 0 : Integer.parseInt(pinEnv);
         VersionFollower follower = new VersionFollower(engine.getContext(), program,
-            serverVersion(engine, program));
-        if (checkout) {
+            pin > 0 ? pin : serverVersion(engine, program));
+        if (pin > 0) {
+            follower.localize(m -> System.err.println("[VersionFollower] " + m));
+        } else if (checkout) {
             follower.attachCheckout(m -> System.err.println("[VersionFollower] " + m));
         } else if (localCopy) {
             follower.localize(m -> System.err.println("[VersionFollower] " + m));

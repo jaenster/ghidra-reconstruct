@@ -19,7 +19,8 @@
  *   tsx candidates.ts dh <snapshot dir> <addrs.json> <out.json>
  *       the generator's decompile hash (vc8formBodyHash) and size per address
  */
-import { readFileSync, writeFileSync, createReadStream } from 'node:fs';
+import { readFileSync, writeFileSync, createReadStream, existsSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { pathToFileURL } from 'node:url';
 import { parse, emit, NodeKind, applyVc8Forms, definitionOf, parseVc8Form, type Vc8Form } from '../../packages/cpp-parser/dist/index.js';
@@ -27,6 +28,7 @@ import type { ASTNode, FunctionDecl, TranslationUnit } from '../../packages/cpp-
 import { vc8FormSpec, vc8formBodyHash } from '../../packages/reconstruct/src/codegen/vc8form-spec.js';
 import { normalizeSignatureType } from '../../packages/reconstruct/src/codegen/platform-types.js';
 import { respellPlaceholderType } from '../../packages/reconstruct/src/codegen/placeholder-types.js';
+import { emittedMemberNames } from '../../packages/reconstruct/src/codegen/header.js';
 import { accessorTwins } from '../../packages/reconstruct/src/codegen/accessor-twins.js';
 import { registerEnumTypedefTargets } from '../../packages/reconstruct/src/codegen/enum-width.js';
 import type { Vc8Accessor } from '../../packages/cpp-parser/dist/index.js';
@@ -58,18 +60,35 @@ const body = (tu: TranslationUnit) => emit(tu as never).trimEnd();
 // ---------------------------------------------------------------------------------------
 // Types, for the forms that declare a local: the Ghidra model's own field and global types.
 
-interface Field { name: string; dataType: string; offset?: number; size?: number; bitSize?: number }
+interface Field { name: string; dataType: string; offset: number; size: number; bitSize?: number }
 let structs = new Map<string, { kind: string; fields?: Field[]; typedefOf?: string }>();
 let globals = new Map<string, string>();
 /** Typedef and enum names to the integer type the tree declares them as (castout reads a return type's width). */
 const typedefTargets: Record<string, string> = {};
 
 /** The tables `acc` reads: the struct fields, the enumerators and the accessors (accessor-twins.ts). */
-const accTables: { structLayouts: Record<string, Array<{ name: string; offset: number; size: number; type: string; bitSize?: number }>>; structFields: Record<string, Record<string, string>>; enumValues: Record<string, number>; accessors: Vc8Accessor[] } =
-  { structLayouts: {}, structFields: {}, enumValues: {}, accessors: [] };
+const accTables: {
+  structFields: Record<string, Record<string, string>>;
+  structLayouts: Record<string, Array<{ name: string; offset: number; size: number; type: string; bitSize?: number }>>;
+  aggregateMembers: Record<string, string[]>;
+  unionNames: string[];
+  enumValues: Record<string, number>;
+  accessors: Vc8Accessor[];
+  typedefTargets: Record<string, string>;
+  structFieldOffsets: Record<string, Record<string, number>>;
+  targetLanguageId?: string;
+  targetPointerSize?: number;
+} = { structFields: {}, structLayouts: {}, aggregateMembers: {}, unionNames: [], enumValues: {}, accessors: [], typedefTargets: {}, structFieldOffsets: {} };
 
 function loadTypes(path?: string) {
   if (!path) return;
+  // Target identity comes from the same snapshot as the fields, never a guessed host architecture.
+  const manifest = join(dirname(path), 'manifest.json');
+  if (existsSync(manifest)) {
+    const info = JSON.parse(readFileSync(manifest, 'utf8')).provenance?.programInfo;
+    accTables.targetLanguageId = info?.languageId;
+    accTables.targetPointerSize = info?.pointerSize;
+  }
   for (const l of readFileSync(path, 'utf8').split('\n')) {
     if (!l) continue;
     const t = JSON.parse(l);
@@ -78,10 +97,22 @@ function loadTypes(path?: string) {
     if (t.kind === 'TYPEDEF' && t.underlyingType && !(t.name in typedefTargets)) typedefTargets[t.name] = spell(t.underlyingType);
     if (structs.has(t.name)) continue;
     structs.set(t.name, { kind: t.kind, fields: t.fields, typedefOf: t.underlyingType });
+    if (t.underlyingType) accTables.typedefTargets[t.name] = spell(t.underlyingType);
     if (t.fields) accTables.structFields[t.name] = Object.fromEntries(t.fields.filter((f: Field) => f.name).map((f: Field) => [f.name, spell(f.dataType)]));
-    if (t.kind === 'STRUCTURE' && t.fields) accTables.structLayouts[t.name] = t.fields
-      .filter((f: Field) => f.name && Number.isSafeInteger(f.offset) && Number.isSafeInteger(f.size))
-      .map((f: Field) => ({ name: f.name, offset: f.offset!, size: f.size!, type: spell(f.dataType), ...(f.bitSize ? { bitSize: f.bitSize } : {}) }));
+    if (t.kind === 'STRUCTURE' || t.kind === 'UNION') {
+      accTables.structLayouts[t.name] = (t.fields ?? []).map((f: Field) => ({
+        name: f.name ?? '', offset: f.offset, size: f.size,
+        // Keep unnamed undefined bytes as raw layout facts. The emitter's member
+        // set below, not a guessed spelling, admits their byte aliases.
+        type: f.name ? spell(f.dataType) : f.dataType,
+        ...(f.bitSize != null ? { bitSize: f.bitSize } : {}),
+      }));
+      accTables.aggregateMembers[t.name] = [...emittedMemberNames(t)];
+      if (t.kind === 'UNION') accTables.unionNames.push(t.name);
+    }
+    if (t.fields) accTables.structFieldOffsets[t.name] = Object.fromEntries(t.fields
+      .filter((f: Field) => f.name && Number.isSafeInteger(f.offset) && f.offset! >= 0).map((f: Field) => [f.name, f.offset!]));
+    if (t.underlyingType) accTables.typedefTargets[t.name] = spell(t.underlyingType);
   }
 }
 
@@ -200,6 +231,22 @@ function sites(c: Ctx, maxAnchors: number): string[] {
   const { fn, vars, locals } = c;
   const all = [...walk(fn.body!)];
   const blocks = all.filter(n => n.kind === NodeKind.CompoundStmt);
+  // nullfault32: the form checks the sole volatile byte store and its null address.
+  if (pr(fn.returnType) === 'void' && fn.parameters.length === 0 && !fn.isVariadic
+      && fn.body!.statements.length <= 2) out.add('nullfault32()');
+  // nullfield: a returned field address identifies the base, struct, and field. The form
+  // verifies the fallback offset, target, types, purity, and complete body shape.
+  for (const n of all) {
+    if (n.kind !== NodeKind.ReturnStmt || !n.value) continue;
+    const e = unparen(n.value);
+    if (e.kind !== NodeKind.UnaryExpr || e.operator !== '&') continue;
+    const m = unparen(e.operand);
+    if (m.kind !== NodeKind.MemberExpr || !m.isArrow || m.member?.kind !== NodeKind.Identifier) continue;
+    const t = typeOf(m.object, vars);
+    if (!t?.endsWith('*')) continue;
+    const s = t.slice(0, -1).replace(/^const /, '').trim();
+    if (/^[A-Za-z_]\w*$/.test(s)) out.add(`nullfield(${pr(m.object)},${s},${m.member.name})`);
+  }
   const free = (stem: string) => { for (let k = 0; ; k++) if (!vars.has(`${stem}${k}`)) return `${stem}${k}`; };
 
   // keepstore only offers existing standalone member zero stores; application proves
@@ -251,10 +298,17 @@ function sites(c: Ctx, maxAnchors: number): string[] {
   for (const v of locals) {
     // coalesce before fold: where both print one body, the tag names the proven fold.
     out.add(`coalesce(${v})`);
+    out.add(`branchret(${v})`);
     out.add(`fold(${v})`);
     out.add(`ifsel(${v})`);
     if (declarable(vars.get(v))) out.add(`split(${v},${vars.get(v)},${v}_2)`);
-    for (const t of casts.get(v) ?? []) { if (declarable(t) && !t.endsWith('*')) out.add(`width(${v},${t})`); if (declarable(t)) out.add(`own(${v},${t})`); }
+    for (const t of casts.get(v) ?? []) {
+      if (declarable(t) && !t.endsWith('*')) out.add(`width(${v},${t})`);
+      // `live` only where own refuses a read initializer: listed after the plain form, a
+      // live body equal to the plain one is the same candidate and goes. permute.ts keeps
+      // a `live` tag on a MATCH alone.
+      if (declarable(t)) { out.add(`own(${v},${t})`); out.add(`own(${v},${t},live)`); }
+    }
   }
   // boolflag: a bool local; retwiden: a narrow integer local stored from a call (the forms refuse the rest).
   const NARROW = new Set(['char', 'unsigned char', 'signed char', 'uint8_t', 'int8_t', 'BYTE', 'byte', 'short', 'short int', 'unsigned short',
@@ -477,6 +531,17 @@ function sites(c: Ctx, maxAnchors: number): string[] {
       out.add(`ptrwalk(${i},${x},${free('t2_p')},${t},${nth})`);
     }
   }
+  // recordwalk: the same immediate-block, last-pointer-store sites the form
+  // indexes. Its type, initialization, liveness and escape proofs filter these.
+  const recordWalks: string[] = [];
+  for (const block of blocks) for (const loop of block.statements as N[]) {
+    if (loop.kind !== NodeKind.ForStmt || loop.body.kind !== NodeKind.CompoundStmt) continue;
+    const last = loop.body.statements[loop.body.statements.length - 1];
+    const e = last?.kind === NodeKind.ExprStmt ? unparen(last.expression) : undefined;
+    if (e?.kind === NodeKind.AssignExpr && e.operator === '=' && unparen(e.left).kind === NodeKind.Identifier)
+      recordWalks.push(unparen(e.left).name);
+  }
+  for (const { t, i } of indexed(recordWalks)) out.add(withIdx('recordwalk', t, i, true));
   // rowptr: a row X[I] (I no constant), or the base of a flat X[I + k], with X a named table.
   const rows = new Map<string, { x: N; e: string }>();
   for (const n of all) {
@@ -610,7 +675,7 @@ function sites(c: Ctx, maxAnchors: number): string[] {
 
 /** The names a form declares, for the phase control: each new local is one more front-end symbol. */
 function adds(form: Vc8Form): number {
-  return (form.op === 'cache' && form.type) || form.op === 'split' || (form.op === 'own' && form.rename) ? 1 : 0;
+  return (form.op === 'cache' && form.type) || form.op === 'recordwalk' || form.op === 'split' || (form.op === 'own' && form.rename) ? 1 : 0;
 }
 
 function tryForm(tu: TranslationUnit, text: string): { text: string; form: Vc8Form } | { why: string } {

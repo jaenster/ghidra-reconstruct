@@ -12,7 +12,7 @@
  */
 
 import { parse, preprocessGhidraCode, NodeKind, type FunctionDecl, type Statement } from '@ghidra-mcp/cpp-parser';
-import { outParamWidths, type OutParamContext } from '@ghidra-mcp/cpp-parser/transform/cfg/index';
+import { outParamWidths, platformOutWidth, type OutParamContext } from '@ghidra-mcp/cpp-parser/transform/cfg/index';
 import { DEFAULT_NORETURN_FUNCTIONS } from '@ghidra-mcp/cpp-parser/transform/plugins/builtins/goto-cleanup/types';
 import type { ExtractedDataType, ExtractedFunction } from '../types.js';
 
@@ -57,6 +57,12 @@ export interface OutParamOracle {
   outParamWidth(callee: string, index: number): number | null;
   /** The same for an argument that is not null (`&local`): the callee's own null test of it is decided. */
   outParamWidthNonNull(callee: string, index: number): number | null;
+  /**
+   * The same for a non-null argument, where a platform call with no body in the model (and
+   * any function that passes the pointer on to one) answers from the SDK's documented
+   * out-parameters (`platformOutWidth`): `thunk_WriteFile(h, p, n, &v, 0)` writes v.
+   */
+  outParamWidthDocumented(callee: string, index: number): number | null;
   typeSize(spelling: string): number | null;
 }
 
@@ -69,11 +75,19 @@ export function createOutParamOracle(
   dataTypes: readonly ExtractedDataType[],
 ): OutParamOracle {
   const typeSize = makeTypeSize(dataTypes);
+  // A pointer typedef's target (`LPDWORD` -> `DWORD *`), for the documented variant: the
+  // SDK spells its out-parameters that way (thunk_WriteFile's lpNumberOfBytesWritten).
+  const typedefTarget = new Map<string, string>();
+  for (const dt of dataTypes) {
+    const u = (dt as { underlyingType?: unknown }).underlyingType;
+    if (dt.kind === 'TYPEDEF' && dt.name && typeof u === 'string' && !typedefTarget.has(dt.name)) typedefTarget.set(dt.name, u);
+  }
   const plain = new Map<ExtractedFunction, Map<number, number> | 'pending'>();
   const nonNullResults = new Map<ExtractedFunction, Map<number, number> | 'pending'>();
+  const documentedResults = new Map<ExtractedFunction, Map<number, number> | 'pending'>();
   const noreturn = new Set<string>([...DEFAULT_NORETURN_FUNCTIONS]);
-  const analyse = (fn: ExtractedFunction, nonNull = false): Map<number, number> => {
-    const results = nonNull ? nonNullResults : plain;
+  const analyse = (fn: ExtractedFunction, nonNull = false, documented = false): Map<number, number> => {
+    const results = documented ? documentedResults : nonNull ? nonNullResults : plain;
     const done = results.get(fn);
     if (done === 'pending') return new Map();
     if (done) return done;
@@ -89,13 +103,14 @@ export function createOutParamOracle(
         if (stmts) {
           const ctx: OutParamContext = {
             pointeeWidth: (i: number) => {
-              const t = (params[i]?.dataType ?? '').trim();
+              let t = (params[i]?.dataType ?? '').trim();
+              for (let hop = 0; documented && hop < 4 && !t.endsWith('*') && typedefTarget.has(t); hop++) t = typedefTarget.get(t)!.trim();
               const m = /^(.*\S)\s*\*$/.exec(t);
               return m ? typeSize(m[1]) : null;
             },
             typeSize,
-            calleeOut: (callee: string, index: number) => outParamWidth(callee, index),
-            calleeOutNonNull: (callee: string, index: number) => outParamWidthNonNull(callee, index),
+            calleeOut: (callee: string, index: number) => documented ? outParamWidthDocumented(callee, index) : outParamWidth(callee, index),
+            calleeOutNonNull: (callee: string, index: number) => documented ? outParamWidthDocumented(callee, index) : outParamWidthNonNull(callee, index),
             noreturn,
           };
           answer = outParamWidths(stmts, params.map(p => p.name ?? ''), ctx, { nonNull });
@@ -117,5 +132,10 @@ export function createOutParamOracle(
     if (!fn) return null;
     return analyse(fn, true).get(index) ?? null;
   };
-  return { outParamWidth, outParamWidthNonNull, typeSize };
+  const outParamWidthDocumented = (callee: string, index: number): number | null => {
+    const fn = byKey.get(callee) ?? byKey.get(callee.replace(/^::/, ''));
+    if (!fn || !fn.decompiled || fn.isExternal) return platformOutWidth(callee, index);
+    return analyse(fn, true, true).get(index) ?? null;
+  };
+  return { outParamWidth, outParamWidthNonNull, outParamWidthDocumented, typeSize };
 }

@@ -85,7 +85,9 @@ describe('model verifier against the stale v1858 model', { skip }, () => {
     const checks = await checkFunctions(model, indices, client, rec.functions, { concurrency: 4, log: () => {} });
     const druid = checks.find(c => c.key === '005c8980')!;
     assert.equal(druid.status, 'mismatch');
-    assert.deepStrictEqual(druid.fields, ['decompiled'], 'only the body moved: the record and its facts agree');
+    // The fixture's model was read before facts-16, whose zero-store gate takes any store to a
+    // member of a local: the record has no zeroStores, Ghidra's row for it now selects some.
+    assert.deepStrictEqual(druid.fields, ['decompiled', 'zeroStores'], 'the body moved, and the one fact the newer gate selects');
     assert.match(druid.diff!, /- .*pAllStatesDataTblFlag0x10\[nStateIdx\]\.nStateId;/);
     assert.match(druid.diff!, /\+ .*\(short\)sgptDataTable->pAllStatesDataTblFlag0x10\[nStateIdx\];/);
     const stale = checks.filter(c => c.status === 'mismatch').map(c => c.key).sort();

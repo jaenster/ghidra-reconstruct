@@ -2,19 +2,24 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert';
 import { parse } from '../../../parser/index.js';
 import { emit } from '../../../emit/index.js';
-import type { AnyNode, TranslationUnit } from '../../../ast/nodes.js';
-import { applyVc8Forms, parseVc8Form, type Vc8FormSite } from '../builtins/vc8-form.js';
+import type { AnyNode, DeclStmt, FunctionDecl, LambdaExpr, TranslationUnit, VariableDecl } from '../../../ast/nodes.js';
+import { NodeKind } from '../../../ast/kinds.js';
+import { applyVc8Forms, parseVc8Form, type Vc8FormSite, type Vc8FormTables } from '../builtins/vc8-form.js';
 
 const flat = (s: string) => s.replace(/\s+/g, ' ').trim();
 
 function run(lines: string[], ...forms: string[]): { out: string; sites: Vc8FormSite[] } {
+  return runWith(undefined, lines, ...forms);
+}
+
+function runWith(tables: Vc8FormTables | undefined, lines: string[], ...forms: string[]): { out: string; sites: Vc8FormSite[] } {
   const sites: Vc8FormSite[] = [];
   const parsed = forms.map(f => {
     const form = parseVc8Form(f);
     assert.ok(form, `parses: ${f}`);
     return { form: form!, tag: f };
   });
-  const tu = applyVc8Forms(parse(lines.join('\n')) as TranslationUnit, parsed, s => sites.push(s));
+  const tu = applyVc8Forms(parse(lines.join('\n')) as TranslationUnit, parsed, s => sites.push(s), tables);
   return { out: flat(emit(tu as AnyNode)), sites };
 }
 
@@ -29,6 +34,8 @@ describe('vc8-form: parsing', () => {
       { op: 'cache', expr: 'p->x < 4 ? p->y : p->z', name: 'n', type: 'int', anchor: undefined });
     assert.deepStrictEqual(parseVc8Form('guards(2)'), { op: 'guards', split: 2, index: 1 });
     assert.deepStrictEqual(parseVc8Form('own(v,DWORD,nBytes)'), { op: 'own', name: 'v', type: 'DWORD', rename: 'nBytes' });
+    assert.deepStrictEqual(parseVc8Form('own(v,DWORD,live)'), { op: 'own', name: 'v', type: 'DWORD', rename: undefined, live: true });
+    assert.deepStrictEqual(parseVc8Form('own(v,DWORD,nBytes,live)'), { op: 'own', name: 'v', type: 'DWORD', rename: 'nBytes', live: true });
   });
   it('rejects an unknown op or a wrong arity', () => {
     assert.strictEqual(parseVc8Form('swap(a,b)'), undefined);
@@ -351,7 +358,7 @@ describe('vc8-form: own', () => {
   });
   // BNDOWNLOAD_WriteFileWithTimestamp 0051e440: the out slot of WriteFile, named apart.
   it('renames and keeps the declaration when no store follows', () => {
-    const { out, sites } = run([
+    const { out, sites } = runWith(outOnly({ WriteFile: 1 }), [
       'void f(LPCSTR pThis, HANDLE h) {',
       '  LPCSTR szCopy = pThis;',
       '  WriteFile(h, (LPDWORD)&szCopy);',
@@ -364,7 +371,91 @@ describe('vc8-form: own', () => {
     const { sites } = run(['void f() {', '  int v = g();', '  v = 0;', '}'], 'own(v,int)');
     assert.strictEqual(sites[0].applied, false);
   });
+  // The form claims the initializer is a dead copy; one that is read stays, whatever the tag says.
+  describe('an initializer something reads', () => {
+    const refused = (r: { out: string; sites: Vc8FormSite[] }, kept: RegExp) => {
+      assert.strictEqual(r.sites[0].applied, false);
+      assert.match(r.sites[0].why ?? '', /initializer is read/);
+      assert.match(r.out, kept);
+    };
+    // ITEMMODE_ConsumeItemAndRemove 00561e70 once the push's copy is gone: the 0 is what
+    // ITEM_SetServerSideFlag ORs its flag into.
+    it('keeps it when &v reaches a call that reads through it', () => {
+      refused(runWith(outOnly({}), [
+        'void f(Unit* pUnit) {',
+        '  uint32_t eFlags = 0;',
+        '  SetFlag(&eFlags, 0x20, 1);',
+        '  Send(pUnit, eFlags);',
+        '}',
+      ], 'own(eFlags,uint32_t)'), /uint32_t eFlags = 0; SetFlag\(&eFlags, 0x20, 1\);/);
+    });
+    it('keeps it when the call is not known to write v first, or is not told at all', () => {
+      const lines = ['void f(Item* pItem) {', '  uint32_t n = (uint32_t)pItem;', '  Load("k", (int32_t*)&n);', '  Use(n);', '}'];
+      refused(run(lines, 'own(n,uint32_t)'), /uint32_t n = \(uint32_t\)pItem;/);
+      refused(runWith(outOnly({ Load: 0 }), lines, 'own(n,uint32_t)'), /uint32_t n = \(uint32_t\)pItem;/);
+    });
+    it('keeps it when an out-parameter call writes fewer bytes than v holds', () => {
+      refused(runWith({ outParamWidth: (c, i) => c === 'Get' && i === 0 ? 2 : null, typeSize: () => 4 },
+        ['void f(int p) {', '  int v = p;', '  Get(&v);', '  Use(v);', '}'], 'own(v,int)'), /int v = p;/);
+    });
+    it('keeps it when the out-parameter call takes another argument with effects', () => {
+      refused(runWith(outOnly({ Get: 0 }), ['void f(int p) {', '  int v = p;', '  Get(&v, g());', '  Use(v);', '}'], 'own(v,int)'), /int v = p;/);
+    });
+    // SUNITNPC_GetActCappedLevel 00576890: the copy of nLevel is what two early returns give back.
+    it('keeps it when a path reads v before the first store', () => {
+      refused(run([
+        'int f(Game* pGame, int nLevel) {',
+        '  int nEffective = nLevel;',
+        '  if (pGame->nDifficulty) {',
+        '    return nEffective;',
+        '  }',
+        '  nEffective = 12;',
+        '  return nEffective;',
+        '}',
+      ], 'own(nEffective,int)'), /int nEffective = nLevel;/);
+    });
+    // SERVER_SEND_MercExperience 0057e860: the level the loop steps from.
+    it('keeps it when the first store reads v', () => {
+      refused(run(['void f(int nMercLevel) {', '  int nLevel = nMercLevel;', '  nLevel = nLevel + 1;', '  Use(nLevel);', '}'], 'own(nLevel,int)'),
+        /int nLevel = nMercLevel;/);
+    });
+    it('keeps it when only one arm overwrites v', () => {
+      refused(run(['void f(int p, int c) {', '  int v = p;', '  if (c) {', '    v = 0;', '  }', '  Use(v);', '}'], 'own(v,int)'), /int v = p;/);
+    });
+    it('keeps it inside a loop that takes the address on another pass round', () => {
+      refused(runWith(outOnly({ Get: 0 }), [
+        'void f(int p) {',
+        '  int* q;',
+        '  while (p) {',
+        '    int v = p;',
+        '    Get(&v);',
+        '    q = &v;',
+        '    Use(*q);',
+        '  }',
+        '}',
+      ], 'own(v,int)'), /int v = p;/);
+    });
+    // UI_SLIDER_InitAutomapMode 0047d3b0: compiled byte-identical with the copy dropped, so
+    // the original left the slot uninitialised; the tag says so with `live`.
+    it('drops it under live, the mark of a matching compile', () => {
+      const r = run(['void f(Item* pItem) {', '  uint32_t n = (uint32_t)pItem;', '  Load("k", (int32_t*)&n);', '  Use(n);', '}'], 'own(n,uint32_t,live)');
+      assert.ok(r.sites[0].applied, r.sites[0].why);
+      assert.strictEqual(r.out, 'void f(Item* pItem) { uint32_t n; Load("k", (int32_t*)&n); Use(n); }');
+    });
+    it('still drops it where every path overwrites v first, through a call or a store', () => {
+      const a = runWith(outOnly({ Get: 0 }), ['void f(int p) {', '  int v = p;', '  if (p) {', '    Get(&v);', '    Use(v);', '  }', '}'], 'own(v,int)');
+      assert.ok(a.sites[0].applied, a.sites[0].why);
+      assert.match(a.out, /int v; if \(p\) \{ Get\(&v\); Use\(v\); \}/);
+      const b = runWith(outOnly({ Get: 0 }), ['void f(int p) {', '  int v = p;', '  int r = Get(&v);', '  Use(v, r);', '}'], 'own(v,int)');
+      assert.ok(b.sites[0].applied, b.sites[0].why);
+    });
+  });
 });
+
+/** Tables whose out-parameters are argument `index` of each named callee, 4 bytes; every local 4 bytes. */
+function outOnly(at: Record<string, number>): Vc8FormTables {
+  return { outParamWidth: (callee, index) => at[callee] === index ? 4 : null, typeSize: () => 4 };
+}
 
 describe('vc8-form: guards and merge-guards', () => {
   // ITEMEVENT_ApplyHitDamage 005cad40: the null tests and the type test return apart.
@@ -1318,5 +1409,155 @@ describe('vc8-form: opas', () => {
       assert.match(tagged.sites[0].why!, why, source.join('\n'));
       assert.strictEqual(tagged.out, plain.out, source.join('\n'));
     }
+  });
+  it('refuses implicit reference aliases that observe the shifted local', () => {
+    const variants = [
+      'int f(int v) { int& alias = v; return alias + (v >> 1); }',
+      'int f(int v) { const int& alias = v; return alias + (v >> 1); }',
+      'int f(int v) { int&& alias = Move(v); return alias + (v >> 1); }',
+      'int f(int v) { Save(v); return Peek() + (v >> 1); }',
+      'int f(int v) { Save(v); return *saved + (v >> 1); }',
+    ];
+    for (const source of variants) {
+      const plain = run([source]);
+      const tagged = run([source], 'opas(v,>>,1)');
+      assert.strictEqual(tagged.sites[0].applied, false, source);
+      assert.match(tagged.sites[0].why!, /reference aliases|lambda captures|call after the update|memory after the update/, source);
+      assert.strictEqual(tagged.out, plain.out, source);
+    }
+  });
+  it('refuses reference captures represented by the collector AST', () => {
+    // The parser does not read lambdas; other transforms construct this AST.
+    const tu = parse('int f(int v) { Fn read = 0; return read() + (v >> 1); } int body() { return v; }') as TranslationUnit;
+    const fn = tu.declarations[0] as FunctionDecl;
+    const decl = (fn.body!.statements[0] as DeclStmt).declarations[0] as VariableDecl;
+    decl.initializer = {
+      kind: NodeKind.LambdaExpr, captures: [], captureDefault: '&', parameters: [], returnType: null,
+      body: (tu.declarations[1] as FunctionDecl).body!, specifiers: [], location: decl.location,
+    } as LambdaExpr;
+    tu.declarations = [fn];
+    const plain = flat(emit(tu as AnyNode));
+    const sites: Vc8FormSite[] = [];
+    const tag = 'opas(v,>>,1)';
+    const out = applyVc8Forms(tu, [{ form: parseVc8Form(tag)!, tag }], s => sites.push(s));
+    assert.strictEqual(sites[0].applied, false);
+    assert.match(sites[0].why!, /lambda captures/);
+    assert.strictEqual(flat(emit(out as AnyNode)), plain);
+  });
+  it('keeps shifted rvalues callable and accepts a safe reference call before the update', () => {
+    const rvalue = run(['int f(int v) { return Use(v >> 1); }'], 'opas(v,>>,1)');
+    assert.ok(rvalue.sites[0].applied, rvalue.sites[0].why);
+    assert.match(rvalue.out, /v >>= 1; return Use\(v\);/);
+    const before = run(['int f(int v) { Save(v); return v >> 1; }'], 'opas(v,>>,1)');
+    assert.ok(before.sites[0].applied, before.sites[0].why);
+    assert.match(before.out, /Save\(v\); v >>= 1; return v;/);
+  });
+});
+
+describe('vc8-form: zinit', () => {
+  // CLIENT_SendMonsterAttackMessage 0046cab0: the memset keeps every zero store, from one zeroed register.
+  const SITE = ['void f(D2UnitStrc* pUnit) {', '  D2ServerMessageHandleStrc sMsg = {0};', '  sMsg.nSkillId = g(pUnit);', '  h(&sMsg);', '}'];
+  it('parses', () => {
+    assert.deepStrictEqual(parseVc8Form('zinit(sMsg)'), { op: 'zinit', name: 'sMsg' });
+    assert.strictEqual(parseVc8Form('zinit(a.b)'), undefined);
+  });
+  it('writes the initialiser as a memset of the whole local', () => {
+    const { out, sites } = run(SITE, 'zinit(sMsg)');
+    assert.ok(sites[0].applied, sites[0].why);
+    assert.ok(out.includes('D2ServerMessageHandleStrc sMsg; memset(&sMsg, 0, sizeof(sMsg)); sMsg.nSkillId = g(pUnit);'), out);
+  });
+  it('refuses a local not initialised = {0}', () => {
+    assert.ok(!run(SITE.map(l => l.replace(' = {0}', '')), 'zinit(sMsg)').sites[0].applied);
+  });
+});
+
+describe('vc8-form: znew', () => {
+  // SUNITEVENT_Alloc 005c0ad0: the new object is cleared, then filled.
+  const SITE = [
+    'T* f(G* pGame, uint8_t n) {',
+    '  T* p = Alloc(pGame, 0x20);',
+    "  p->a = '\\0';",
+    '  p->b = 0;',
+    '  p->c = 0;',
+    '  p->a = n;',
+    '  p->d = -1;',
+    '  return p;',
+    '}',
+  ];
+  it('parses', () => {
+    assert.deepStrictEqual(parseVc8Form('znew(p)'), { op: 'znew', name: 'p' });
+    assert.deepStrictEqual(parseVc8Form('znew(p,0x10)'), { op: 'znew', name: 'p', size: '0x10' });
+    assert.strictEqual(parseVc8Form('znew(p,n)'), undefined);
+  });
+  it('clears the object with a memset and drops the zero stores of the run', () => {
+    const { out, sites } = run(SITE, 'znew(p)');
+    assert.ok(sites[0].applied, sites[0].why);
+    assert.ok(out.includes('T* p = Alloc(pGame, 0x20); memset(p, 0, sizeof(*p)); p->a = n; p->d = -1; return p;'), out);
+  });
+  it('takes an explicit byte count', () => {
+    const { out } = run(SITE, 'znew(p,0x10)');
+    assert.ok(out.includes('memset(p, 0, 0x10);'), out);
+  });
+  it('refuses a call between the allocation and the stores, and a run without a zero', () => {
+    assert.ok(!run(SITE.map(l => l.replace("  p->a = '\\0';", '  h();')), 'znew(p)').sites[0].applied);
+    assert.ok(!run(SITE.filter(l => !/= (0|'\\0');/.test(l)), 'znew(p)').sites[0].applied);
+  });
+});
+
+describe('vc8-form: swclamp', () => {
+  // SPAWN_IsExcludedMonsterClass 0054e3a0: VC8 biases the table with `sub` only for an inline call's result.
+  const SITE = [
+    'static BOOL f(int32_t nClassId) {',
+    '  if (nClassId < 0 || nClassId >= sgptDataTable->nTxtMonStatsSize) {',
+    '    nClassId = -1;',
+    '  }',
+    '  switch (nClassId) {',
+    '    case 0xe5:',
+    '    case 0x11c:',
+    '      return 0;',
+    '  }',
+    '  return 1;',
+    '}',
+  ];
+  it('parses', () => {
+    assert.deepStrictEqual(parseVc8Form('swclamp(nClassId)'), { op: 'swclamp', name: 'nClassId' });
+  });
+  it('switches on an inline helper with two returns', () => {
+    const { out, sites } = run(SITE, 'swclamp(nClassId)');
+    assert.ok(sites[0].applied, sites[0].why);
+    assert.ok(out.includes('static BOOL f(int32_t nClassId) { switch (f_ClampIndex(nClassId)) {'), out);
+    assert.ok(flat(sites[0].prefix![0]).includes('static inline int f_ClampIndex(int nIndex) { if (nIndex < 0 || nIndex >= sgptDataTable->nTxtMonStatsSize) { return -1; } return nIndex; }'), sites[0].prefix![0]);
+  });
+  it('refuses where the value is read after the check', () => {
+    assert.ok(!run(SITE.map(l => l.replace('return 1;', 'return nClassId;')), 'swclamp(nClassId)').sites[0].applied);
+  });
+});
+
+describe('vc8-form: retbase', () => {
+  // CHATDLG_GetLadderFilterForTab 0043f150: the base is loaded in each arm, 0 too, and added once.
+  const SITE = [
+    'static int32_t f(int32_t nTab, uint32_t nMode) {',
+    '  if (nMode >= 0x9 && nMode <= 0x10) {',
+    '    return nTab + 9;',
+    '  }',
+    '  if (nMode <= 7) {',
+    '    return nTab;',
+    '  }',
+    '  Halt(0x1a23);',
+    '  exit(-1);',
+    '}',
+  ];
+  it('parses', () => {
+    assert.deepStrictEqual(parseVc8Form('retbase(nTab,nBase)'), { op: 'retbase', param: 'nTab', name: 'nBase' });
+    assert.strictEqual(parseVc8Form('retbase(nTab)'), undefined);
+  });
+  it('chains the guards into one base and adds the parameter once', () => {
+    const { out, sites } = run(SITE, 'retbase(nTab,nBase)');
+    assert.ok(sites[0].applied, sites[0].why);
+    assert.ok(out.includes('int32_t nBase; if (nMode >= 0x9 && nMode <= 0x10) { nBase = 9; } else if (nMode <= 7) { nBase = 0; } else { Halt(0x1a23); exit(-1); } return nBase + nTab; }'), out);
+  });
+  it('refuses a tail that can fall through and a stored parameter', () => {
+    assert.ok(!run(SITE.filter(l => !l.includes('exit')), 'retbase(nTab,nBase)').sites[0].applied);
+    assert.ok(!run(SITE.map(l => l.replace('Halt(0x1a23);', 'nTab = 1;')), 'retbase(nTab,nBase)').sites[0].applied);
   });
 });

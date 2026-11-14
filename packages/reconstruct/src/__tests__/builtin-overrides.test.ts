@@ -78,7 +78,7 @@ describe('repository overrides: registration', () => {
 
   it('no shipped body names a decompiler artifact', () => {
     for (const name of Object.values(SHIPPED)) {
-      const code = body(name).split('\n').map(l => l.replace(/\/\/.*$/, '')).join('\n');
+      const code = body(name).replace(/\/\/[^\r\n]*/g, '');
       assert.ok(!/\b(stack0x[0-9a-f]+|unaff_\w+|in_[A-Z]\w*|extraout_\w+|in_stack_\w+)\b/.test(code), name);
     }
   });

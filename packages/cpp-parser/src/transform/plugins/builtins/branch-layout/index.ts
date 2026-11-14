@@ -30,6 +30,10 @@
  *             block, short leaving code, laid out between the two tests (the source
  *             wrote the failure tail once per test and VC8 merged the copies):
  *             `if (!a) T; if (!b) T; X`.
+ *   getter    `if (A) { V = E; if (V) X } R...`, A simple or `&&`, outside a loop, X and
+ *             R... leaving, V a local R... does not read, A's test jumping to R... where V's
+ *             test falls into it: an inlined getter tested once, failure first,
+ *             `V = A ? E : 0; if (!V) { R... } X`.
  *
  * The end of a void function's body is its return: a rest there that runs off the end
  * leaves too. Moved into a block ahead of X, it gets the `return;` it ran into, so control
@@ -55,7 +59,7 @@
 
 import { NodeKind } from '../../../../ast/kinds.js';
 import type {
-  ASTNode, CompoundStmt, ExprStmt, IfStmt, LabelStmt, GotoStmt, Statement, Expression,
+  ASTNode, AssignExpr, CompoundStmt, ExprStmt, IfStmt, LabelStmt, GotoStmt, Statement, Expression,
   CallExpr, UnaryExpr, BinaryExpr, ParenExpr, ReturnStmt, CStyleCastExpr, FunctionDecl, IntegerLiteralExpr,
   DeclStmt, VariableDecl, Identifier, AnyNode, TypeNode,
 } from '../../../../ast/nodes.js';
@@ -441,6 +445,88 @@ function nestAt(stmts: readonly Statement[], i: number, cb: number, ctx: Ctx, fa
 }
 
 /**
+ * getter    `if (A) { V = E; if (V) X } R...`, A simple or `&&`, outside a loop, X leaves, R... the
+ *           rest of the block, ending leaving, V a local R... does not read: the original
+ *           jumps from A's test to R..., laid out after V's test, which falls into it. That is
+ *           an inlined getter the source tested once, failure first:
+ *           `V = A ? E : 0; if (!V) { R... } X`. A failing leaves V zero instead of as it
+ *           was, which nothing after reads. V may be declared in the arm (`T V; V = E;` or
+ *           `T V = E;`): the declaration moves out with the getter.
+ */
+function getterNestAt(stmts: readonly Statement[], i: number, ctx: Ctx, fallsOff: boolean): Statement[] | null {
+  const ifs = stmts[i] as IfStmt;
+  const rest = stmts.slice(i + 1);
+  if (rest.length === 0 || ifs.elseBranch || ctx.loopIfs.has(lineOf(ifs))) return null;
+  const shape = conditionShape(ifs.condition);
+  if (shape.kind !== 'simple' && !(shape.kind === 'and' && shape.conjuncts)) return null;
+  const arm = bodyOf(ifs.thenBranch);
+  const inner = arm[arm.length - 1];
+  if (!inner || inner.kind !== NodeKind.IfStmt) return null;
+  // The value: `V = E;`, after at most a declaration of V without initialiser, or `T V = E;`.
+  let decl: DeclStmt | null = null;
+  let v: string | null = null;
+  let value: Expression | null = null;
+  const lone = (s: Statement): VariableDecl | null => {
+    if (s.kind !== NodeKind.DeclStmt) return null;
+    const ds = (s as DeclStmt).declarations;
+    return ds.length === 1 && ds[0].kind === NodeKind.VariableDecl ? ds[0] as VariableDecl : null;
+  };
+  const assigned = (s: Statement): { name: string; value: Expression } | null => {
+    if (s.kind !== NodeKind.ExprStmt) return null;
+    const e = unwrapParens((s as ExprStmt).expression);
+    if (e.kind !== NodeKind.AssignExpr || (e as AssignExpr).operator !== '=') return null;
+    const l = (e as AssignExpr).left;
+    return l.kind === NodeKind.Identifier ? { name: (l as Identifier).name, value: (e as AssignExpr).right } : null;
+  };
+  if (arm.length === 2) {
+    const d = lone(arm[0]);
+    if (d && d.initializer && d.initializer.kind !== NodeKind.InitListExpr && !d.directInit && !d.copyListInit && d.specifiers.length === 0) {
+      decl = arm[0] as DeclStmt; v = d.name.name; value = d.initializer as Expression;
+    } else {
+      const a = assigned(arm[0]);
+      if (a) { v = a.name; value = a.value; }
+    }
+  } else if (arm.length === 3) {
+    const d = lone(arm[0]), a = assigned(arm[1]);
+    if (d && !d.initializer && d.specifiers.length === 0 && a && a.name === d.name.name) {
+      decl = arm[0] as DeclStmt; v = a.name; value = a.value;
+    }
+  }
+  if (v === null || value === null || !ctx.localTypes.has(v)) return null;
+  const ifIn = inner as IfStmt;
+  if (ifIn.elseBranch || ifIn.init || ifIn.isConstexpr) return null;
+  const test = nullTest(ifIn.condition);
+  if (!test || test.nullWhenTrue || test.p.name !== v) return null;
+  if (!leaves(ifIn.thenBranch, ctx.noreturn)) return null;
+  const restLeaves = leaves(rest[rest.length - 1], ctx.noreturn);
+  if (!restLeaves && !fallsOff) return null;
+  const names = new Set([v]);
+  if (mentionsAny(rest, names) || mentionsAny([ifs.condition], names)) return null;
+  if (decl && (declaredNames(stmts).has(v) || mentionsAny(stmts.slice(0, i), names))) return null;
+  if (jumpedLabels([ifs.thenBranch, ...rest], ctx.gotos) || holdsFreeCase([ifs.thenBranch, ...rest])) return null;
+  // The original: A's test falls into V = E and jumps where V's test falls, into the rest.
+  const outer = ctx.reader.edge(ifs), second = ctx.reader.edge(ifIn);
+  if (!outer || !second || outer.target !== second.fall) return null;
+  if (ctx.reader.fallInto(ifs) !== 'then' || ctx.reader.fallInto(ifIn) !== 'other') return null;
+  const restLines = ctx.reader.linesOf(rest);
+  if (!second.fallLines.some(l => restLines.has(l))) return null;
+  ctx.onSite?.({ rule: 'getter', line: lineOf(ifs), why: 'nested test of a value set under a test, rest laid out between' });
+  const selected = Expr.conditional(ifs.condition, value, Expr.intLiteral(0));
+  const head: Statement[] = [];
+  if (decl && lone(decl)!.initializer) {
+    head.push(updateNode(decl, { declarations: [updateNode(lone(decl)!, { initializer: selected } as Partial<VariableDecl>)] } as Partial<DeclStmt>));
+  } else {
+    if (decl) head.push(decl);
+    head.push(Stmt.expr(Expr.assign(Expr.identifier(v), selected)));
+  }
+  const moved = withReturn(rest, ctx.noreturn);
+  const failing = rewriteList(moved, ctx, false) ?? moved;
+  head.push(Stmt.if_(negate(ifIn.condition), Stmt.compound(failing)));
+  const before = [...stmts.slice(0, i), ...head];
+  return [...head, ...spliced(ifIn.thenBranch, bodyOf(ifIn.thenBranch), before, [])];
+}
+
+/**
  * The operands of a guard condition that takes the arm, flattened over its one operator:
  * `a || b || c` gives the tests a, b, c (each takes the arm) and the conjuncts !a, !b, !c;
  * `!(x && y && z)` gives the tests !x, !y, !z and the conjuncts x, y, z. Null for anything
@@ -783,7 +869,7 @@ function rewriteList(stmts: readonly Statement[], ctx: Ctx, fallsOff: boolean): 
       if (r) { cur = [...cur.slice(0, i), ...r, ...cur.slice(i + 1)]; changed = true; }
       continue;
     }
-    const r = nestAt(cur, i, cb, ctx, fallsOff);
+    const r = nestAt(cur, i, cb, ctx, fallsOff) ?? getterNestAt(cur, i, ctx, fallsOff);
     if (r) { cur = [...cur.slice(0, i), ...r]; changed = true; }
   }
   return changed ? cur : null;

@@ -1,5 +1,10 @@
 # Graduation: freezing the code shape of a matched function
 
+> Implemented as the ratchet: see [ratchet.md](ratchet.md). The design below was the first
+> proposal; the ratchet keeps its bindings (functions and globals by address, fields by struct and
+> offset, parameters by position) but stores bodies as text with their bindings rather than as a
+> binding AST, keys static callees into the matched function's record, and adds pins for hand edits.
+
 A function graduates when the VC8 oracle has proven that our compile of it equals the original's
 bytes (status MATCH in `asm_matching/msvc8/evidence/audit.tsv`). From then on the live daemon no
 longer derives that function's statements from the Ghidra decompile. It keeps emitting the body

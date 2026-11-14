@@ -807,8 +807,10 @@ const RENAMES: Record<string, string> = {
  * Floating pseudo-ops with a standard spelling that computes the same thing.
  *
  * ROUND is FLOAT_ROUND: FRNDINT, and the rounding half of FIST/FISTP. Both round in
- * the x87 control word's mode, nearest-even unless changed, and the game never changes
- * it (`_ftol` saves and restores it). `round()` rounds half away from zero: ROUND(2.5)
+ * the x87 control word's mode, nearest-even unless changed. Inline VC8 conversions can
+ * temporarily select truncation; truncating-round-site removes those native-proven
+ * ROUND calls under their integer cast before this pass. `round()` rounds half away
+ * from zero: ROUND(2.5)
  * is 2 on the machine and was 3 here. `std::nearbyint` uses the current mode.
  * Integer ABS does not exist in p-code, so ABS is always the float operation.
  */
@@ -1255,8 +1257,21 @@ function createPseudoOpLowerTransformer(options: PseudoOpLowerOptions = {}): Tra
     returnTypes: options.functionReturnTypes,
     resolve: options.typedefTargets ? (n: string) => options.typedefTargets![n] : undefined,
   };
+  const volatileTypeSpelling = (spelling: string): boolean => {
+    const seen = new Set<string>(), todo = [spelling];
+    while (todo.length) {
+      const text = todo.pop()!;
+      if (/\bvolatile\b/.test(text)) return true;
+      for (const word of text.match(/[A-Za-z_]\w*/g) ?? []) if (!seen.has(word)) {
+        seen.add(word);
+        const target = options.typedefTargets?.[word];
+        if (target) todo.push(target);
+      }
+    }
+    return false;
+  };
 
-  const lowerBody = (body: ASTNode, localTypes: Map<string, TypeNode>): ASTNode => {
+  const lowerBody = (body: ASTNode, localTypes: Map<string, TypeNode>, declarationCounts: Map<string, number>): ASTNode => {
     const shape = createExprShape(localTypes, tables);
     const classify = (e: Expression): Operand => {
       const x = unwrapParens(e);
@@ -1458,11 +1473,30 @@ function createPseudoOpLowerTransformer(options: PseudoOpLowerOptions = {}): Tra
       ? (() => {
         const list = (registersRetired as unknown as { statements: Statement[] }).statements;
         const deps = { classify, isPure, locals: new Set(localTypes.keys()) };
+        // The word-memcmp pass checks its loop shape before asking for these
+        // tables. Most functions should not scan the global type inventory.
+        let wordVolatileNames: Set<string> | undefined;
+        let wordByteArrays: Set<string> | undefined;
         const stringDeps = {
           shape: (e: Expression) => shape(e), isPure, locals: deps.locals,
           localArrays: localArraysOf(body), localArrayPointers: localArrayPointersOf(body),
           stackSlots: options.stackSlots, fieldOffsets: options.structFieldOffsets,
           structFields: options.structFields, aggregateSizes: options.aggregateSizes,
+          declarationCounts,
+          typeIsVolatile: (type: TypeNode) => volatileTypeSpelling(emit(type as AnyNode)),
+          get volatileNames() { return wordVolatileNames ??= new Set([
+            ...[...localTypes].filter(([, t]) => volatileTypeSpelling(emit(t as AnyNode))).map(([name]) => name),
+            ...Object.entries({ ...options.globalTypes, ...options.enclosingVarTypes })
+              .filter(([name, type]) => !localTypes.has(name) && volatileTypeSpelling(type)).map(([name]) => name),
+          ]); },
+          get byteArrays() { return wordByteArrays ??= new Set([
+            ...[...localArraysOf(body)].filter(([, a]) => a.elem === 1).map(([name]) => name),
+            ...Object.entries({ ...options.globalTypes, ...options.enclosingVarTypes })
+              .filter(([name, type]) => !localTypes.has(name) && !volatileTypeSpelling(type)
+                && /\[[1-9]\d*\]\s*$/.test(type) && shape({ kind: NodeKind.Identifier, name } as Identifier)?.stars === 1
+                && ['char', 'signed char', 'unsigned char'].includes(shape({ kind: NodeKind.Identifier, name } as Identifier)!.base))
+              .map(([name]) => name),
+          ]); },
         };
         const next = lowerStringIntrinsics(
           lowerCarryChains(lowerNegTestConditions(lowerFlagConditions(list, deps), deps), carryDeps), stringDeps);
@@ -1478,15 +1512,20 @@ function createPseudoOpLowerTransformer(options: PseudoOpLowerOptions = {}): Tra
       visitFunctionDecl(fn: FunctionDecl): ASTNode | undefined {
         if (!fn.body) return undefined;
         const localTypes = new Map<string, TypeNode>();
+        const declarationCounts = new Map<string, number>();
         for (const p of fn.parameters) {
           const pd = p as ParameterDecl;
-          if (pd.name) localTypes.set(pd.name.name, pd.type);
+          if (pd.name) {
+            localTypes.set(pd.name.name, pd.type);
+            declarationCounts.set(pd.name.name, (declarationCounts.get(pd.name.name) ?? 0) + 1);
+          }
         }
         for (const d of findNodesByKind(fn.body, NodeKind.VariableDecl)) {
           const v = d as VariableDecl;
           if (!localTypes.has(v.name.name)) localTypes.set(v.name.name, v.type);
+          declarationCounts.set(v.name.name, (declarationCounts.get(v.name.name) ?? 0) + 1);
         }
-        return { ...fn, body: lowerBody(fn.body, localTypes) } as FunctionDecl;
+        return { ...fn, body: lowerBody(fn.body, localTypes, declarationCounts) } as FunctionDecl;
       },
     })(root);
   };

@@ -38,6 +38,13 @@
  *     pOperationArg = pOperation;          // OBJOP_A3Q2_KhalimsRelicPortalDrop1 005b8860
  *     ...                                  // PUSH ECX
  *     do { ITEM_RewardItemToDrop(..., (int32_t*)&pOperationArg, ...); } while (...);
+ *
+ * Nor need a call overwrite x at all where a plain store does: the first later statement of
+ * the function body's own list that names x is `x = e` with e not reading x, nothing earlier
+ * names x and no label lies in between. x's address is first taken after it, so no call in
+ * between reaches x, and the push's value is dead (UI_SLIDER_InitContrast 0047d2f0:
+ * `nContrastVal = (int32_t)pItem;` then the default `nContrastVal = ... ? 100 : 0;` that
+ * SRegLoadValue may keep).
  */
 
 import { NodeKind } from '../../../ast/kinds.js';
@@ -118,6 +125,14 @@ function leadingCall(s: Statement): CallExpr | null {
   return x.kind === NodeKind.CallExpr ? x as CallExpr : null;
 }
 
+/** A label or a case label anywhere in the statement: a place control can enter it. */
+function hasLabel(root: ASTNode): boolean {
+  for (const x of traverseAST(root)) {
+    if (x.kind === NodeKind.LabelStmt || x.kind === NodeKind.CaseStmt || x.kind === NodeKind.DefaultStmt) return true;
+  }
+  return false;
+}
+
 function mentions(root: ASTNode, name: string): number {
   let n = 0;
   for (const x of traverseAST(root)) if (x.kind === NodeKind.Identifier && (x as Identifier).name === name) n++;
@@ -138,7 +153,9 @@ function createDeadOutSlotStoreTransformer(options: DeadOutSlotStoreOptions): Tr
         const v = d as VariableDecl;
         if (params.has(v.name.name)) continue;
         const spelled = emit(v.type as never).replace(/\s+/g, ' ').trim();
-        localSize.set(v.name.name, localSize.has(v.name.name) ? null : typeSize(spelled));
+        // A volatile store is observable even when no later value read uses it.
+        localSize.set(v.name.name, localSize.has(v.name.name) || /\bvolatile\b/.test(spelled)
+          ? null : typeSize(spelled));
       }
       const addressTaken = new Map<string, number>();
       for (const u of findNodesByKind(fn.body, NodeKind.UnaryExpr)) {
@@ -194,6 +211,31 @@ function createDeadOutSlotStoreTransformer(options: DeadOutSlotStoreOptions): Tr
         const width = outParamWidth(callee, at);
         return width === null || width < w ? null : callee;
       };
+      /**
+       * 'overwritten' when the first later statement of the body's own list that names x
+       * stores a value to all of x that does not read it, and nothing before that names x:
+       * x's address is not taken until then, so no call in between can reach it, and no
+       * label in between lets control enter past the store.
+       */
+      const overwrittenLater = (st: Statement[], i: number, x: string): string | null => {
+        // A declaration names x without reading it; its initializer would.
+        const named = (p: Statement) => p.kind === NodeKind.DeclStmt
+          ? (p as DeclStmt).declarations.some(d => d.kind !== NodeKind.VariableDecl || ((d as VariableDecl).initializer ? mentions((d as VariableDecl).initializer!, x) > 0 : false))
+          : mentions(p, x) > 0;
+        if (st.slice(0, i).some(named)) return null;
+        for (let k = i + 1; k < st.length; k++) {
+          const s = st[k];
+          if (hasLabel(s)) return null;
+          if (!named(s)) continue;
+          if (s.kind !== NodeKind.ExprStmt) return null;
+          const a = unparen((s as ExprStmt).expression);
+          if (a.kind !== NodeKind.AssignExpr || (a as AssignExpr).operator !== '=') return null;
+          const t = unparen((a as AssignExpr).left);
+          if (t.kind !== NodeKind.Identifier || (t as Identifier).name !== x) return null;
+          return mentions((a as AssignExpr).right, x) === 0 ? 'overwritten' : null;
+        }
+        return null;
+      };
       let changed = false;
       const rewriteBlock = createTransformer({
         visitCompoundStmt(block: CompoundStmt): ASTNode | undefined {
@@ -224,7 +266,26 @@ function createDeadOutSlotStoreTransformer(options: DeadOutSlotStoreOptions): Tr
           return updateNode(block, { statements: out.filter(Boolean) });
         },
       });
-      const body = rewriteBlock(fn.body) as FunctionDecl['body'];
+      let body = rewriteBlock(fn.body) as CompoundStmt;
+      // The push's store a later plain store overwrites, in the body's own list.
+      const st = body.statements;
+      const keep = st.filter((s, i) => {
+        if (s.kind !== NodeKind.ExprStmt) return true;
+        const a = unparen((s as ExprStmt).expression);
+        if (a.kind !== NodeKind.AssignExpr || (a as AssignExpr).operator !== '=') return true;
+        const target = unparen((a as AssignExpr).left);
+        if (target.kind !== NodeKind.Identifier) return true;
+        const x = (target as Identifier).name;
+        const w = localSize.get(x);
+        if (w === undefined || w === null) return true;
+        const value = uncast((a as AssignExpr).right);
+        if (value.kind !== NodeKind.Identifier || pushed.get(x) !== (value as Identifier).name) return true;
+        if (!overwrittenLater(st, i, x)) return true;
+        STATS.dropped++;
+        options.onDrop?.(x, 'overwritten');
+        return false;
+      });
+      if (keep.length !== st.length) { body = updateNode(body, { statements: keep }); changed = true; }
       return changed ? updateNode(fn, { body } as Partial<FunctionDecl>) : undefined;
     },
   });
