@@ -575,6 +575,11 @@ export {
 } from './builtins/loop-copy-sink.js';
 
 export {
+  loopStepMergePlugin,
+  createLoopStepMergeTransformer,
+} from './builtins/loop-step-merge.js';
+
+export {
   derefWalkLoopPlugin,
   createDerefWalkLoopTransformer,
   type DerefWalkLoopOptions,
@@ -982,6 +987,7 @@ import { armConstantCallPlugin } from './builtins/arm-constant-call.js';
 import { fieldPointerFoldPlugin } from './builtins/field-pointer-fold.js';
 import { newResultTempPlugin } from './builtins/new-result-temp.js';
 import { loopCopySinkPlugin } from './builtins/loop-copy-sink.js';
+import { loopStepMergePlugin } from './builtins/loop-step-merge.js';
 import { derefWalkLoopPlugin } from './builtins/deref-walk-loop.js';
 import { shiftDefPlugin } from './builtins/shift-def.js';
 import { paramSlotLocalPlugin } from './builtins/param-slot-local.js';
@@ -1230,6 +1236,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   fieldPointerFoldPlugin,     // Matching: a field-pointer temporary goes; the field updated in place or the record held (priority 62.5)
   newResultTempPlugin,        // Matching: an allocation constructed in place gets a temporary; the result assigned after (priority 62.6)
   loopCopySinkPlugin,         // Matching: a loop-carried copy placed mid-body moves to the end of the body (priority 62.7)
+  loopStepMergePlugin,        // Matching: a running loop variable split into a copy and a step from it is one variable (priority 62.72)
   derefWalkLoopPlugin,        // Matching: a tail-link walk tests *pp, not a copy reloaded each round (priority 62.77)
   shiftDefPlugin,             // Matching: a call result every read shifts by one constant is shifted once, where it is stored (priority 62.8)
   paramSlotLocalPlugin,       // Matching: a local packed into a loaded parameter's slot gets its own variable back (priority 940)
