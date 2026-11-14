@@ -36,6 +36,33 @@ describe('getter-twin', () => {
     assert.ok(!out.includes('pPlayerData'), out);
   });
 
+  it('keeps the label of a labelled store on the statement that reads it (00594140)', () => {
+    const { out, sites } = run(`int f(G *pGame, U *pPlayer) {
+      int BVar1; P *pPlayerData;
+      if (pGame->x) goto L;
+      return 0;
+      L:
+      pPlayerData = GetPlayerData(pPlayer);
+      BVar1 = GetQuestState(pPlayerData->pQuestRecord[pGame->nDifficulty], 7, 0x10);
+      return BVar1;
+    }`);
+    assert.deepStrictEqual(sites, ['pPlayerData']);
+    assert.ok(out.includes('L: BVar1 = GetQuestState(Q::GetQuestBitBufferInline(pGame, pPlayer), 7, 0x10);'), out);
+  });
+
+  it('takes the last store of a local read before for something else (005b4a80)', () => {
+    const { out, sites } = run(`int f(G *pGame, U *pUnit) {
+      P *pPlayerData = GetPlayerData(pUnit);
+      pPlayerData->bCutscenePending = 1;
+      Send(pUnit);
+      pPlayerData = GetPlayerData(pUnit);
+      int b = GetQuestState(pPlayerData->pQuestRecord[pGame->nDifficulty], 3, 0xd);
+      return b;
+    }`);
+    assert.deepStrictEqual(sites, ['pPlayerData']);
+    assert.ok(out.includes('pPlayerData->bCutscenePending = 1; Send(pUnit); int b = GetQuestState(Q::GetQuestBitBufferInline(pGame, pUnit), 3, 0xd);'), out);
+  });
+
   it('takes an initialised declaration and a declaration reading it', () => {
     const { out } = run(`int f(G *pGame, U *pUnit) {
       P *pDVar1 = GetPlayerData(pUnit);

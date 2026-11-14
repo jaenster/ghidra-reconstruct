@@ -41,7 +41,7 @@
 import { NodeKind } from '../../../ast/kinds.js';
 import type {
   ASTNode, AssignExpr, CallExpr, CompoundStmt, DeclStmt, Expression, ExprStmt, FunctionDecl, Identifier,
-  IfStmt, MemberExpr, ParenExpr, ReturnStmt, Statement, SubscriptExpr, UnaryExpr, VariableDecl,
+  IfStmt, LabelStmt, MemberExpr, ParenExpr, ReturnStmt, Statement, SubscriptExpr, UnaryExpr, VariableDecl,
 } from '../../../ast/nodes.js';
 import { Expr } from '../../../ast/factory.js';
 import { getChildren, traverseAST } from '../../../ast/visitor.js';
@@ -261,14 +261,16 @@ function rewriteFunction(fn: FunctionDecl, opts: GetterTwinOptions): FunctionDec
   for (const block of blocks) {
     const st = block.statements;
     for (let i = 0; i < st.length; i++) {
-      const h = heldStore(st[i]);
-      if (!h || refused.has(h.name) || addressed.has(h.name)) continue;
+      // A labelled store keeps its label on the statement that reads it.
+      const h = heldStore(st[i].kind === NodeKind.LabelStmt ? (st[i] as LabelStmt).statement : st[i]);
+      if (!h || addressed.has(h.name)) continue;
       let twin: GetterTwin | undefined;
       let bound: Expression[] | null = null;
       for (const t of twins) { bound = matchCall(h.call, t); if (bound) { twin = t; break; } }
       if (!twin || !bound) continue;
       const next = st[i + 1];
-      const slot = next ? evaluated(next) : null;
+      // A label on the reading statement would let a jump read V without the store.
+      const slot = next && next.kind !== NodeKind.LabelStmt ? evaluated(next) : null;
       if (!slot) { refused.add(h.name); continue; }
       // The one read of V in the next statement, as V->M[b->N].
       let site: SubscriptExpr | null = null;
@@ -293,18 +295,32 @@ function rewriteFunction(fn: FunctionDecl, opts: GetterTwinOptions): FunctionDec
       pairs.set(h.name, list);
     }
   }
-  for (const [name, list] of pairs) {
-    if (refused.has(name)) continue;
+  // Without a jump the top-level block runs in order: a plain store there whose read is the
+  // last time the function names V is a value nothing else reads, whatever V held before.
+  const jumps = [...traverseAST(body)].some(k => k.kind === NodeKind.GotoStmt || k.kind === NodeKind.LabelStmt);
+  const lastAtTop = (name: string, p: Pair): boolean =>
+    !jumps && p.block === body && !p.decl && p.block.statements.slice(p.at + 2).every(s => uses(s, name) === 0);
+  for (const [name, all] of pairs) {
+    let list = all;
     // Each pair accounts for two uses, the store's and the read's; a declaration with an
     // initializer for one, the read.
     const accounted = list.reduce((n, p) => n + (p.decl ? 1 : 2), 0);
-    if ((reads.get(name) ?? 0) !== accounted) continue;
+    if (refused.has(name) || (reads.get(name) ?? 0) !== accounted) {
+      list = list.filter(p => lastAtTop(name, p));
+      if (list.length === 0) continue;
+    }
     // Apply from the back of each block so earlier indices stay valid.
     const ordered = [...list].sort((a, b) => (a.block === b.block ? b.at - a.at : 0));
     for (const p of ordered) {
       const replacement = twinCall(p.twin, p.bound);
-      replaceIn(p.block.statements[p.at + 1] as N, e => (e === p.site ? replacement : null));
-      p.block.statements.splice(p.at, 1);
+      const st = p.block.statements;
+      replaceIn(st[p.at + 1] as N, e => (e === p.site ? replacement : null));
+      if (st[p.at].kind === NodeKind.LabelStmt) {
+        (st[p.at] as LabelStmt).statement = st[p.at + 1];
+        st.splice(p.at + 1, 1);
+      } else {
+        st.splice(p.at, 1);
+      }
       changed++;
       opts.onSite?.({ line: 0, call: p.twin.call, held: name });
     }
