@@ -1,0 +1,124 @@
+{
+  "source": "d589be17819f704269b6607dc513dbc569dd6372",
+  "ghidraVersion": 2104,
+  "scope": "Actual live function model with manually native-attested comparison, branch and register-store facts. Local full-emitter fixture, not an owning extraction.",
+  "fn": {
+    "name": "SetAnimationSpeed",
+    "address": "00621780",
+    "entryPoint": "00621780",
+    "signature": "void SetAnimationSpeed(D2UnitStrc * pUnit, int32_t nSpeed)",
+    "returnType": "void",
+    "callingConvention": "__stdcall",
+    "size": 52,
+    "isThunk": false,
+    "isExternal": false,
+    "hasVarArgs": false,
+    "namespace": "D2Common::Units::Units",
+    "comment": "@function SetAnimationSpeed\n@address Game.exe.ram:00621780\n@date 2026.06.12\n@calling __stdcall\n@description Diablo 2 1.14d reverse team\nhttps://blizzhackers.dev",
+    "sourceFile": null,
+    "sourceLine": null,
+    "sourceInfo": null,
+    "parameters": [
+      {
+        "name": "pUnit",
+        "dataType": "D2UnitStrc *",
+        "size": 4,
+        "ordinal": 0,
+        "storage": "Stack[0x4]:4",
+        "stackOffset": 4,
+        "resolvedType": null
+      },
+      {
+        "name": "nSpeed",
+        "dataType": "int32_t",
+        "size": 4,
+        "ordinal": 1,
+        "storage": "Stack[0x8]:4",
+        "stackOffset": 8,
+        "resolvedType": null
+      }
+    ],
+    "localVariables": [
+      {
+        "name": "nClampedSpeed",
+        "dataType": "uint",
+        "size": 4,
+        "storage": "EAX:4",
+        "stackOffset": null,
+        "resolvedType": null
+      }
+    ],
+    "tags": null,
+    "decompiled": "\n/* WARNING: Enum \"eCollisionFlags\": Some values do not have unique names */\n/* WARNING: Enum \"eD2TimerType\": Some values do not have unique names */\n/* WARNING: Enum \"eD2TimerTypeDWORD\": Some values do not have unique names */\n/* @function SetAnimationSpeed\n   @address Game.exe.ram:00621780\n   @date 2026.06.12\n   @calling __stdcall\n   @description Diablo 2 1.14d reverse team\n   https://blizzhackers.dev */\n\nvoid D2Common::Units::Units::SetAnimationSpeed(D2UnitStrc *pUnit,int32_t nSpeed)\n\n{\n  uint nClampedSpeed;\n  \n  nClampedSpeed = nSpeed & (nSpeed < 1) - 1;\n  if ((int)nClampedSpeed < 0x7fff) {\n    pUnit->nAnimSpeed = (short)nClampedSpeed;\n    return;\n  }\n  pUnit->nAnimSpeed = 0x7fff;\n  return;\n}\n\n",
+    "branchLayout": {
+      "lineCount": 25,
+      "lines": [
+        [
+          18,
+          [
+            23
+          ]
+        ]
+      ],
+      "ifs": [
+        [
+          18,
+          23
+        ]
+      ],
+      "tests": []
+    },
+    "registerStores": [
+      {
+        "name": "nAnimSpeed",
+        "size": 2,
+        "value": 32767,
+        "register": true
+      }
+    ],
+    "compareSites": "0\t<\tINT_SLESS\t4\t1\t1\tv:nSpeed\tc:1\t0062178a\t0062178a\tSETLE\t00621788\tTEST\t4\tr\tz\t0\t1\n1\t<\tINT_SLESS\t4\t1\t7fff\tv:nClampedSpeed\tc:7fff\t00621797\t00621797\tJGE\t00621792\tCMP\t4\tr\ti\t7fff\t1"
+  },
+  "dh": "50f22b23",
+  "options": {
+    "outputDir": "./out",
+    "format": "cpp",
+    "organization": "namespace",
+    "generateCMake": false,
+    "generateSourceMaps": false,
+    "transformPreset": "full",
+    "includeAddressComments": false,
+    "promoteStaticGlobals": false
+  },
+  "context": {
+    "targetPointerSize": 4,
+    "targetLanguageId": "x86:LE:32:default",
+    "funcPtrArgCasts": {
+      "structFields": {
+        "D2UnitStrc": {
+          "nAnimSpeed": "short"
+        }
+      },
+      "typedefTargets": {
+        "uint": "unsigned int"
+      }
+    }
+  },
+  "dataTypes": [
+    {
+      "name": "D2UnitStrc",
+      "category": "/",
+      "size": 244,
+      "kind": "STRUCTURE",
+      "fields": [
+        {
+          "name": "nAnimSpeed",
+          "dataType": "short",
+          "offset": 76,
+          "size": 2
+        }
+      ]
+    }
+  ],
+  "baseline": "// 1.14d: 00621780\nvoid __stdcall SetAnimationSpeed(D2UnitStrc * pUnit, int32_t nSpeed) {\n    uint32_t nClampedSpeed = nSpeed <= 0 ? 0 : nSpeed;\n    pUnit->nAnimSpeed = (int)nClampedSpeed < 0x7fff ? (short int)nClampedSpeed : 0x7fff;\n}",
+  "candidate": "// 1.14d: 00621780\nvoid __stdcall SetAnimationSpeed(D2UnitStrc * pUnit, int32_t nSpeed) {\n    uint32_t nClampedSpeed = nSpeed <= 0 ? 0 : nSpeed;\n    pUnit->nAnimSpeed = (int)nClampedSpeed < 0x7fff ? nClampedSpeed : 0x7fff;\n}"
+}
