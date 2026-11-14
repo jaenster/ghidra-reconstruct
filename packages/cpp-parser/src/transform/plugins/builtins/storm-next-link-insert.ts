@@ -6,6 +6,7 @@ import type {
   UnaryExpr, VariableDecl,
 } from '../../../ast/nodes.js';
 import { Expr, Type } from '../../../ast/factory.js';
+import { emit } from '../../../emit/index.js';
 import { getChildren, traverseAST } from '../../../ast/visitor.js';
 import { createTransformer, updateNode, cloneNode, type Transformer } from '../../transformer.js';
 import { createExprShape } from './expr-shape.js';
@@ -90,9 +91,9 @@ export function createStormNextLinkInsertTransformer(options: StormNextLinkOptio
     [base, base.replace(/^::/, ''), bareName(base)].map(k => tables[k]).find(Boolean)
       ?? Object.entries(tables).find(([k]) => keyType(k) === keyType(base))?.[1];
   const fieldOffset = (m: MemberExpr, shapeOf: ReturnType<typeof createExprShape>): number | null => {
-    if (!m.isArrow || m.member.kind !== NodeKind.Identifier) return null;
+    if (m.member.kind !== NodeKind.Identifier) return null;
     const t = shapeOf(m.object);
-    if (!t || t.stars !== 1) return null;
+    if (!t || t.stars !== (m.isArrow ? 1 : 0)) return null;
     return tableOf(offsets, t.base)?.[(m.member as Identifier).name] ?? null;
   };
 
@@ -100,6 +101,11 @@ export function createStormNextLinkInsertTransformer(options: StormNextLinkOptio
     visitFunctionDecl(fn: FunctionDecl): ASTNode | undefined {
       if (!fn.body) return undefined;
       const locals = localTypesOf(fn);
+      const bindings = new Map<string, number>();
+      const bind = (name: string) => bindings.set(name, (bindings.get(name) ?? 0) + 1);
+      fn.parameters.forEach(p => { if (p.name) bind(p.name.name); });
+      for (const n of traverseAST(fn.body)) if (n.kind === NodeKind.VariableDecl) bind((n as VariableDecl).name.name);
+      const ambiguous = new Set([...bindings].filter(([, count]) => count > 1).map(([name]) => name));
       const shapeOf = createExprShape(locals, {
         globalTypes: options.globalTypes ?? {}, enclosingVarTypes: options.enclosingVarTypes ?? {},
         structFields: options.structFields ?? {}, fieldTypes: options.fieldTypes ?? {},
@@ -109,6 +115,25 @@ export function createStormNextLinkInsertTransformer(options: StormNextLinkOptio
         const t = shapeOf(e);
         if (t) return t;
         const x = unparen(e);
+        if (x.kind === NodeKind.IntegerLiteral && (x as IntegerLiteralExpr).value >= 0n && (x as IntegerLiteralExpr).value <= 0xffffffffn) {
+          return { base: 'unsigned int', stars: 0, isConst: false };
+        }
+        if (x.kind === NodeKind.UnaryExpr && (x as UnaryExpr).operator === '-') {
+          const value = unparen((x as UnaryExpr).operand);
+          if (value.kind === NodeKind.IntegerLiteral && (value as IntegerLiteralExpr).value <= 0x80000000n) {
+            return { base: 'int', stars: 0, isConst: false };
+          }
+        }
+        if (x.kind === NodeKind.BinaryExpr) {
+          const b = x as BinaryExpr;
+          if (b.operator !== '+' && b.operator !== '-') return null;
+          const a = operandShape(b.left), c = operandShape(b.right);
+          const integer = (t: TypeShape | null) => t?.stars === 0 && wordInteger.has(t.base);
+          if (integer(a) && integer(c)) return { base: 'intptr_t', stars: 0, isConst: false };
+          if (a?.stars === 1 && byteBase.has(a.base) && integer(c)) return a;
+          if (b.operator === '+' && integer(a) && c?.stars === 1 && byteBase.has(c.base)) return c;
+          return null;
+        }
         if (x.kind !== NodeKind.MemberExpr) return null;
         const m = x as MemberExpr;
         if (m.member.kind !== NodeKind.Identifier) return null;
@@ -138,19 +163,90 @@ export function createStormNextLinkInsertTransformer(options: StormNextLinkOptio
         return true;
       };
       const safeCasts = (e: Expression): boolean => castsAreWords(e) && byteSums(e);
-      // The next word: Ghidra types it signed or unsigned, a 32-bit integer either way. Its sign
-      // test must read it signed (signTest), and `~` and `+` give the same 32 bits on both.
+      // Ghidra types the next word as an integer or a pointer. Its sign test
+      // must read it as a signed word (signTest); a pointer is only used as an
+      // address value, never as a scaled non-byte operand in the sum.
       const word = (e: Expression): boolean => {
         const n = nameOf(e);
         const t = n && locals.get(n);
         const s = t && shapeOfNode(t, 0, resolve);
-        return !!s && s.stars === 0 && wordInteger.has(s.base);
+        return !!s && (s.stars > 0 || wordInteger.has(s.base));
       };
       const headMember = (e: Expression, offset: number): MemberExpr | null => {
-        const x = unparen(e);
-        return x.kind === NodeKind.MemberExpr && fieldOffset(x as MemberExpr, operandShape) === offset ? x as MemberExpr : null;
+        if (!safeCasts(e)) return null;
+        const x = uncast(e);
+        if (x.kind !== NodeKind.MemberExpr || fieldOffset(x as MemberExpr, operandShape) !== offset) return null;
+        const m = x as MemberExpr;
+        // `entry->link.next` reads the next word of the embedded link, whose
+        // address (not the containing entry's) is the helper's receiver.
+        return m.isArrow ? m : updateNode(m, { object: Expr.unary('&', cloneNode(m.object)), isArrow: true });
       };
-      const sameHead = (a: Expression, b: Expression): boolean => safeCasts(a) && safeCasts(b) && same(uncast(a), uncast(b));
+      const addressBase = (e: Expression): Expression => {
+        const x = uncast(e);
+        if (x.kind !== NodeKind.UnaryExpr || (x as UnaryExpr).operator !== '&') return x;
+        const m = unparen((x as UnaryExpr).operand);
+        if (m.kind !== NodeKind.MemberExpr || fieldOffset(m as MemberExpr, operandShape) !== 0) return x;
+        return addressBase((m as MemberExpr).isArrow ? (m as MemberExpr).object : Expr.unary('&', (m as MemberExpr).object));
+      };
+      const sameHead = (a: Expression, b: Expression): boolean => safeCasts(a) && safeCasts(b) && same(addressBase(a), addressBase(b));
+      const volatileType = (spelling: string, seen = new Set<string>()): boolean => {
+        if (/\bvolatile\b/.test(spelling)) return true;
+        const base = spelling.replace(/\[[^\]]*\]/g, '').replace(/\bconst\b|\*/g, '').replace(/\s+/g, ' ').trim();
+        const target = options.typedefTargets?.[base];
+        if (!target) return false;
+        if (seen.has(base)) return true;
+        seen.add(base);
+        return volatileType(target, seen);
+      };
+      const volatileRead = (root: ASTNode): boolean => {
+        for (const n of traverseAST(root)) {
+          if (n.kind === NodeKind.Identifier) {
+            const name = (n as Identifier).name, type = locals.get(name);
+            if (volatileType(type ? emit(type) : options.globalTypes?.[name] ?? '')) return true;
+          }
+          if (n.kind === NodeKind.MemberExpr) {
+            const m = n as MemberExpr, t = operandShape(m.object);
+            if (t && m.member.kind === NodeKind.Identifier
+              && volatileType(tableOf(options.structFields ?? {}, t.base)?.[(m.member as Identifier).name] ?? '')) return true;
+          }
+        }
+        return false;
+      };
+      // Reduce only byte-address sums. In CMDDEF, `next->szName + off - 16`
+      // is `next + off`: szName is an inline char[16] at offset 16. A pointer
+      // field would READ a different address, so it must never use this rule.
+      const slotSum = (e: Expression, next: string, off: string): boolean => {
+        type Sum = [bigint, bigint, bigint];
+        const sum = (e: Expression): Sum | null => {
+          const x = uncast(e), name = nameOf(x);
+          if (name === next) return [1n, 0n, 0n];
+          if (name === off) return [0n, 1n, 0n];
+          if (x.kind === NodeKind.IntegerLiteral) return [0n, 0n, (x as IntegerLiteralExpr).value];
+          if (x.kind === NodeKind.UnaryExpr && (x as UnaryExpr).operator === '-') {
+            const value = sum((x as UnaryExpr).operand);
+            return value && value.every((n, i) => i === 2 || n === 0n) ? [0n, 0n, -value[2]] : null;
+          }
+          if (x.kind === NodeKind.BinaryExpr) {
+            const b = x as BinaryExpr;
+            if (b.operator !== '+' && b.operator !== '-') return null;
+            const a = sum(b.left), c = sum(b.right), sign = b.operator === '+' ? 1n : -1n;
+            return a && c ? [a[0] + sign * c[0], a[1] + sign * c[1], a[2] + sign * c[2]] : null;
+          }
+          if (x.kind !== NodeKind.MemberExpr) return null;
+          const m = x as MemberExpr, t = operandShape(m.object);
+          if (!m.isArrow || nameOf(uncast(m.object)) !== next || !t || m.member.kind !== NodeKind.Identifier) return null;
+          const field = tableOf(options.structFields ?? {}, t.base)?.[(m.member as Identifier).name];
+          const array = field && /^\s*(.*?)\s*\[\s*(\d+)\s*\]\s*$/.exec(field);
+          const element = array && shapeOfSpelling(array[1], resolve), at = fieldOffset(m, operandShape);
+          const size = options.aggregateSizes?.[t.base];
+          if (!array || !element || element.stars !== 0 || !byteBase.has(element.base) || at === null || !Number.isSafeInteger(at) || at < 0
+            || size === undefined || Number(array[2]) <= 0 || at + Number(array[2]) > size) return null;
+          return [1n, 0n, BigInt(at)];
+        };
+        if (!safeCasts(e) || volatileRead(e)) return false;
+        const value = sum(e);
+        return !!value && value[0] === 1n && value[1] === 1n && value[2] === 0n;
+      };
       const signTest = (s: Statement, local: string): IfStmt | null => {
         if (s.kind !== NodeKind.IfStmt) return null;
         const x = s as IfStmt;
@@ -179,6 +275,7 @@ export function createStormNextLinkInsertTransformer(options: StormNextLinkOptio
         const offName = off && nameOf(off.left), nextName = next && nameOf(next.left);
         if (!off || !next || !offName || !nextName || offName === nextName
           || !locals.has(offName) || !word(next!.left) || !pure(off.right) || !pure(next.right)) return null;
+        if (s.slice(i, i + 7).some(st => [...traverseAST(st)].some(n => n.kind === NodeKind.Identifier && ambiguous.has((n as Identifier).name)))) return null;
         const removedLocals = new Set([offName, nextName]);
         const readsRemoved = (e: Expression): boolean => {
           const visit = (n: ASTNode): boolean => {
@@ -204,7 +301,7 @@ export function createStormNextLinkInsertTransformer(options: StormNextLinkOptio
         if (readsRemoved(negStore.value) || readsRemoved(negUpdate.left) || readsRemoved(negUpdate.right)) return null;
         const negAddr = uncast(negStore.address);
         if (!safeCasts(negStore.address) || negAddr.kind !== NodeKind.UnaryExpr || (negAddr as UnaryExpr).operator !== '~'
-          || nameOf((negAddr as UnaryExpr).operand) !== nextName) return null;
+          || nameOf(uncast((negAddr as UnaryExpr).operand)) !== nextName) return null;
         const second = signTest(s[i + 3], offName);
         if (!second) return null;
         const revised = oneAssignment(second.thenBranch);
@@ -213,12 +310,7 @@ export function createStormNextLinkInsertTransformer(options: StormNextLinkOptio
         if (!posStore || !posUpdate || !voidReturn(s[i + 6])) return null;
         if (!same(posStore.cast.type, negStore.cast.type) || !same(posStore.value, negStore.value)
           || !same(posUpdate.left, negUpdate.left) || !same(posUpdate.right, negUpdate.right)) return null;
-        const posAddr = uncast(posStore.address);
-        if (!safeCasts(posStore.address)) return null;
-        if (posAddr.kind !== NodeKind.BinaryExpr || (posAddr as BinaryExpr).operator !== '+') return null;
-        const sum = posAddr as BinaryExpr;
-        if (!((nameOf(uncast(sum.left)) === nextName && nameOf(uncast(sum.right)) === offName)
-          || (nameOf(uncast(sum.right)) === nextName && nameOf(uncast(sum.left)) === offName))) return null;
+        if (!slotSum(posStore.address, nextName, offName) || s.slice(i, i + 7).some(volatileRead)) return null;
         // There are no intervening effects: the exact seven-statement span only reads pure
         // inputs before each store. The helper's reads happen at the same point as those reads.
         const offShape = shapeOf(off.right);

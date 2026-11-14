@@ -1,0 +1,790 @@
+{
+  "source": "7b70696f8b22e033a09b47cdfc24c37b5dad0c09",
+  "generatorControl": "81079e23c65bf570fded257ad0fd76627385b14c",
+  "dataTypes": [
+    {
+      "name": "CMDDEF",
+      "kind": "STRUCTURE",
+      "size": 64,
+      "category": "/",
+      "fields": [
+        {
+          "name": "pPrev",
+          "dataType": "CMDDEF *",
+          "offset": 0,
+          "size": 4
+        },
+        {
+          "name": "pNext",
+          "dataType": "CMDDEF *",
+          "offset": 4,
+          "size": 4
+        },
+        {
+          "name": "nArgTypeFlags",
+          "dataType": "uint",
+          "offset": 8,
+          "size": 4
+        },
+        {
+          "name": "nCmdGroupId",
+          "dataType": "int",
+          "offset": 12,
+          "size": 4
+        },
+        {
+          "name": "szName",
+          "dataType": "char[16]",
+          "offset": 16,
+          "size": 16
+        },
+        {
+          "name": "nTextLen",
+          "dataType": "undefined4",
+          "offset": 32,
+          "size": 4
+        },
+        {
+          "name": "dwSetValue",
+          "dataType": "uint32_t",
+          "offset": 36,
+          "size": 4
+        },
+        {
+          "name": "dwSetMask",
+          "dataType": "uint32_t",
+          "offset": 40,
+          "size": 4
+        },
+        {
+          "name": "pVariable",
+          "dataType": "void *",
+          "offset": 44,
+          "size": 4
+        },
+        {
+          "name": "dwVariableBytes",
+          "dataType": "uint32_t",
+          "offset": 48,
+          "size": 4
+        },
+        {
+          "name": "pfnCallback",
+          "dataType": "SCMDCALLBACK *",
+          "offset": 52,
+          "size": 4
+        },
+        {
+          "name": "bSupplied",
+          "dataType": "int",
+          "offset": 56,
+          "size": 4
+        },
+        {
+          "name": "uValue",
+          "dataType": "CMDPARAMSVALUE",
+          "offset": 60,
+          "size": 4
+        }
+      ]
+    },
+    {
+      "name": "TSLink<TCELENTRY>",
+      "kind": "STRUCTURE",
+      "size": 8,
+      "category": "/",
+      "fields": [
+        {
+          "name": "m_prevlink",
+          "dataType": "TSLink<TCELENTRY> *",
+          "offset": 0,
+          "size": 4
+        },
+        {
+          "name": "m_next",
+          "dataType": "intptr_t",
+          "offset": 4,
+          "size": 4
+        }
+      ]
+    },
+    {
+      "name": "TSList<TCELENTRY,TSGetLink<TCELENTRY>>",
+      "kind": "STRUCTURE",
+      "size": 12,
+      "category": "/",
+      "fields": [
+        {
+          "name": "m_linkoffset",
+          "dataType": "int",
+          "offset": 0,
+          "size": 4
+        },
+        {
+          "name": "m_terminator",
+          "dataType": "TSLink<TCELENTRY>",
+          "offset": 4,
+          "size": 8
+        }
+      ]
+    },
+    {
+      "name": "TSLink<CMDDEF>",
+      "kind": "STRUCTURE",
+      "size": 8,
+      "category": "/",
+      "fields": [
+        {
+          "name": "m_prevlink",
+          "dataType": "TSLink<CMDDEF> *",
+          "offset": 0,
+          "size": 4
+        },
+        {
+          "name": "m_next",
+          "dataType": "intptr_t",
+          "offset": 4,
+          "size": 4
+        }
+      ]
+    },
+    {
+      "name": "TSList<CMDDEF,TSGetLink<CMDDEF>>",
+      "kind": "STRUCTURE",
+      "size": 12,
+      "category": "/",
+      "fields": [
+        {
+          "name": "m_linkoffset",
+          "dataType": "int",
+          "offset": 0,
+          "size": 4
+        },
+        {
+          "name": "m_terminator",
+          "dataType": "TSLink<CMDDEF>",
+          "offset": 4,
+          "size": 8
+        }
+      ]
+    },
+    {
+      "name": "uint32_t",
+      "kind": "TYPEDEF",
+      "size": 4,
+      "category": "/stdint.h",
+      "underlyingType": "uint"
+    },
+    {
+      "name": "int32_t",
+      "kind": "TYPEDEF",
+      "size": 4,
+      "category": "/stdint.h",
+      "underlyingType": "int"
+    },
+    {
+      "name": "TCELENTRY",
+      "kind": "STRUCTURE",
+      "size": 36,
+      "category": "/D2CMP/SRC/CelCmp",
+      "fields": [
+        {
+          "name": "m_link",
+          "dataType": "TSLink<TCELENTRY>",
+          "offset": 0,
+          "size": 8
+        },
+        {
+          "name": "dwArg7",
+          "dataType": "uint32_t",
+          "offset": 8,
+          "size": 4
+        },
+        {
+          "name": "nWidth",
+          "dataType": "uint32_t",
+          "offset": 12,
+          "size": 4
+        },
+        {
+          "name": "nHeight",
+          "dataType": "uint32_t",
+          "offset": 16,
+          "size": 4
+        },
+        {
+          "name": "nPixelCount",
+          "dataType": "uint32_t",
+          "offset": 20,
+          "size": 4
+        },
+        {
+          "name": "nOffsetX",
+          "dataType": "int32_t",
+          "offset": 24,
+          "size": 4
+        },
+        {
+          "name": "nOffsetY",
+          "dataType": "int32_t",
+          "offset": 28,
+          "size": 4
+        },
+        {
+          "name": "pPixels",
+          "dataType": "uint8_t *",
+          "offset": 32,
+          "size": 4
+        }
+      ]
+    }
+  ],
+  "templateConfig": {
+    "header": "3rdparty/Storm/H/stpl.h",
+    "families": {
+      "TSLink": {
+        "key": "class",
+        "params": [
+          {
+            "name": "T",
+            "kind": "type"
+          }
+        ]
+      },
+      "TSGetLink": {
+        "key": "class",
+        "params": [
+          {
+            "name": "T",
+            "kind": "type"
+          }
+        ]
+      },
+      "TSList": {
+        "key": "class",
+        "params": [
+          {
+            "name": "T",
+            "kind": "type"
+          },
+          {
+            "name": "TGetLink",
+            "kind": "type"
+          }
+        ]
+      }
+    }
+  },
+  "options": {
+    "outputDir": "./out",
+    "format": "cpp",
+    "organization": "namespace",
+    "generateCMake": false,
+    "generateSourceMaps": false,
+    "transformPreset": "full",
+    "includeAddressComments": false,
+    "promoteStaticGlobals": false
+  },
+  "typedefTargets": {
+    "uint": "unsigned int",
+    "uint32_t": "unsigned int",
+    "int32_t": "int"
+  },
+  "functions": [
+    {
+      "fn": {
+        "name": "LinkNode",
+        "address": "00601fc0",
+        "entryPoint": "00601fc0",
+        "signature": "void LinkNode(TSList<TCELENTRY,TSGetLink<TCELENTRY>> * this, TCELENTRY * ptr, uint32_t nLinkType, TCELENTRY * pExisting)",
+        "returnType": "void",
+        "callingConvention": "__thiscall",
+        "size": 161,
+        "isThunk": false,
+        "isExternal": false,
+        "hasVarArgs": false,
+        "namespace": "TSList<TCELENTRY,TSGetLink<TCELENTRY>>",
+        "comment": "@function LinkNode\n@address Game.exe.ram:00601fc0\n@date 2026.09.05\n@calling __thiscall\n@description Diablo 2 1.14d reverse team\nhttps://blizzhackers.dev\n\nFunction uses custom registers for function arguments!\n[D2TSExplicitListHeadStrc * this@ECX:4]\n[TCELENTRY * ptr@Stack[0x4]:4]\n[uint32_t nLinkType@Stack[0x8]:4]\n[TCELENTRY * pExisting@Stack[0xc]:4]",
+        "sourceFile": null,
+        "sourceLine": null,
+        "sourceInfo": null,
+        "parameters": [
+          {
+            "name": "this",
+            "dataType": "TSList<TCELENTRY,TSGetLink<TCELENTRY>> *",
+            "size": 4,
+            "ordinal": 0,
+            "storage": "ECX:4",
+            "stackOffset": null,
+            "resolvedType": null
+          },
+          {
+            "name": "ptr",
+            "dataType": "TCELENTRY *",
+            "size": 4,
+            "ordinal": 1,
+            "storage": "Stack[0x4]:4",
+            "stackOffset": 4,
+            "resolvedType": null
+          },
+          {
+            "name": "nLinkType",
+            "dataType": "uint32_t",
+            "size": 4,
+            "ordinal": 2,
+            "storage": "Stack[0x8]:4",
+            "stackOffset": 8,
+            "resolvedType": null
+          },
+          {
+            "name": "pExisting",
+            "dataType": "TCELENTRY *",
+            "size": 4,
+            "ordinal": 3,
+            "storage": "Stack[0xc]:4",
+            "stackOffset": 12,
+            "resolvedType": null
+          }
+        ],
+        "localVariables": [
+          {
+            "name": "pEntry",
+            "dataType": "TCELENTRY *",
+            "size": 4,
+            "storage": "EAX:4",
+            "stackOffset": null,
+            "resolvedType": "TCELENTRY *"
+          },
+          {
+            "name": "pBackLink",
+            "dataType": "TSLink<TCELENTRY> * *",
+            "size": 4,
+            "storage": "ESI:4",
+            "stackOffset": null,
+            "resolvedType": null
+          },
+          {
+            "name": "nLinkBase",
+            "dataType": "int",
+            "size": 4,
+            "storage": "ESI:4",
+            "stackOffset": null,
+            "resolvedType": "int"
+          },
+          {
+            "name": "pHead",
+            "dataType": "TSLink<TCELENTRY> *",
+            "size": 4,
+            "storage": "HASH:5f934e63c0:4",
+            "stackOffset": null,
+            "resolvedType": "TSLink<TCELENTRY> *"
+          },
+          {
+            "name": "pTmp",
+            "dataType": "intptr_t",
+            "size": 4,
+            "storage": "HASH:5fd88e5ee4:4",
+            "stackOffset": null,
+            "resolvedType": null
+          },
+          {
+            "name": "pTmp2",
+            "dataType": "intptr_t",
+            "size": 4,
+            "storage": "HASH:5f1bac142d:4",
+            "stackOffset": null,
+            "resolvedType": null
+          }
+        ],
+        "tags": [
+          {
+            "type": "x64-typing"
+          }
+        ],
+        "branchLayout": {
+          "lineCount": 73,
+          "lines": [
+            [
+              29,
+              [
+                13
+              ]
+            ],
+            [
+              33,
+              [
+                22
+              ]
+            ],
+            [
+              35,
+              [
+                29
+              ]
+            ],
+            [
+              46,
+              [
+                70
+              ]
+            ],
+            [
+              49,
+              [
+                81
+              ]
+            ],
+            [
+              50,
+              [
+                83
+              ]
+            ],
+            [
+              57,
+              [
+                105
+              ]
+            ],
+            [
+              61,
+              [
+                120
+              ]
+            ],
+            [
+              66,
+              [
+                138
+              ]
+            ]
+          ],
+          "ifs": [
+            [
+              29,
+              13
+            ],
+            [
+              33,
+              22
+            ],
+            [
+              35,
+              29
+            ],
+            [
+              46,
+              70
+            ],
+            [
+              49,
+              81
+            ],
+            [
+              61,
+              120
+            ],
+            [
+              66,
+              138
+            ]
+          ],
+          "tests": [
+            [
+              29,
+              {
+                "op": "==",
+                "mnemonic": "TEST",
+                "reg": "EBX",
+                "k": 0,
+                "size": 4,
+                "at": 7
+              }
+            ],
+            [
+              33,
+              {
+                "op": "!=",
+                "mnemonic": "TEST",
+                "reg": "EDI",
+                "k": 0,
+                "size": 4,
+                "at": 20
+              }
+            ],
+            [
+              46,
+              {
+                "op": "==",
+                "mnemonic": "TEST",
+                "reg": "EDX",
+                "k": 0,
+                "size": 4,
+                "at": 68
+              }
+            ],
+            [
+              49,
+              {
+                "op": "!=",
+                "mnemonic": "SUB",
+                "reg": "ESI",
+                "k": 1,
+                "size": 4,
+                "at": 78,
+                "delta": 1
+              }
+            ]
+          ]
+        },
+        "decompiled": "\n/* @function LinkNode\n   @address Game.exe.ram:00601fc0\n   @date 2026.09.05\n   @calling __thiscall\n   @description Diablo 2 1.14d reverse team\n   https://blizzhackers.dev\n   \n   Function uses custom registers for function arguments!\n   [D2TSExplicitListHeadStrc * this@ECX:4]\n   [TCELENTRY * ptr@Stack[0x4]:4]\n   [uint32_t nLinkType@Stack[0x8]:4]\n   [TCELENTRY * pExisting@Stack[0xc]:4] */\n\nvoid __thiscall\nTSList<TCELENTRY,TSGetLink<TCELENTRY>>::LinkNode\n          (TSList<TCELENTRY,TSGetLink<TCELENTRY>> *this,TCELENTRY *ptr,uint32_t nLinkType,\n          TCELENTRY *pExisting)\n\n{\n  TCELENTRY *pEntry;\n  TSLink<TCELENTRY> **pBackLink;\n  int nLinkBase;\n  intptr_t pTmp2;\n  intptr_t pTmp;\n  TSLink<TCELENTRY> *pHead;\n  \n  pEntry = ptr;\n  if (ptr == (TCELENTRY *)0x0) {\n    pEntry = (TCELENTRY *)&this->m_terminator;\n  }\n  pHead = (pEntry->m_link).m_prevlink;\n  if (pHead != (TSLink<TCELENTRY> *)0x0) {\n    pTmp = (pEntry->m_link).m_next;\n    if (pTmp < 0) {\n      pBackLink = (TSLink<TCELENTRY> **)~pTmp;\n    }\n    else {\n      pBackLink = (TSLink<TCELENTRY> **)((int)pEntry + (pTmp - pHead->m_next));\n    }\n    *pBackLink = pHead;\n    ((pEntry->m_link).m_prevlink)->m_next = (pEntry->m_link).m_next;\n    (pEntry->m_link).m_prevlink = (TSLink<TCELENTRY> *)0x0;\n    (pEntry->m_link).m_next = 0;\n  }\n  if (pExisting == (TCELENTRY *)0x0) {\n    pExisting = (TCELENTRY *)&this->m_terminator;\n  }\n  if (nLinkType != 1) {\n    pHead = (pExisting->m_link).m_prevlink;\n    (pEntry->m_link).m_prevlink = pHead;\n    (pEntry->m_link).m_next = pHead->m_next;\n    pHead->m_next = (intptr_t)ptr;\n    (pExisting->m_link).m_prevlink = &pEntry->m_link;\n    return;\n  }\n  (pEntry->m_link).m_prevlink = &pExisting->m_link;\n  (pEntry->m_link).m_next = (pExisting->m_link).m_next;\n  nLinkBase = this->m_linkoffset;\n  pTmp2 = (pExisting->m_link).m_next;\n  if (pTmp2 < 0) {\n    *(TCELENTRY **)~pTmp2 = pEntry;\n    (pExisting->m_link).m_next = (intptr_t)ptr;\n    return;\n  }\n  if (nLinkBase < 0) {\n    nLinkBase = (int)pExisting - ((pExisting->m_link).m_prevlink)->m_next;\n  }\n  *(TCELENTRY **)(pTmp2 + nLinkBase) = pEntry;\n  (pExisting->m_link).m_next = (intptr_t)ptr;\n  return;\n}\n\n"
+      },
+      "tu": "Source/D2CMP/SRC/stpl_TCELENTRY",
+      "dh": "dfc87226"
+    },
+    {
+      "fn": {
+        "name": "LinkNode",
+        "address": "006c4180",
+        "entryPoint": "006c4180",
+        "signature": "void LinkNode(TSList<CMDDEF,TSGetLink<CMDDEF>> * this, CMDDEF * ptr, uint32_t nLinkType, CMDDEF * pExisting)",
+        "returnType": "void",
+        "callingConvention": "__thiscall",
+        "size": 161,
+        "isThunk": false,
+        "isExternal": false,
+        "hasVarArgs": false,
+        "namespace": "TSList<CMDDEF,TSGetLink<CMDDEF>>",
+        "comment": "@function SCMD::SCMD_MoveToList\n@address Game.exe.ram:006c4180\n@date 2026.06.13\n@calling __thiscall",
+        "sourceFile": null,
+        "sourceLine": null,
+        "sourceInfo": null,
+        "parameters": [
+          {
+            "name": "this",
+            "dataType": "TSList<CMDDEF,TSGetLink<CMDDEF>> *",
+            "size": 4,
+            "ordinal": 0,
+            "storage": "ECX:4",
+            "stackOffset": null,
+            "resolvedType": null
+          },
+          {
+            "name": "ptr",
+            "dataType": "CMDDEF *",
+            "size": 4,
+            "ordinal": 1,
+            "storage": "Stack[0x4]:4",
+            "stackOffset": 4,
+            "resolvedType": null
+          },
+          {
+            "name": "nLinkType",
+            "dataType": "uint32_t",
+            "size": 4,
+            "ordinal": 2,
+            "storage": "Stack[0x8]:4",
+            "stackOffset": 8,
+            "resolvedType": null
+          },
+          {
+            "name": "pExisting",
+            "dataType": "CMDDEF *",
+            "size": 4,
+            "ordinal": 3,
+            "storage": "Stack[0xc]:4",
+            "stackOffset": 12,
+            "resolvedType": null
+          }
+        ],
+        "localVariables": [
+          {
+            "name": "pPrevLink",
+            "dataType": "CMDDEF *",
+            "size": 4,
+            "storage": "EAX:4",
+            "stackOffset": null,
+            "resolvedType": "CMDDEF *"
+          },
+          {
+            "name": "pNodeRef",
+            "dataType": "CMDDEF * *",
+            "size": 4,
+            "storage": "ESI:4",
+            "stackOffset": null,
+            "resolvedType": null
+          },
+          {
+            "name": "pListHead",
+            "dataType": "int",
+            "size": 4,
+            "storage": "ESI:4",
+            "stackOffset": null,
+            "resolvedType": "int"
+          },
+          {
+            "name": "nNextOffset",
+            "dataType": "CMDDEF *",
+            "size": 4,
+            "storage": "HASH:5f0709a294:4",
+            "stackOffset": null,
+            "resolvedType": "CMDDEF *"
+          }
+        ],
+        "tags": [
+          {
+            "type": "llm-named"
+          },
+          {
+            "type": "x64-typing"
+          }
+        ],
+        "branchLayout": {
+          "lineCount": 63,
+          "lines": [
+            [
+              19,
+              [
+                13
+              ]
+            ],
+            [
+              23,
+              [
+                22
+              ]
+            ],
+            [
+              25,
+              [
+                29
+              ]
+            ],
+            [
+              36,
+              [
+                70
+              ]
+            ],
+            [
+              39,
+              [
+                81
+              ]
+            ],
+            [
+              40,
+              [
+                83
+              ]
+            ],
+            [
+              47,
+              [
+                105
+              ]
+            ],
+            [
+              51,
+              [
+                120
+              ]
+            ],
+            [
+              56,
+              [
+                138
+              ]
+            ]
+          ],
+          "ifs": [
+            [
+              19,
+              13
+            ],
+            [
+              23,
+              22
+            ],
+            [
+              25,
+              29
+            ],
+            [
+              36,
+              70
+            ],
+            [
+              39,
+              81
+            ],
+            [
+              51,
+              120
+            ],
+            [
+              56,
+              138
+            ]
+          ],
+          "tests": [
+            [
+              19,
+              {
+                "op": "==",
+                "mnemonic": "TEST",
+                "reg": "EBX",
+                "k": 0,
+                "size": 4,
+                "at": 7
+              }
+            ],
+            [
+              23,
+              {
+                "op": "!=",
+                "mnemonic": "TEST",
+                "reg": "EDI",
+                "k": 0,
+                "size": 4,
+                "at": 20
+              }
+            ],
+            [
+              36,
+              {
+                "op": "==",
+                "mnemonic": "TEST",
+                "reg": "EDX",
+                "k": 0,
+                "size": 4,
+                "at": 68
+              }
+            ],
+            [
+              39,
+              {
+                "op": "!=",
+                "mnemonic": "SUB",
+                "reg": "ESI",
+                "k": 1,
+                "size": 4,
+                "at": 78,
+                "delta": 1
+              }
+            ]
+          ]
+        },
+        "decompiled": "\n/* @function SCMD::SCMD_MoveToList\n   @address Game.exe.ram:006c4180\n   @date 2026.06.13\n   @calling __thiscall */\n\nvoid __thiscall\nTSList<CMDDEF,TSGetLink<CMDDEF>>::LinkNode\n          (TSList<CMDDEF,TSGetLink<CMDDEF>> *this,CMDDEF *ptr,uint32_t nLinkType,CMDDEF *pExisting)\n\n{\n  CMDDEF *pCVar1;\n  CMDDEF *pPrevLink;\n  CMDDEF **pNodeRef;\n  int pListHead;\n  CMDDEF *nNextOffset;\n  \n  pPrevLink = ptr;\n  if (ptr == (CMDDEF *)0x0) {\n    pPrevLink = (CMDDEF *)&this->m_terminator;\n  }\n  pCVar1 = pPrevLink->pPrev;\n  if (pCVar1 != (CMDDEF *)0x0) {\n    nNextOffset = pPrevLink->pNext;\n    if ((int)nNextOffset < 0) {\n      pNodeRef = (CMDDEF **)~(uint)nNextOffset;\n    }\n    else {\n      pNodeRef = (CMDDEF **)((int)nNextOffset + ((int)pPrevLink - (int)pCVar1->pNext));\n    }\n    *pNodeRef = pCVar1;\n    pPrevLink->pPrev->pNext = pPrevLink->pNext;\n    pPrevLink->pPrev = (CMDDEF *)0x0;\n    pPrevLink->pNext = (CMDDEF *)0x0;\n  }\n  if (pExisting == (CMDDEF *)0x0) {\n    pExisting = (CMDDEF *)&this->m_terminator;\n  }\n  if (nLinkType != 1) {\n    pCVar1 = pExisting->pPrev;\n    pPrevLink->pPrev = pCVar1;\n    pPrevLink->pNext = pCVar1->pNext;\n    pCVar1->pNext = ptr;\n    pExisting->pPrev = pPrevLink;\n    return;\n  }\n  pPrevLink->pPrev = pExisting;\n  pPrevLink->pNext = pExisting->pNext;\n  pListHead = this->m_linkoffset;\n  pCVar1 = pExisting->pNext;\n  if ((int)pCVar1 < 0) {\n    *(CMDDEF **)~(uint)pCVar1 = pPrevLink;\n    pExisting->pNext = ptr;\n    return;\n  }\n  if (pListHead < 0) {\n    pListHead = (int)pExisting - (int)pExisting->pPrev->pNext;\n  }\n  *(CMDDEF **)(pCVar1->szName + pListHead + -0x10) = pPrevLink;\n  pExisting->pNext = ptr;\n  return;\n}\n\n"
+      },
+      "tu": "3rdparty/Storm/Source/stpl_CMDDEF",
+      "dh": "adab1c24"
+    }
+  ],
+  "native": {
+    "bytesPerFunction": 161,
+    "instructionsPerFunction": 73,
+    "rawSHA256": "3f533273f098c3cb7fad91a32b8fba6bbca2e5bc030435abaf0dd24b1c7b42d0"
+  },
+  "provenance": "Current read-only live resolved function/type models and normal template/member model. All7conditional branches,4equality tokens and2insertion-arm entry instructions per function manually native-attested; both161-byte functions literally identical and equal the reference PE. Normal branch-layout mapper consumed these facts. This is not an owning extractor snapshot; native gains require full-TU replay."
+}
