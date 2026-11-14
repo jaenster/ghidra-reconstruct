@@ -440,7 +440,19 @@ describe('vc8-form: own', () => {
     it('drops it under live, the mark of a matching compile', () => {
       const r = run(['void f(Item* pItem) {', '  uint32_t n = (uint32_t)pItem;', '  Load("k", (int32_t*)&n);', '  Use(n);', '}'], 'own(n,uint32_t,live)');
       assert.ok(r.sites[0].applied, r.sites[0].why);
-      assert.strictEqual(r.out, 'void f(Item* pItem) { uint32_t n; Load("k", (int32_t*)&n); Use(n); }');
+      assert.strictEqual(r.out, 'void f(Item* pItem) { uint32_t n; D2_UNINIT(n, (uint32_t)pItem); Load("k", (int32_t*)&n); Use(n); }');
+    });
+    // SUNITNPC_GetActCappedLevel 00576890: outside Normal it returns the slot the source never
+    // stored, which holds nLevel in the original; GCC gets that store, VC8 nothing.
+    it('keeps a readable initializer for other compilers as D2_UNINIT', () => {
+      const r = run(['int f(int d, int nLevel) {', '  int v = nLevel;', '  if (d) {', '    return v;', '  }', '  v = 3;', '  return v;', '}'], 'own(v,int,live)');
+      assert.ok(r.sites[0].applied, r.sites[0].why);
+      assert.strictEqual(r.out, 'int f(int d, int nLevel) { int v; D2_UNINIT(v, nLevel); if (d) { return v; } v = 3; return v; }');
+    });
+    it('writes no D2_UNINIT where a call overwrites v before every read', () => {
+      const r = runWith(outOnly({ Get: 0 }), ['void f(int p) {', '  int v = p;', '  Get(&v);', '  Use(v);', '}'], 'own(v,int,live)');
+      assert.ok(r.sites[0].applied, r.sites[0].why);
+      assert.strictEqual(r.out, 'void f(int p) { int v; Get(&v); Use(v); }');
     });
     it('still drops it where every path overwrites v first, through a call or a store', () => {
       const a = runWith(outOnly({ Get: 0 }), ['void f(int p) {', '  int v = p;', '  if (p) {', '    Get(&v);', '    Use(v);', '  }', '}'], 'own(v,int)');
