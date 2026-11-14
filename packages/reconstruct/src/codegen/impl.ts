@@ -24,6 +24,7 @@ import { CPP_KEYWORDS, INLINE_MARKER, INLINE_END_MARKER, declarationMarkersOn } 
 
 // Import cpp-parser for code transformation
 import { branchLayoutLines } from './branch-layout-spec.js';
+import { isInlineHost } from './inline-hosts.js';
 import { callOrderLines } from './call-order-spec.js';
 import { accessOrderLines } from './access-order-spec.js';
 import { rotateSiteLines } from './rotate-sites-spec.js';
@@ -1819,6 +1820,7 @@ export function generateFunctionImplementation(
           callSiteOverrides: func.callSiteOverrides,
           labelFlow: func.labelFlow,
           branchLayout: func.branchLayout,
+          inlineHost: isInlineHost(func),
           callOrder: func.callOrder,
           // A text patch anchors on the statements as Ghidra printed them.
           accessOrder: override?.action === 'patch' ? undefined : func.accessOrder,
@@ -2963,6 +2965,8 @@ function transformDecompiledCode(
     labelFlow?: Record<string, { back: number; first: string; pushedArgs: boolean; address?: string; computed?: number }>;
     /** Code offsets per decompile line and per `if` (extract/branch-layout.ts). */
     branchLayout?: BranchLayoutFacts;
+    /** The function is a header inline (inline-hosts.ts): its body may be published to a header. */
+    inlineHost?: boolean;
     /** Direct calls per decompile line and the pushes before each (extract/call-order.ts). */
     callOrder?: CallOrderFacts;
     /** Argument loads and store instructions per decompile line (extract/access-order.ts). */
@@ -3075,6 +3079,7 @@ function transformDecompiledCode(
     }
     const enablePlugins: string[] = [];
     const perPluginOptions: Record<string, unknown> = {};
+    const flagPrefix: string[] = [];
     const overrideCastTypedefs = new Set<string>();
     // A walk to a list's last node tests the link in memory, not a copy (tail-walk-reread.ts).
     perPluginOptions['tail-walk-reread'] = {
@@ -4059,6 +4064,17 @@ function transformDecompiledCode(
         onSite: (e: { line: number; name: string; form: string; tests: number }) =>
           console.warn(`[record-split] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.name} (${e.form}, ${e.tests} test${e.tests === 1 ? '' : 's'}) on line ${e.line}`),
       };
+      // A flag bit the original ANDs in a register reads through a null-guarded getter
+      // (flag-bit-getter.ts), defined ahead of the function like the accessor twins; not in a
+      // header inline, whose body the module pass may publish without what precedes it.
+      if (!enclosing?.inlineHost) perPluginOptions['flag-bit-getter'] = {
+        branchLayout: layout,
+        onPrefix: (d: string) => { if (!flagPrefix.includes(d)) flagPrefix.push(d); },
+        ...(process.env.GHIDRA_BRANCH_LAYOUT_REPORT ? {
+          onSite: (e: { line: number; getter: string }) =>
+            console.warn(`[flag-bit] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.getter} on line ${e.line}`),
+        } : {}),
+      };
       // A null guard before a record lookup through the pointer goes into the lookup's
       // condition where the original leaves both through one exit (record-null-fold.ts).
       perPluginOptions['record-null-fold'] = {
@@ -4531,7 +4547,7 @@ function transformDecompiledCode(
           // of them into silent reads of the wrong address.
           code: indentCode(transformedMatch[1], 4),
           preamble: result.preamble,
-          ...(vc8Prefix.length ? { prefix: vc8Prefix } : {}),
+          ...(vc8Prefix.length || flagPrefix.length ? { prefix: [...vc8Prefix, ...flagPrefix.filter(d => !vc8Prefix.includes(d))] } : {}),
           identifiers: result.identifiers,
           typeNames: result.typeNames,
         };
