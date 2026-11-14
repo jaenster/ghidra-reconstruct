@@ -8,7 +8,8 @@
  *           loaded through its own register (`mov ecx, [ecx + 3]` for a __fastcall) is the
  *           convention's choice and not recorded.
  *   stores  each `=` the line prints, in print order: the offset of the instruction that
- *           stores it (null when the decompiler's op does not name one), the stored size,
+ *           stores it (null when the decompiler's op does not name one; an op at a CALL
+ *           carrying a stack slot into it names the slot's last write before the call), the stored size,
  *           for an 8-byte store which half the original wrote first, and how many bytes
  *           the instruction behind the op writes. The `store-order` pass reads the order;
  *           `scalar-piece-arithmetic` reads the width, which tells a piece store the
@@ -221,6 +222,27 @@ export const ACCESS_ORDER_TOKEN_JAVA = `
                   }
                   ghidra.program.model.pcode.Varnode sout = sop.getOutput();
                   ghidra.program.model.address.Address gaddr = null;
+                  // A stack slot whose value the decompiler carries into a call: the store
+                  // the original made sits before the CALL, and the op names the CALL. Either
+                  // the op is the call's INDIRECT on the slot (msg.nItemId = ..., 0045cc70), or
+                  // a copy feeding that INDIRECT (sCreateData.nUnitGUID = nNextGUID, 00466730).
+                  int cslot = 0, csize = 0;
+                  if (swi != null && swi.getFlowType().isCall() && sout != null) {
+                    if (sop.getOpcode() == ghidra.program.model.pcode.PcodeOp.INDIRECT && sout.getAddress().isStackAddress()) {
+                      cslot = (int) sout.getOffset(); csize = sout.getSize();
+                    } else if (!sout.getAddress().isStackAddress() && !sout.getAddress().isMemoryAddress()) {
+                      java.util.Iterator<ghidra.program.model.pcode.PcodeOp> cds = sout.getDescendants();
+                      while (cds != null && cds.hasNext()) {
+                        ghidra.program.model.pcode.PcodeOp cd = cds.next();
+                        ghidra.program.model.pcode.Varnode co = cd.getOutput();
+                        if (cd.getOpcode() != ghidra.program.model.pcode.PcodeOp.INDIRECT || co == null
+                            || !co.getAddress().isStackAddress() || !cd.getSeqnum().getTarget().equals(sat)) continue;
+                        if (csize != 0 && (cslot != (int) co.getOffset() || csize != co.getSize())) { csize = -1; break; }
+                        cslot = (int) co.getOffset(); csize = co.getSize();
+                      }
+                      if (csize < 0) csize = 0;
+                    }
+                  }
                   if (sop.getOpcode() == ghidra.program.model.pcode.PcodeOp.STORE) {
                     ghidra.program.model.listing.Instruction si = L.getInstructionAt(sat);
                     ssize = sop.getInput(2).getSize();
@@ -312,6 +334,34 @@ export const ACCESS_ORDER_TOKEN_JAVA = `
                       }
                       ghidra.program.model.address.Address pick = sw.size() == 1 ? sw.get(0) : sw.contains(sat) ? sat : null;
                       if (pick != null) soff = Long.toHexString(pick.getOffset() - base);
+                    }
+                  }
+                  if (soff.equals("?") && csize > 0) {
+                    // The slot's value at the call is the last write to it on the one path
+                    // into the call: walk back over fall-through instructions (calls too: the
+                    // decompiler printed the value as surviving them) to the nearest write that
+                    // touches the slot. A write to exactly the slot is the store; one that
+                    // covers it partly, or a branch target on the way, leaves it unknown.
+                    ghidra.program.model.listing.Instruction ccur = swi;
+                    for (int cg = 0; cg < 200; cg++) {
+                      boolean cent = false;
+                      for (ghidra.program.model.symbol.Reference cref : rm.getReferencesTo(ccur.getAddress())) if (cref.getReferenceType().isFlow()) { cent = true; break; }
+                      if (cent || ccur.getAddress().equals(fn.getEntryPoint())) break;
+                      ghidra.program.model.listing.Instruction cp = L.getInstructionBefore(ccur.getAddress());
+                      if (cp == null || cp.getFallThrough() == null || !cp.getFallThrough().equals(ccur.getAddress())) break;
+                      if (!fn.getBody().contains(cp.getAddress())) break;
+                      int chit = 0;
+                      for (ghidra.program.model.symbol.Reference rf : cp.getReferencesFrom()) {
+                        if (!(rf instanceof ghidra.program.model.symbol.StackReference) || !rf.getReferenceType().isWrite()) continue;
+                        int co = ((ghidra.program.model.symbol.StackReference) rf).getStackOffset();
+                        int cw = 0;
+                        for (ghidra.program.model.pcode.PcodeOp cpp : cp.getPcode()) if (cpp.getOpcode() == ghidra.program.model.pcode.PcodeOp.STORE) cw = cpp.getInput(2).getSize();
+                        if (cw == 0) { if (co >= cslot && co < cslot + csize) chit = -1; continue; }
+                        if (co < cslot + csize && cslot < co + cw) chit = co == cslot && cw == csize && chit == 0 ? 1 : -1;
+                      }
+                      if (chit == 1) soff = Long.toHexString(cp.getAddress().getOffset() - base);
+                      if (chit != 0) break;
+                      ccur = cp;
                     }
                   }
                 }

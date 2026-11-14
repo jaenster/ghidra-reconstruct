@@ -34,3 +34,23 @@ describe('parseAccessOrderRow: store widths', () => {
     assert.match(ACCESS_ORDER_TOKEN_JAVA, /!swi\.getFlowType\(\)\.isCall\(\)/);
   });
 });
+
+describe('ACCESS_ORDER_TOKEN_JAVA: a stack slot carried into a call', () => {
+  // CreateMissileOrMonster 00466730: `sCreateData.nUnitGUID = nNextGUID` is a COPY at the
+  // CALL (+0x66) feeding the call's INDIRECT on the slot; the frame block writes the slot
+  // twice (the zero at +0x36, the value at +0x50), so the block scan finds no single write.
+  // NET_D2GS_CLIENT_Incoming0x0C_UNITCHANGE 0045cc70: `msg.nItemId = ...` is the INDIRECT.
+  it('takes the slot from the INDIRECT the op is or feeds, at that CALL', () => {
+    assert.match(ACCESS_ORDER_TOKEN_JAVA, /swi\.getFlowType\(\)\.isCall\(\) && sout != null/);
+    assert.match(ACCESS_ORDER_TOKEN_JAVA, /sop\.getOpcode\(\) == ghidra\.program\.model\.pcode\.PcodeOp\.INDIRECT && sout\.getAddress\(\)\.isStackAddress\(\)/);
+    assert.match(ACCESS_ORDER_TOKEN_JAVA, /cd\.getOpcode\(\) != ghidra\.program\.model\.pcode\.PcodeOp\.INDIRECT[\s\S]*!cd\.getSeqnum\(\)\.getTarget\(\)\.equals\(sat\)/);
+  });
+
+  it('picks the nearest write to exactly that slot on the one path into the call', () => {
+    // Only when nothing else named it, and never across a branch target.
+    assert.match(ACCESS_ORDER_TOKEN_JAVA, /soff\.equals\("\?"\) && csize > 0/);
+    assert.match(ACCESS_ORDER_TOKEN_JAVA, /cref\.getReferenceType\(\)\.isFlow\(\)\) \{ cent = true/);
+    // A write covering the slot only partly leaves it unknown.
+    assert.match(ACCESS_ORDER_TOKEN_JAVA, /chit = co == cslot && cw == csize && chit == 0 \? 1 : -1/);
+  });
+});
