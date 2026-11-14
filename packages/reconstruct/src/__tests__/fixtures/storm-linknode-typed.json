@@ -1,5 +1,5 @@
 {
-  "source": "7b70696f8b22e033a09b47cdfc24c37b5dad0c09",
+  "source": "69884b0a5bc00dcb7004e53348cb50eef5dcdd5f",
   "generatorControl": "022e9a01265e22a61a6487190e6547454d5c241d",
   "dataTypes": [
     {
@@ -235,6 +235,46 @@
           "dataType": "uint8_t *",
           "offset": 32,
           "size": 4
+        }
+      ]
+    },
+    {
+      "name": "StormLinkStrc",
+      "kind": "STRUCTURE",
+      "size": 8,
+      "category": "/Storm",
+      "fields": [
+        {
+          "name": "pPrevLink",
+          "dataType": "StormLinkStrc *",
+          "offset": 0,
+          "size": 4
+        },
+        {
+          "name": "pNext",
+          "dataType": "intptr_t",
+          "offset": 4,
+          "size": 4
+        }
+      ]
+    },
+    {
+      "name": "StormLinkedListStrc",
+      "kind": "STRUCTURE",
+      "size": 12,
+      "category": "/Storm",
+      "fields": [
+        {
+          "name": "nLinkOffset",
+          "dataType": "int32_t",
+          "offset": 0,
+          "size": 4
+        },
+        {
+          "name": "head",
+          "dataType": "StormLinkStrc",
+          "offset": 4,
+          "size": 8
         }
       ]
     }
@@ -544,7 +584,8 @@
         "decompiled": "\n/* @function LinkNode\n   @address Game.exe.ram:00601fc0\n   @date 2026.09.05\n   @calling __thiscall\n   @description Diablo 2 1.14d reverse team\n   https://blizzhackers.dev\n   \n   Function uses custom registers for function arguments!\n   [D2TSExplicitListHeadStrc * this@ECX:4]\n   [TCELENTRY * ptr@Stack[0x4]:4]\n   [uint32_t nLinkType@Stack[0x8]:4]\n   [TCELENTRY * pExisting@Stack[0xc]:4] */\n\nvoid __thiscall\nTSList<TCELENTRY,TSGetLink<TCELENTRY>>::LinkNode\n          (TSList<TCELENTRY,TSGetLink<TCELENTRY>> *this,TCELENTRY *ptr,uint32_t nLinkType,\n          TCELENTRY *pExisting)\n\n{\n  TCELENTRY *pEntry;\n  TSLink<TCELENTRY> **pBackLink;\n  int nLinkBase;\n  intptr_t pTmp2;\n  intptr_t pTmp;\n  TSLink<TCELENTRY> *pHead;\n  \n  pEntry = ptr;\n  if (ptr == (TCELENTRY *)0x0) {\n    pEntry = (TCELENTRY *)&this->m_terminator;\n  }\n  pHead = (pEntry->m_link).m_prevlink;\n  if (pHead != (TSLink<TCELENTRY> *)0x0) {\n    pTmp = (pEntry->m_link).m_next;\n    if (pTmp < 0) {\n      pBackLink = (TSLink<TCELENTRY> **)~pTmp;\n    }\n    else {\n      pBackLink = (TSLink<TCELENTRY> **)((int)pEntry + (pTmp - pHead->m_next));\n    }\n    *pBackLink = pHead;\n    ((pEntry->m_link).m_prevlink)->m_next = (pEntry->m_link).m_next;\n    (pEntry->m_link).m_prevlink = (TSLink<TCELENTRY> *)0x0;\n    (pEntry->m_link).m_next = 0;\n  }\n  if (pExisting == (TCELENTRY *)0x0) {\n    pExisting = (TCELENTRY *)&this->m_terminator;\n  }\n  if (nLinkType != 1) {\n    pHead = (pExisting->m_link).m_prevlink;\n    (pEntry->m_link).m_prevlink = pHead;\n    (pEntry->m_link).m_next = pHead->m_next;\n    pHead->m_next = (intptr_t)ptr;\n    (pExisting->m_link).m_prevlink = &pEntry->m_link;\n    return;\n  }\n  (pEntry->m_link).m_prevlink = &pExisting->m_link;\n  (pEntry->m_link).m_next = (pExisting->m_link).m_next;\n  nLinkBase = this->m_linkoffset;\n  pTmp2 = (pExisting->m_link).m_next;\n  if (pTmp2 < 0) {\n    *(TCELENTRY **)~pTmp2 = pEntry;\n    (pExisting->m_link).m_next = (intptr_t)ptr;\n    return;\n  }\n  if (nLinkBase < 0) {\n    nLinkBase = (int)pExisting - ((pExisting->m_link).m_prevlink)->m_next;\n  }\n  *(TCELENTRY **)(pTmp2 + nLinkBase) = pEntry;\n  (pExisting->m_link).m_next = (intptr_t)ptr;\n  return;\n}\n\n"
       },
       "tu": "Source/D2CMP/SRC/stpl_TCELENTRY",
-      "dh": "dfc87226"
+      "dh": "dfc87226",
+      "existingMatchControl": false
     },
     {
       "fn": {
@@ -782,7 +823,8 @@
         "decompiled": "\n/* @function SCMD::SCMD_MoveToList\n   @address Game.exe.ram:006c4180\n   @date 2026.06.13\n   @calling __thiscall */\n\nvoid __thiscall\nTSList<CMDDEF,TSGetLink<CMDDEF>>::LinkNode\n          (TSList<CMDDEF,TSGetLink<CMDDEF>> *this,CMDDEF *ptr,uint32_t nLinkType,CMDDEF *pExisting)\n\n{\n  CMDDEF *pCVar1;\n  CMDDEF *pPrevLink;\n  CMDDEF **pNodeRef;\n  int pListHead;\n  CMDDEF *nNextOffset;\n  \n  pPrevLink = ptr;\n  if (ptr == (CMDDEF *)0x0) {\n    pPrevLink = (CMDDEF *)&this->m_terminator;\n  }\n  pCVar1 = pPrevLink->pPrev;\n  if (pCVar1 != (CMDDEF *)0x0) {\n    nNextOffset = pPrevLink->pNext;\n    if ((int)nNextOffset < 0) {\n      pNodeRef = (CMDDEF **)~(uint)nNextOffset;\n    }\n    else {\n      pNodeRef = (CMDDEF **)((int)nNextOffset + ((int)pPrevLink - (int)pCVar1->pNext));\n    }\n    *pNodeRef = pCVar1;\n    pPrevLink->pPrev->pNext = pPrevLink->pNext;\n    pPrevLink->pPrev = (CMDDEF *)0x0;\n    pPrevLink->pNext = (CMDDEF *)0x0;\n  }\n  if (pExisting == (CMDDEF *)0x0) {\n    pExisting = (CMDDEF *)&this->m_terminator;\n  }\n  if (nLinkType != 1) {\n    pCVar1 = pExisting->pPrev;\n    pPrevLink->pPrev = pCVar1;\n    pPrevLink->pNext = pCVar1->pNext;\n    pCVar1->pNext = ptr;\n    pExisting->pPrev = pPrevLink;\n    return;\n  }\n  pPrevLink->pPrev = pExisting;\n  pPrevLink->pNext = pExisting->pNext;\n  pListHead = this->m_linkoffset;\n  pCVar1 = pExisting->pNext;\n  if ((int)pCVar1 < 0) {\n    *(CMDDEF **)~(uint)pCVar1 = pPrevLink;\n    pExisting->pNext = ptr;\n    return;\n  }\n  if (pListHead < 0) {\n    pListHead = (int)pExisting - (int)pExisting->pPrev->pNext;\n  }\n  *(CMDDEF **)(pCVar1->szName + pListHead + -0x10) = pPrevLink;\n  pExisting->pNext = ptr;\n  return;\n}\n\n"
       },
       "tu": "3rdparty/Storm/Source/stpl_CMDDEF",
-      "dh": "adab1c24"
+      "dh": "adab1c24",
+      "existingMatchControl": false
     },
     {
       "fn": {
@@ -1020,14 +1062,2451 @@
         }
       },
       "tu": "Source/D2Client/Archive",
-      "dh": "f5057a7f"
+      "dh": "f5057a7f",
+      "existingMatchControl": false
+    },
+    {
+      "fn": {
+        "name": "InsertListNode",
+        "address": "0040fbb0",
+        "entryPoint": "0040fbb0",
+        "signature": "void InsertListNode(int * * ppListHead, int * * pNode, int32_t bInsertAtHead, int * * ppTarget)",
+        "returnType": "void",
+        "callingConvention": "__fastcall",
+        "size": 161,
+        "isThunk": false,
+        "isExternal": false,
+        "hasVarArgs": false,
+        "namespace": "Fog::Src::LogManager",
+        "comment": "@function InsertListNode\n@address Game.exe.ram:0040fbb0\n@date 2026.06.06\n@params\n  pNode: Stack[0x4]:4 (int * *)\n  bInsertAtHead: Stack[0x8]:4 (int32_t)\n  ppTarget: Stack[0xc]:4 (int * *)\n  ppListHead: ECX:4 (int * *)\n@description Diablo 2 1.14d reverse team\nhttps://blizzhackers.dev\n\nFunction uses custom registers for function arguments!\n[int * * pNode@Stack[0x4]:4]\n[int32_t bInsertAtHead@Stack[0x8]:4]\n[int * * ppTarget@Stack[0xc]:4]\n[int * * ppListHead@ECX:4]",
+        "sourceFile": null,
+        "sourceLine": null,
+        "sourceInfo": null,
+        "parameters": [
+          {
+            "name": "ppListHead",
+            "dataType": "int * *",
+            "size": 4,
+            "ordinal": 0,
+            "storage": "ECX:4",
+            "stackOffset": null,
+            "resolvedType": null
+          },
+          {
+            "name": "pNode",
+            "dataType": "int * *",
+            "size": 4,
+            "ordinal": 1,
+            "storage": "Stack[0x4]:4",
+            "stackOffset": 4,
+            "resolvedType": null
+          },
+          {
+            "name": "bInsertAtHead",
+            "dataType": "int32_t",
+            "size": 4,
+            "ordinal": 2,
+            "storage": "Stack[0x8]:4",
+            "stackOffset": 8,
+            "resolvedType": null
+          },
+          {
+            "name": "ppTarget",
+            "dataType": "int * *",
+            "size": 4,
+            "ordinal": 3,
+            "storage": "Stack[0xc]:4",
+            "stackOffset": 12,
+            "resolvedType": null
+          }
+        ],
+        "localVariables": [
+          {
+            "name": "ppCurNode",
+            "dataType": "int * *",
+            "size": 4,
+            "storage": "EAX:4",
+            "stackOffset": null,
+            "resolvedType": "int * *"
+          },
+          {
+            "name": "pBackLink",
+            "dataType": "int *",
+            "size": 4,
+            "storage": "ESI:4",
+            "stackOffset": null,
+            "resolvedType": "int *"
+          },
+          {
+            "name": "pNext",
+            "dataType": "int *",
+            "size": 4,
+            "storage": "HASH:5ff3bb8a30:4",
+            "stackOffset": null,
+            "resolvedType": "int *"
+          },
+          {
+            "name": "piVar2",
+            "dataType": "undefined4",
+            "size": 4,
+            "storage": "HASH:5f18740225:4",
+            "stackOffset": null,
+            "resolvedType": null
+          }
+        ],
+        "tags": [
+          {
+            "type": "llm-artifact-fix"
+          },
+          {
+            "type": "proto-asm-verified"
+          }
+        ],
+        "decompiled": "\n/* @function InsertListNode\n   @address Game.exe.ram:0040fbb0\n   @date 2026.06.06\n   @params\n     pNode: Stack[0x4]:4 (int * *)\n     bInsertAtHead: Stack[0x8]:4 (int32_t)\n     ppTarget: Stack[0xc]:4 (int * *)\n     ppListHead: ECX:4 (int * *)\n   @description Diablo 2 1.14d reverse team\n   https://blizzhackers.dev\n   \n   Function uses custom registers for function arguments!\n   [int * * pNode@Stack[0x4]:4]\n   [int32_t bInsertAtHead@Stack[0x8]:4]\n   [int * * ppTarget@Stack[0xc]:4]\n   [int * * ppListHead@ECX:4] */\n\nvoid __fastcall\nFog::Src::LogManager::InsertListNode\n          (int **ppListHead,int **pNode,int32_t bInsertAtHead,int **ppTarget)\n\n{\n  int **ppCurNode;\n  int *pBackLink;\n  int *pNext;\n  \n  ppCurNode = pNode;\n  if (pNode == (int **)0x0) {\n    ppCurNode = ppListHead + 1;\n  }\n  pNext = *ppCurNode;\n  if (pNext != (int *)0x0) {\n    pBackLink = ppCurNode[1];\n    if ((int)pBackLink < 0) {\n      pBackLink = (int *)~(uint)pBackLink;\n    }\n    else {\n      pBackLink = (int *)((int)pBackLink + ((int)ppCurNode - pNext[1]));\n    }\n    *pBackLink = (int)pNext;\n    (*ppCurNode)[1] = (int)ppCurNode[1];\n    *ppCurNode = (int *)0x0;\n    ppCurNode[1] = (int *)0x0;\n  }\n  if (ppTarget == (int **)0x0) {\n    ppTarget = ppListHead + 1;\n  }\n  if (bInsertAtHead != 1) {\n    pNext = *ppTarget;\n    *ppCurNode = pNext;\n    ppCurNode[1] = (int *)pNext[1];\n    pNext[1] = (int)pNode;\n    *ppTarget = (int *)ppCurNode;\n    return;\n  }\n  *ppCurNode = (int *)ppTarget;\n  ppCurNode[1] = ppTarget[1];\n  pNext = *ppListHead;\n  pBackLink = ppTarget[1];\n  if ((int)pBackLink < 0) {\n    *(int ***)~(uint)pBackLink = ppCurNode;\n    ppTarget[1] = (int *)pNode;\n    return;\n  }\n  if ((int)pNext < 0) {\n    pNext = (int *)((int)ppTarget - (*ppTarget)[1]);\n  }\n  *(int ***)((int)pBackLink + (int)pNext) = ppCurNode;\n  ppTarget[1] = (int *)pNode;\n  return;\n}\n\n",
+        "branchLayout": {
+          "lineCount": 73,
+          "lines": [
+            [
+              29,
+              [
+                13
+              ]
+            ],
+            [
+              33,
+              [
+                22
+              ]
+            ],
+            [
+              35,
+              [
+                29
+              ]
+            ],
+            [
+              46,
+              [
+                70
+              ]
+            ],
+            [
+              49,
+              [
+                81
+              ]
+            ],
+            [
+              50,
+              [
+                83
+              ]
+            ],
+            [
+              57,
+              [
+                105
+              ]
+            ],
+            [
+              61,
+              [
+                120
+              ]
+            ],
+            [
+              66,
+              [
+                138
+              ]
+            ]
+          ],
+          "ifs": [
+            [
+              29,
+              13
+            ],
+            [
+              33,
+              22
+            ],
+            [
+              35,
+              29
+            ],
+            [
+              46,
+              70
+            ],
+            [
+              49,
+              81
+            ],
+            [
+              61,
+              120
+            ],
+            [
+              66,
+              138
+            ]
+          ],
+          "tests": [
+            [
+              29,
+              {
+                "op": "==",
+                "mnemonic": "TEST",
+                "reg": "EBX",
+                "k": 0,
+                "size": 4,
+                "at": 7
+              }
+            ],
+            [
+              33,
+              {
+                "op": "!=",
+                "mnemonic": "TEST",
+                "reg": "EDI",
+                "k": 0,
+                "size": 4,
+                "at": 20
+              }
+            ],
+            [
+              46,
+              {
+                "op": "==",
+                "mnemonic": "TEST",
+                "reg": "EDX",
+                "k": 0,
+                "size": 4,
+                "at": 68
+              }
+            ],
+            [
+              49,
+              {
+                "op": "!=",
+                "mnemonic": "SUB",
+                "reg": "ESI",
+                "k": 1,
+                "size": 4,
+                "at": 78,
+                "delta": 1
+              }
+            ]
+          ]
+        }
+      },
+      "tu": "Source/Fog/Src/LogManager",
+      "dh": "b08bd32f",
+      "existingMatchControl": false
+    },
+    {
+      "fn": {
+        "name": "TSList_FILEREC_LinkNode",
+        "address": "00417a70",
+        "entryPoint": "00417a70",
+        "signature": "void TSList_FILEREC_LinkNode(int * * ppListContainer, int * * pNode, int32_t nInsertMode, int * * ppListHead)",
+        "returnType": "void",
+        "callingConvention": "__fastcall",
+        "size": 161,
+        "isThunk": false,
+        "isExternal": false,
+        "hasVarArgs": false,
+        "namespace": "Storm::Source::SFile",
+        "comment": "@function TSList_FILEREC_LinkNode\n@address Game.exe.ram:00417a70\n@date 2026.06.06\n@params\n  pNode: Stack[0x4]:4 (int * *)\n  nInsertMode: Stack[0x8]:4 (int32_t)\n  ppListHead: Stack[0xc]:4 (int * *)\n  ppListContainer: ECX:4 (int * *)\n@description Diablo 2 1.14d reverse team\nhttps://blizzhackers.dev\n\nFunction uses custom registers for function arguments!\n[int * * pNode@Stack[0x4]:4]\n[int32_t nInsertMode@Stack[0x8]:4]\n[int * * ppListHead@Stack[0xc]:4]\n[int * * ppListContainer@ECX:4]\n@blizzard TSList::LinkNode (STORM.H)",
+        "sourceFile": null,
+        "sourceLine": null,
+        "sourceInfo": null,
+        "parameters": [
+          {
+            "name": "ppListContainer",
+            "dataType": "int * *",
+            "size": 4,
+            "ordinal": 0,
+            "storage": "ECX:4",
+            "stackOffset": null,
+            "resolvedType": null
+          },
+          {
+            "name": "pNode",
+            "dataType": "int * *",
+            "size": 4,
+            "ordinal": 1,
+            "storage": "Stack[0x4]:4",
+            "stackOffset": 4,
+            "resolvedType": null
+          },
+          {
+            "name": "nInsertMode",
+            "dataType": "int32_t",
+            "size": 4,
+            "ordinal": 2,
+            "storage": "Stack[0x8]:4",
+            "stackOffset": 8,
+            "resolvedType": null
+          },
+          {
+            "name": "ppListHead",
+            "dataType": "int * *",
+            "size": 4,
+            "ordinal": 3,
+            "storage": "Stack[0xc]:4",
+            "stackOffset": 12,
+            "resolvedType": null
+          }
+        ],
+        "localVariables": [
+          {
+            "name": "ppSlot",
+            "dataType": "StormLinkStrc *",
+            "size": 4,
+            "storage": "EAX:4",
+            "stackOffset": null,
+            "resolvedType": null
+          },
+          {
+            "name": "pLink",
+            "dataType": "StormLinkStrc * *",
+            "size": 4,
+            "storage": "ESI:4",
+            "stackOffset": null,
+            "resolvedType": null
+          },
+          {
+            "name": "pEntry",
+            "dataType": "StormLinkStrc *",
+            "size": 4,
+            "storage": "HASH:5ff430bbaa:4",
+            "stackOffset": null,
+            "resolvedType": "StormLinkStrc *"
+          },
+          {
+            "name": "piVar2",
+            "dataType": "uint",
+            "size": 4,
+            "storage": "HASH:5f1fff33bf:4",
+            "stackOffset": null,
+            "resolvedType": "uint"
+          }
+        ],
+        "tags": [
+          {
+            "type": "llm-artifact-fix"
+          },
+          {
+            "type": "blizzard-name"
+          },
+          {
+            "type": "proto-asm-verified"
+          },
+          {
+            "type": "x64-typing"
+          }
+        ],
+        "decompiled": "\n/* @function TSList_FILEREC_LinkNode\n   @address Game.exe.ram:00417a70\n   @date 2026.06.06\n   @params\n     pNode: Stack[0x4]:4 (int * *)\n     nInsertMode: Stack[0x8]:4 (int32_t)\n     ppListHead: Stack[0xc]:4 (int * *)\n     ppListContainer: ECX:4 (int * *)\n   @description Diablo 2 1.14d reverse team\n   https://blizzhackers.dev\n   \n   Function uses custom registers for function arguments!\n   [int * * pNode@Stack[0x4]:4]\n   [int32_t nInsertMode@Stack[0x8]:4]\n   [int * * ppListHead@Stack[0xc]:4]\n   [int * * ppListContainer@ECX:4]\n   @blizzard TSList::LinkNode (STORM.H) */\n\nvoid __fastcall\nStorm::Source::SFile::TSList_FILEREC_LinkNode\n          (int **ppListContainer,int **pNode,int32_t nInsertMode,int **ppListHead)\n\n{\n  StormLinkStrc *ppSlot;\n  StormLinkStrc **pLink;\n  int *piVar1;\n  StormLinkStrc *pEntry;\n  uint piVar2;\n  \n  ppSlot = (StormLinkStrc *)pNode;\n  if (pNode == (int **)0x0) {\n    ppSlot = (StormLinkStrc *)(ppListContainer + 1);\n  }\n  pEntry = ppSlot->pPrevLink;\n  if (pEntry != (StormLinkStrc *)0x0) {\n    piVar2 = ppSlot->pNext;\n    if ((int)piVar2 < 0) {\n      pLink = (StormLinkStrc **)~piVar2;\n    }\n    else {\n      pLink = (StormLinkStrc **)((int)ppSlot + (piVar2 - pEntry->pNext));\n    }\n    *pLink = pEntry;\n    ppSlot->pPrevLink->pNext = ppSlot->pNext;\n    ppSlot->pPrevLink = (StormLinkStrc *)0x0;\n    ppSlot->pNext = 0;\n  }\n  if (ppListHead == (int **)0x0) {\n    ppListHead = ppListContainer + 1;\n  }\n  if (nInsertMode != 1) {\n    pEntry = ((StormLinkStrc *)ppListHead)->pPrevLink;\n    ppSlot->pPrevLink = pEntry;\n    ppSlot->pNext = pEntry->pNext;\n    pEntry->pNext = (intptr_t)pNode;\n    ((StormLinkStrc *)ppListHead)->pPrevLink = ppSlot;\n    return;\n  }\n  ppSlot->pPrevLink = (StormLinkStrc *)ppListHead;\n  ppSlot->pNext = ((StormLinkStrc *)ppListHead)->pNext;\n  piVar1 = *ppListContainer;\n  piVar2 = ((StormLinkStrc *)ppListHead)->pNext;\n  if ((int)piVar2 < 0) {\n    *(StormLinkStrc **)~piVar2 = ppSlot;\n    ((StormLinkStrc *)ppListHead)->pNext = (intptr_t)pNode;\n    return;\n  }\n  if ((int)piVar1 < 0) {\n    piVar1 = (int *)((int)ppListHead - ((StormLinkStrc *)ppListHead)->pPrevLink->pNext);\n  }\n  *(StormLinkStrc **)(piVar2 + (int)piVar1) = ppSlot;\n  ((StormLinkStrc *)ppListHead)->pNext = (intptr_t)pNode;\n  return;\n}\n\n",
+        "branchLayout": {
+          "lineCount": 76,
+          "lines": [
+            [
+              32,
+              [
+                13
+              ]
+            ],
+            [
+              36,
+              [
+                22
+              ]
+            ],
+            [
+              38,
+              [
+                29
+              ]
+            ],
+            [
+              49,
+              [
+                70
+              ]
+            ],
+            [
+              52,
+              [
+                81
+              ]
+            ],
+            [
+              53,
+              [
+                83
+              ]
+            ],
+            [
+              60,
+              [
+                105
+              ]
+            ],
+            [
+              64,
+              [
+                120
+              ]
+            ],
+            [
+              69,
+              [
+                138
+              ]
+            ]
+          ],
+          "ifs": [
+            [
+              32,
+              13
+            ],
+            [
+              36,
+              22
+            ],
+            [
+              38,
+              29
+            ],
+            [
+              49,
+              70
+            ],
+            [
+              52,
+              81
+            ],
+            [
+              64,
+              120
+            ],
+            [
+              69,
+              138
+            ]
+          ],
+          "tests": [
+            [
+              32,
+              {
+                "op": "==",
+                "mnemonic": "TEST",
+                "reg": "EBX",
+                "k": 0,
+                "size": 4,
+                "at": 7
+              }
+            ],
+            [
+              36,
+              {
+                "op": "!=",
+                "mnemonic": "TEST",
+                "reg": "EDI",
+                "k": 0,
+                "size": 4,
+                "at": 20
+              }
+            ],
+            [
+              49,
+              {
+                "op": "==",
+                "mnemonic": "TEST",
+                "reg": "EDX",
+                "k": 0,
+                "size": 4,
+                "at": 68
+              }
+            ],
+            [
+              52,
+              {
+                "op": "!=",
+                "mnemonic": "SUB",
+                "reg": "ESI",
+                "k": 1,
+                "size": 4,
+                "at": 78,
+                "delta": 1
+              }
+            ]
+          ]
+        }
+      },
+      "tu": "3rdparty/Storm/Source/SFile",
+      "dh": "2f6a8ae0",
+      "existingMatchControl": true,
+      "expectedCurrentMain": "// @blizzard TSList::LinkNode (STORM.H)\n// 1.14d: 00417a70\nvoid __thiscall TSList_FILEREC_LinkNode(int * * ppListContainer, int * * pNode, int32_t nInsertMode, int * * ppListHead) {\n    StormLinkStrc* ppSlot = (StormLinkStrc*)pNode;\n    if (!pNode) {\n      ppSlot = (StormLinkStrc*)(ppListContainer + 1);\n    }\n\n    StormLinkStrc* pEntry = ppSlot->pPrevLink;\n    if (pEntry) {\n      StormLinkStrc** pLink;\n      pLink = (StormLinkStrc**)D2_StormNextLink(ppSlot, -1);\n      *pLink = pEntry;\n      ppSlot->pPrevLink->pNext = ppSlot->pNext;\n      ppSlot->pPrevLink = 0;\n      ppSlot->pNext = 0;\n    }\n    if (!ppListHead) {\n      ppListHead = ppListContainer + 1;\n    }\n\n    switch (nInsertMode) {\n      case 1:\n        {\n          ppSlot->pPrevLink = (StormLinkStrc*)ppListHead;\n          ppSlot->pNext = ((StormLinkStrc*)ppListHead)->pNext;\n          *(StormLinkStrc**)D2_StormNextLink((StormLinkStrc*)ppListHead, (intptr_t)*ppListContainer) = (StormLinkStrc*)ppSlot;\n          ((StormLinkStrc*)ppListHead)->pNext = (intptr_t)pNode;\n          return;\n        }\n      default:\n        {\n          pEntry = ((StormLinkStrc*)ppListHead)->pPrevLink;\n          ppSlot->pPrevLink = pEntry;\n          ppSlot->pNext = pEntry->pNext;\n          pEntry->pNext = (intptr_t)pNode;\n          ((StormLinkStrc*)ppListHead)->pPrevLink = ppSlot;\n          return;\n        }\n    }\n}"
+    },
+    {
+      "fn": {
+        "name": "SFILE_InsertFileRecordIntoList2",
+        "address": "00417b80",
+        "entryPoint": "00417b80",
+        "signature": "void SFILE_InsertFileRecordIntoList2(StormLinkedListStrc * ppListContainer, int * * pNode, int32_t nInsertMode, int * * ppListHead)",
+        "returnType": "void",
+        "callingConvention": "__fastcall",
+        "size": 161,
+        "isThunk": false,
+        "isExternal": false,
+        "hasVarArgs": false,
+        "namespace": "Storm::Source::SFile",
+        "comment": "@function SFILE_InsertFileRecordIntoList2\n@address Game.exe.ram:00417b80\n@date 2026.09.05\n@params\n  pNode: Stack[0x4]:4 (int * *)\n  nInsertMode: Stack[0x8]:4 (int32_t)\n  ppListHead: Stack[0xc]:4 (int * *)\n  ppListContainer: ECX:4 (D2StormListHead *)\n@description Diablo 2 1.14d reverse team\nhttps://blizzhackers.dev\n\nFunction uses custom registers for function arguments!\n[int * * pNode@Stack[0x4]:4]\n[int32_t nInsertMode@Stack[0x8]:4]\n[int * * ppListHead@Stack[0xc]:4]\n[D2StormListHead * ppListContainer@ECX:4]",
+        "sourceFile": null,
+        "sourceLine": null,
+        "sourceInfo": null,
+        "parameters": [
+          {
+            "name": "ppListContainer",
+            "dataType": "StormLinkedListStrc *",
+            "size": 4,
+            "ordinal": 0,
+            "storage": "ECX:4",
+            "stackOffset": null,
+            "resolvedType": null
+          },
+          {
+            "name": "pNode",
+            "dataType": "int * *",
+            "size": 4,
+            "ordinal": 1,
+            "storage": "Stack[0x4]:4",
+            "stackOffset": 4,
+            "resolvedType": null
+          },
+          {
+            "name": "nInsertMode",
+            "dataType": "int32_t",
+            "size": 4,
+            "ordinal": 2,
+            "storage": "Stack[0x8]:4",
+            "stackOffset": 8,
+            "resolvedType": null
+          },
+          {
+            "name": "ppListHead",
+            "dataType": "int * *",
+            "size": 4,
+            "ordinal": 3,
+            "storage": "Stack[0xc]:4",
+            "stackOffset": 12,
+            "resolvedType": null
+          }
+        ],
+        "localVariables": [
+          {
+            "name": "ppSlot",
+            "dataType": "StormLinkStrc *",
+            "size": 4,
+            "storage": "EAX:4",
+            "stackOffset": null,
+            "resolvedType": "StormLinkStrc *"
+          },
+          {
+            "name": "pLink",
+            "dataType": "StormLinkStrc * *",
+            "size": 4,
+            "storage": "ESI:4",
+            "stackOffset": null,
+            "resolvedType": null
+          },
+          {
+            "name": "nLinkOffset",
+            "dataType": "intptr_t",
+            "size": 4,
+            "storage": "ESI:4",
+            "stackOffset": null,
+            "resolvedType": null
+          },
+          {
+            "name": "pEntry",
+            "dataType": "StormLinkStrc *",
+            "size": 4,
+            "storage": "HASH:5f13a093ee:4",
+            "stackOffset": null,
+            "resolvedType": "StormLinkStrc *"
+          },
+          {
+            "name": "uPrevLinkRaw",
+            "dataType": "uint",
+            "size": 4,
+            "storage": "HASH:5fb732182b:4",
+            "stackOffset": null,
+            "resolvedType": "uint"
+          }
+        ],
+        "tags": [
+          {
+            "type": "llm-artifact-fix"
+          },
+          {
+            "type": "proto-asm-verified"
+          },
+          {
+            "type": "x64-typing"
+          }
+        ],
+        "decompiled": "\n/* @function SFILE_InsertFileRecordIntoList2\n   @address Game.exe.ram:00417b80\n   @date 2026.09.05\n   @params\n     pNode: Stack[0x4]:4 (int * *)\n     nInsertMode: Stack[0x8]:4 (int32_t)\n     ppListHead: Stack[0xc]:4 (int * *)\n     ppListContainer: ECX:4 (D2StormListHead *)\n   @description Diablo 2 1.14d reverse team\n   https://blizzhackers.dev\n   \n   Function uses custom registers for function arguments!\n   [int * * pNode@Stack[0x4]:4]\n   [int32_t nInsertMode@Stack[0x8]:4]\n   [int * * ppListHead@Stack[0xc]:4]\n   [D2StormListHead * ppListContainer@ECX:4] */\n\nvoid __fastcall\nStorm::Source::SFile::SFILE_InsertFileRecordIntoList2\n          (StormLinkedListStrc *ppListContainer,int **pNode,int32_t nInsertMode,int **ppListHead)\n\n{\n  StormLinkStrc *ppSlot;\n  StormLinkStrc **pLink;\n  intptr_t nLinkOffset;\n  StormLinkStrc *pEntry;\n  uint uPrevLinkRaw;\n  \n  ppSlot = (StormLinkStrc *)pNode;\n  if (pNode == (int **)0x0) {\n    ppSlot = &ppListContainer->head;\n  }\n  pEntry = ppSlot->pPrevLink;\n  if (pEntry != (StormLinkStrc *)0x0) {\n    uPrevLinkRaw = ppSlot->pNext;\n    if ((int)uPrevLinkRaw < 0) {\n      pLink = (StormLinkStrc **)~uPrevLinkRaw;\n    }\n    else {\n      pLink = (StormLinkStrc **)((int)ppSlot + (uPrevLinkRaw - pEntry->pNext));\n    }\n    *pLink = pEntry;\n    ppSlot->pPrevLink->pNext = ppSlot->pNext;\n    ppSlot->pPrevLink = (StormLinkStrc *)0x0;\n    ppSlot->pNext = 0;\n  }\n  if (ppListHead == (int **)0x0) {\n    ppListHead = (int **)&ppListContainer->head;\n  }\n  if (nInsertMode != 1) {\n    pEntry = ((StormLinkStrc *)ppListHead)->pPrevLink;\n    ppSlot->pPrevLink = pEntry;\n    ppSlot->pNext = pEntry->pNext;\n    pEntry->pNext = (intptr_t)pNode;\n    ((StormLinkStrc *)ppListHead)->pPrevLink = ppSlot;\n    return;\n  }\n  ppSlot->pPrevLink = (StormLinkStrc *)ppListHead;\n  ppSlot->pNext = ((StormLinkStrc *)ppListHead)->pNext;\n  nLinkOffset = ppListContainer->nLinkOffset;\n  uPrevLinkRaw = ((StormLinkStrc *)ppListHead)->pNext;\n  if ((int)uPrevLinkRaw < 0) {\n    *(StormLinkStrc **)~uPrevLinkRaw = ppSlot;\n    ((StormLinkStrc *)ppListHead)->pNext = (intptr_t)pNode;\n    return;\n  }\n  if (nLinkOffset < 0) {\n    nLinkOffset = (int)ppListHead - ((StormLinkStrc *)ppListHead)->pPrevLink->pNext;\n  }\n  *(StormLinkStrc **)(uPrevLinkRaw + nLinkOffset) = ppSlot;\n  ((StormLinkStrc *)ppListHead)->pNext = (intptr_t)pNode;\n  return;\n}\n\n",
+        "branchLayout": {
+          "lineCount": 75,
+          "lines": [
+            [
+              31,
+              [
+                13
+              ]
+            ],
+            [
+              35,
+              [
+                22
+              ]
+            ],
+            [
+              37,
+              [
+                29
+              ]
+            ],
+            [
+              48,
+              [
+                70
+              ]
+            ],
+            [
+              51,
+              [
+                81
+              ]
+            ],
+            [
+              52,
+              [
+                83
+              ]
+            ],
+            [
+              59,
+              [
+                105
+              ]
+            ],
+            [
+              63,
+              [
+                120
+              ]
+            ],
+            [
+              68,
+              [
+                138
+              ]
+            ]
+          ],
+          "ifs": [
+            [
+              31,
+              13
+            ],
+            [
+              35,
+              22
+            ],
+            [
+              37,
+              29
+            ],
+            [
+              48,
+              70
+            ],
+            [
+              51,
+              81
+            ],
+            [
+              63,
+              120
+            ],
+            [
+              68,
+              138
+            ]
+          ],
+          "tests": [
+            [
+              31,
+              {
+                "op": "==",
+                "mnemonic": "TEST",
+                "reg": "EBX",
+                "k": 0,
+                "size": 4,
+                "at": 7
+              }
+            ],
+            [
+              35,
+              {
+                "op": "!=",
+                "mnemonic": "TEST",
+                "reg": "EDI",
+                "k": 0,
+                "size": 4,
+                "at": 20
+              }
+            ],
+            [
+              48,
+              {
+                "op": "==",
+                "mnemonic": "TEST",
+                "reg": "EDX",
+                "k": 0,
+                "size": 4,
+                "at": 68
+              }
+            ],
+            [
+              51,
+              {
+                "op": "!=",
+                "mnemonic": "SUB",
+                "reg": "ESI",
+                "k": 1,
+                "size": 4,
+                "at": 78,
+                "delta": 1
+              }
+            ]
+          ]
+        }
+      },
+      "tu": "3rdparty/Storm/Source/SFile",
+      "dh": "39fc759e",
+      "existingMatchControl": true,
+      "expectedCurrentMain": "// 1.14d: 00417b80\nvoid __thiscall SFILE_InsertFileRecordIntoList2(StormLinkedListStrc * ppListContainer, int * * pNode, int32_t nInsertMode, int * * ppListHead) {\n    StormLinkStrc* ppSlot = (StormLinkStrc*)pNode;\n    if (!pNode) {\n      ppSlot = &ppListContainer->head;\n    }\n\n    StormLinkStrc* pEntry = ppSlot->pPrevLink;\n    if (pEntry) {\n      StormLinkStrc** pLink;\n      pLink = (StormLinkStrc**)D2_StormNextLink(ppSlot, -1);\n      *pLink = pEntry;\n      ppSlot->pPrevLink->pNext = ppSlot->pNext;\n      ppSlot->pPrevLink = 0;\n      ppSlot->pNext = 0;\n    }\n    if (!ppListHead) {\n      ppListHead = (int**)&ppListContainer->head;\n    }\n\n    switch (nInsertMode) {\n      case 1:\n        {\n          ppSlot->pPrevLink = (StormLinkStrc*)ppListHead;\n          ppSlot->pNext = ((StormLinkStrc*)ppListHead)->pNext;\n          *(StormLinkStrc**)D2_StormNextLink((StormLinkStrc*)ppListHead, ppListContainer->nLinkOffset) = (StormLinkStrc*)ppSlot;\n          ((StormLinkStrc*)ppListHead)->pNext = (intptr_t)pNode;\n          return;\n        }\n      default:\n        {\n          pEntry = ((StormLinkStrc*)ppListHead)->pPrevLink;\n          ppSlot->pPrevLink = pEntry;\n          ppSlot->pNext = pEntry->pNext;\n          pEntry->pNext = (intptr_t)pNode;\n          ((StormLinkStrc*)ppListHead)->pPrevLink = ppSlot;\n          return;\n        }\n    }\n}"
+    },
+    {
+      "fn": {
+        "name": "SFILE_InsertFileRecordIntoList3",
+        "address": "00417c70",
+        "entryPoint": "00417c70",
+        "signature": "void SFILE_InsertFileRecordIntoList3(int * * ppListContainer, int * * pNode, int32_t nInsertMode, int * * ppListHead)",
+        "returnType": "void",
+        "callingConvention": "__fastcall",
+        "size": 161,
+        "isThunk": false,
+        "isExternal": false,
+        "hasVarArgs": false,
+        "namespace": "Storm::Source::SFile",
+        "comment": "@function SFILE_InsertFileRecordIntoList3\n@address Game.exe.ram:00417c70\n@date 2026.06.06\n@params\n  pNode: Stack[0x4]:4 (int * *)\n  nInsertMode: Stack[0x8]:4 (int32_t)\n  ppListHead: Stack[0xc]:4 (int * *)\n  ppListContainer: ECX:4 (int * *)\n@description Diablo 2 1.14d reverse team\nhttps://blizzhackers.dev\n\nFunction uses custom registers for function arguments!\n[int * * pNode@Stack[0x4]:4]\n[int32_t nInsertMode@Stack[0x8]:4]\n[int * * ppListHead@Stack[0xc]:4]\n[int * * ppListContainer@ECX:4]",
+        "sourceFile": null,
+        "sourceLine": null,
+        "sourceInfo": null,
+        "parameters": [
+          {
+            "name": "ppListContainer",
+            "dataType": "int * *",
+            "size": 4,
+            "ordinal": 0,
+            "storage": "ECX:4",
+            "stackOffset": null,
+            "resolvedType": null
+          },
+          {
+            "name": "pNode",
+            "dataType": "int * *",
+            "size": 4,
+            "ordinal": 1,
+            "storage": "Stack[0x4]:4",
+            "stackOffset": 4,
+            "resolvedType": null
+          },
+          {
+            "name": "nInsertMode",
+            "dataType": "int32_t",
+            "size": 4,
+            "ordinal": 2,
+            "storage": "Stack[0x8]:4",
+            "stackOffset": 8,
+            "resolvedType": null
+          },
+          {
+            "name": "ppListHead",
+            "dataType": "int * *",
+            "size": 4,
+            "ordinal": 3,
+            "storage": "Stack[0xc]:4",
+            "stackOffset": 12,
+            "resolvedType": null
+          }
+        ],
+        "localVariables": [
+          {
+            "name": "ppSlot",
+            "dataType": "StormLinkStrc *",
+            "size": 4,
+            "storage": "EAX:4",
+            "stackOffset": null,
+            "resolvedType": null
+          },
+          {
+            "name": "pLink",
+            "dataType": "StormLinkStrc * *",
+            "size": 4,
+            "storage": "ESI:4",
+            "stackOffset": null,
+            "resolvedType": null
+          },
+          {
+            "name": "pEntry",
+            "dataType": "StormLinkStrc *",
+            "size": 4,
+            "storage": "HASH:5f57606fa6:4",
+            "stackOffset": null,
+            "resolvedType": "StormLinkStrc *"
+          },
+          {
+            "name": "piVar2",
+            "dataType": "uint",
+            "size": 4,
+            "storage": "HASH:5fbcafe7b3:4",
+            "stackOffset": null,
+            "resolvedType": "uint"
+          }
+        ],
+        "tags": [
+          {
+            "type": "llm-artifact-fix"
+          },
+          {
+            "type": "proto-asm-verified"
+          },
+          {
+            "type": "x64-typing"
+          }
+        ],
+        "decompiled": "\n/* @function SFILE_InsertFileRecordIntoList3\n   @address Game.exe.ram:00417c70\n   @date 2026.06.06\n   @params\n     pNode: Stack[0x4]:4 (int * *)\n     nInsertMode: Stack[0x8]:4 (int32_t)\n     ppListHead: Stack[0xc]:4 (int * *)\n     ppListContainer: ECX:4 (int * *)\n   @description Diablo 2 1.14d reverse team\n   https://blizzhackers.dev\n   \n   Function uses custom registers for function arguments!\n   [int * * pNode@Stack[0x4]:4]\n   [int32_t nInsertMode@Stack[0x8]:4]\n   [int * * ppListHead@Stack[0xc]:4]\n   [int * * ppListContainer@ECX:4] */\n\nvoid __fastcall\nStorm::Source::SFile::SFILE_InsertFileRecordIntoList3\n          (int **ppListContainer,int **pNode,int32_t nInsertMode,int **ppListHead)\n\n{\n  StormLinkStrc *ppSlot;\n  StormLinkStrc **pLink;\n  int *piVar1;\n  StormLinkStrc *pEntry;\n  uint piVar2;\n  \n  ppSlot = (StormLinkStrc *)pNode;\n  if (pNode == (int **)0x0) {\n    ppSlot = (StormLinkStrc *)(ppListContainer + 1);\n  }\n  pEntry = ppSlot->pPrevLink;\n  if (pEntry != (StormLinkStrc *)0x0) {\n    piVar2 = ppSlot->pNext;\n    if ((int)piVar2 < 0) {\n      pLink = (StormLinkStrc **)~piVar2;\n    }\n    else {\n      pLink = (StormLinkStrc **)((int)ppSlot + (piVar2 - pEntry->pNext));\n    }\n    *pLink = pEntry;\n    ppSlot->pPrevLink->pNext = ppSlot->pNext;\n    ppSlot->pPrevLink = (StormLinkStrc *)0x0;\n    ppSlot->pNext = 0;\n  }\n  if (ppListHead == (int **)0x0) {\n    ppListHead = ppListContainer + 1;\n  }\n  if (nInsertMode != 1) {\n    pEntry = ((StormLinkStrc *)ppListHead)->pPrevLink;\n    ppSlot->pPrevLink = pEntry;\n    ppSlot->pNext = pEntry->pNext;\n    pEntry->pNext = (intptr_t)pNode;\n    ((StormLinkStrc *)ppListHead)->pPrevLink = ppSlot;\n    return;\n  }\n  ppSlot->pPrevLink = (StormLinkStrc *)ppListHead;\n  ppSlot->pNext = ((StormLinkStrc *)ppListHead)->pNext;\n  piVar1 = *ppListContainer;\n  piVar2 = ((StormLinkStrc *)ppListHead)->pNext;\n  if ((int)piVar2 < 0) {\n    *(StormLinkStrc **)~piVar2 = ppSlot;\n    ((StormLinkStrc *)ppListHead)->pNext = (intptr_t)pNode;\n    return;\n  }\n  if ((int)piVar1 < 0) {\n    piVar1 = (int *)((int)ppListHead - ((StormLinkStrc *)ppListHead)->pPrevLink->pNext);\n  }\n  *(StormLinkStrc **)(piVar2 + (int)piVar1) = ppSlot;\n  ((StormLinkStrc *)ppListHead)->pNext = (intptr_t)pNode;\n  return;\n}\n\n",
+        "branchLayout": {
+          "lineCount": 75,
+          "lines": [
+            [
+              31,
+              [
+                13
+              ]
+            ],
+            [
+              35,
+              [
+                22
+              ]
+            ],
+            [
+              37,
+              [
+                29
+              ]
+            ],
+            [
+              48,
+              [
+                70
+              ]
+            ],
+            [
+              51,
+              [
+                81
+              ]
+            ],
+            [
+              52,
+              [
+                83
+              ]
+            ],
+            [
+              59,
+              [
+                105
+              ]
+            ],
+            [
+              63,
+              [
+                120
+              ]
+            ],
+            [
+              68,
+              [
+                138
+              ]
+            ]
+          ],
+          "ifs": [
+            [
+              31,
+              13
+            ],
+            [
+              35,
+              22
+            ],
+            [
+              37,
+              29
+            ],
+            [
+              48,
+              70
+            ],
+            [
+              51,
+              81
+            ],
+            [
+              63,
+              120
+            ],
+            [
+              68,
+              138
+            ]
+          ],
+          "tests": [
+            [
+              31,
+              {
+                "op": "==",
+                "mnemonic": "TEST",
+                "reg": "EBX",
+                "k": 0,
+                "size": 4,
+                "at": 7
+              }
+            ],
+            [
+              35,
+              {
+                "op": "!=",
+                "mnemonic": "TEST",
+                "reg": "EDI",
+                "k": 0,
+                "size": 4,
+                "at": 20
+              }
+            ],
+            [
+              48,
+              {
+                "op": "==",
+                "mnemonic": "TEST",
+                "reg": "EDX",
+                "k": 0,
+                "size": 4,
+                "at": 68
+              }
+            ],
+            [
+              51,
+              {
+                "op": "!=",
+                "mnemonic": "SUB",
+                "reg": "ESI",
+                "k": 1,
+                "size": 4,
+                "at": 78,
+                "delta": 1
+              }
+            ]
+          ]
+        }
+      },
+      "tu": "3rdparty/Storm/Source/SFile",
+      "dh": "78fcf13d",
+      "existingMatchControl": true,
+      "expectedCurrentMain": "// 1.14d: 00417c70\nvoid __thiscall SFILE_InsertFileRecordIntoList3(int * * ppListContainer, int * * pNode, int32_t nInsertMode, int * * ppListHead) {\n    StormLinkStrc* ppSlot = (StormLinkStrc*)pNode;\n    if (!pNode) {\n      ppSlot = (StormLinkStrc*)(ppListContainer + 1);\n    }\n\n    StormLinkStrc* pEntry = ppSlot->pPrevLink;\n    if (pEntry) {\n      StormLinkStrc** pLink;\n      pLink = (StormLinkStrc**)D2_StormNextLink(ppSlot, -1);\n      *pLink = pEntry;\n      ppSlot->pPrevLink->pNext = ppSlot->pNext;\n      ppSlot->pPrevLink = 0;\n      ppSlot->pNext = 0;\n    }\n    if (!ppListHead) {\n      ppListHead = ppListContainer + 1;\n    }\n\n    switch (nInsertMode) {\n      case 1:\n        {\n          ppSlot->pPrevLink = (StormLinkStrc*)ppListHead;\n          ppSlot->pNext = ((StormLinkStrc*)ppListHead)->pNext;\n          *(StormLinkStrc**)D2_StormNextLink((StormLinkStrc*)ppListHead, (intptr_t)*ppListContainer) = (StormLinkStrc*)ppSlot;\n          ((StormLinkStrc*)ppListHead)->pNext = (intptr_t)pNode;\n          return;\n        }\n      default:\n        {\n          pEntry = ((StormLinkStrc*)ppListHead)->pPrevLink;\n          ppSlot->pPrevLink = pEntry;\n          ppSlot->pNext = pEntry->pNext;\n          pEntry->pNext = (intptr_t)pNode;\n          ((StormLinkStrc*)ppListHead)->pPrevLink = ppSlot;\n          return;\n        }\n    }\n}"
+    },
+    {
+      "fn": {
+        "name": "SFILE_InsertFileRecordIntoList4",
+        "address": "00417d80",
+        "entryPoint": "00417d80",
+        "signature": "void SFILE_InsertFileRecordIntoList4(int * * ppListContainer, int * * pNode, int32_t nInsertMode, int * * ppListHead)",
+        "returnType": "void",
+        "callingConvention": "__fastcall",
+        "size": 161,
+        "isThunk": false,
+        "isExternal": false,
+        "hasVarArgs": false,
+        "namespace": "Storm::Source::SFile",
+        "comment": "@function SFILE_InsertFileRecordIntoList4\n@address Game.exe.ram:00417d80\n@date 2026.06.06\n@params\n  pNode: Stack[0x4]:4 (int * *)\n  nInsertMode: Stack[0x8]:4 (int32_t)\n  ppListHead: Stack[0xc]:4 (int * *)\n  ppListContainer: ECX:4 (int * *)\n@description Diablo 2 1.14d reverse team\nhttps://blizzhackers.dev\n\nFunction uses custom registers for function arguments!\n[int * * pNode@Stack[0x4]:4]\n[int32_t nInsertMode@Stack[0x8]:4]\n[int * * ppListHead@Stack[0xc]:4]\n[int * * ppListContainer@ECX:4]",
+        "sourceFile": null,
+        "sourceLine": null,
+        "sourceInfo": null,
+        "parameters": [
+          {
+            "name": "ppListContainer",
+            "dataType": "int * *",
+            "size": 4,
+            "ordinal": 0,
+            "storage": "ECX:4",
+            "stackOffset": null,
+            "resolvedType": null
+          },
+          {
+            "name": "pNode",
+            "dataType": "int * *",
+            "size": 4,
+            "ordinal": 1,
+            "storage": "Stack[0x4]:4",
+            "stackOffset": 4,
+            "resolvedType": null
+          },
+          {
+            "name": "nInsertMode",
+            "dataType": "int32_t",
+            "size": 4,
+            "ordinal": 2,
+            "storage": "Stack[0x8]:4",
+            "stackOffset": 8,
+            "resolvedType": null
+          },
+          {
+            "name": "ppListHead",
+            "dataType": "int * *",
+            "size": 4,
+            "ordinal": 3,
+            "storage": "Stack[0xc]:4",
+            "stackOffset": 12,
+            "resolvedType": null
+          }
+        ],
+        "localVariables": [
+          {
+            "name": "ppSlot",
+            "dataType": "StormLinkStrc *",
+            "size": 4,
+            "storage": "EAX:4",
+            "stackOffset": null,
+            "resolvedType": null
+          },
+          {
+            "name": "pLink",
+            "dataType": "StormLinkStrc * *",
+            "size": 4,
+            "storage": "ESI:4",
+            "stackOffset": null,
+            "resolvedType": null
+          },
+          {
+            "name": "pEntry",
+            "dataType": "StormLinkStrc *",
+            "size": 4,
+            "storage": "HASH:5fb0f047e2:4",
+            "stackOffset": null,
+            "resolvedType": "StormLinkStrc *"
+          },
+          {
+            "name": "piVar2",
+            "dataType": "uint",
+            "size": 4,
+            "storage": "HASH:5f1462cc27:4",
+            "stackOffset": null,
+            "resolvedType": "uint"
+          }
+        ],
+        "tags": [
+          {
+            "type": "llm-artifact-fix"
+          },
+          {
+            "type": "proto-asm-verified"
+          },
+          {
+            "type": "x64-typing"
+          }
+        ],
+        "decompiled": "\n/* @function SFILE_InsertFileRecordIntoList4\n   @address Game.exe.ram:00417d80\n   @date 2026.06.06\n   @params\n     pNode: Stack[0x4]:4 (int * *)\n     nInsertMode: Stack[0x8]:4 (int32_t)\n     ppListHead: Stack[0xc]:4 (int * *)\n     ppListContainer: ECX:4 (int * *)\n   @description Diablo 2 1.14d reverse team\n   https://blizzhackers.dev\n   \n   Function uses custom registers for function arguments!\n   [int * * pNode@Stack[0x4]:4]\n   [int32_t nInsertMode@Stack[0x8]:4]\n   [int * * ppListHead@Stack[0xc]:4]\n   [int * * ppListContainer@ECX:4] */\n\nvoid __fastcall\nStorm::Source::SFile::SFILE_InsertFileRecordIntoList4\n          (int **ppListContainer,int **pNode,int32_t nInsertMode,int **ppListHead)\n\n{\n  StormLinkStrc *ppSlot;\n  StormLinkStrc **pLink;\n  int *piVar1;\n  StormLinkStrc *pEntry;\n  uint piVar2;\n  \n  ppSlot = (StormLinkStrc *)pNode;\n  if (pNode == (int **)0x0) {\n    ppSlot = (StormLinkStrc *)(ppListContainer + 1);\n  }\n  pEntry = ppSlot->pPrevLink;\n  if (pEntry != (StormLinkStrc *)0x0) {\n    piVar2 = ppSlot->pNext;\n    if ((int)piVar2 < 0) {\n      pLink = (StormLinkStrc **)~piVar2;\n    }\n    else {\n      pLink = (StormLinkStrc **)((int)ppSlot + (piVar2 - pEntry->pNext));\n    }\n    *pLink = pEntry;\n    ppSlot->pPrevLink->pNext = ppSlot->pNext;\n    ppSlot->pPrevLink = (StormLinkStrc *)0x0;\n    ppSlot->pNext = 0;\n  }\n  if (ppListHead == (int **)0x0) {\n    ppListHead = ppListContainer + 1;\n  }\n  if (nInsertMode != 1) {\n    pEntry = ((StormLinkStrc *)ppListHead)->pPrevLink;\n    ppSlot->pPrevLink = pEntry;\n    ppSlot->pNext = pEntry->pNext;\n    pEntry->pNext = (intptr_t)pNode;\n    ((StormLinkStrc *)ppListHead)->pPrevLink = ppSlot;\n    return;\n  }\n  ppSlot->pPrevLink = (StormLinkStrc *)ppListHead;\n  ppSlot->pNext = ((StormLinkStrc *)ppListHead)->pNext;\n  piVar1 = *ppListContainer;\n  piVar2 = ((StormLinkStrc *)ppListHead)->pNext;\n  if ((int)piVar2 < 0) {\n    *(StormLinkStrc **)~piVar2 = ppSlot;\n    ((StormLinkStrc *)ppListHead)->pNext = (intptr_t)pNode;\n    return;\n  }\n  if ((int)piVar1 < 0) {\n    piVar1 = (int *)((int)ppListHead - ((StormLinkStrc *)ppListHead)->pPrevLink->pNext);\n  }\n  *(StormLinkStrc **)(piVar2 + (int)piVar1) = ppSlot;\n  ((StormLinkStrc *)ppListHead)->pNext = (intptr_t)pNode;\n  return;\n}\n\n",
+        "branchLayout": {
+          "lineCount": 75,
+          "lines": [
+            [
+              31,
+              [
+                13
+              ]
+            ],
+            [
+              35,
+              [
+                22
+              ]
+            ],
+            [
+              37,
+              [
+                29
+              ]
+            ],
+            [
+              48,
+              [
+                70
+              ]
+            ],
+            [
+              51,
+              [
+                81
+              ]
+            ],
+            [
+              52,
+              [
+                83
+              ]
+            ],
+            [
+              59,
+              [
+                105
+              ]
+            ],
+            [
+              63,
+              [
+                120
+              ]
+            ],
+            [
+              68,
+              [
+                138
+              ]
+            ]
+          ],
+          "ifs": [
+            [
+              31,
+              13
+            ],
+            [
+              35,
+              22
+            ],
+            [
+              37,
+              29
+            ],
+            [
+              48,
+              70
+            ],
+            [
+              51,
+              81
+            ],
+            [
+              63,
+              120
+            ],
+            [
+              68,
+              138
+            ]
+          ],
+          "tests": [
+            [
+              31,
+              {
+                "op": "==",
+                "mnemonic": "TEST",
+                "reg": "EBX",
+                "k": 0,
+                "size": 4,
+                "at": 7
+              }
+            ],
+            [
+              35,
+              {
+                "op": "!=",
+                "mnemonic": "TEST",
+                "reg": "EDI",
+                "k": 0,
+                "size": 4,
+                "at": 20
+              }
+            ],
+            [
+              48,
+              {
+                "op": "==",
+                "mnemonic": "TEST",
+                "reg": "EDX",
+                "k": 0,
+                "size": 4,
+                "at": 68
+              }
+            ],
+            [
+              51,
+              {
+                "op": "!=",
+                "mnemonic": "SUB",
+                "reg": "ESI",
+                "k": 1,
+                "size": 4,
+                "at": 78,
+                "delta": 1
+              }
+            ]
+          ]
+        }
+      },
+      "tu": "3rdparty/Storm/Source/SFile",
+      "dh": "7865d1d0",
+      "existingMatchControl": true,
+      "expectedCurrentMain": "// 1.14d: 00417d80\nvoid __thiscall SFILE_InsertFileRecordIntoList4(int * * ppListContainer, int * * pNode, int32_t nInsertMode, int * * ppListHead) {\n    StormLinkStrc* ppSlot = (StormLinkStrc*)pNode;\n    if (!pNode) {\n      ppSlot = (StormLinkStrc*)(ppListContainer + 1);\n    }\n\n    StormLinkStrc* pEntry = ppSlot->pPrevLink;\n    if (pEntry) {\n      StormLinkStrc** pLink;\n      pLink = (StormLinkStrc**)D2_StormNextLink(ppSlot, -1);\n      *pLink = pEntry;\n      ppSlot->pPrevLink->pNext = ppSlot->pNext;\n      ppSlot->pPrevLink = 0;\n      ppSlot->pNext = 0;\n    }\n    if (!ppListHead) {\n      ppListHead = ppListContainer + 1;\n    }\n\n    switch (nInsertMode) {\n      case 1:\n        {\n          ppSlot->pPrevLink = (StormLinkStrc*)ppListHead;\n          ppSlot->pNext = ((StormLinkStrc*)ppListHead)->pNext;\n          *(StormLinkStrc**)D2_StormNextLink((StormLinkStrc*)ppListHead, (intptr_t)*ppListContainer) = (StormLinkStrc*)ppSlot;\n          ((StormLinkStrc*)ppListHead)->pNext = (intptr_t)pNode;\n          return;\n        }\n      default:\n        {\n          pEntry = ((StormLinkStrc*)ppListHead)->pPrevLink;\n          ppSlot->pPrevLink = pEntry;\n          ppSlot->pNext = pEntry->pNext;\n          pEntry->pNext = (intptr_t)pNode;\n          ((StormLinkStrc*)ppListHead)->pPrevLink = ppSlot;\n          return;\n        }\n    }\n}"
+    },
+    {
+      "fn": {
+        "name": "SFILE_InsertFileRecordIntoList5",
+        "address": "004184b0",
+        "entryPoint": "004184b0",
+        "signature": "void SFILE_InsertFileRecordIntoList5(int * * ppListContainer, int * * pNode, int32_t nInsertMode, int * * ppListHead)",
+        "returnType": "void",
+        "callingConvention": "__fastcall",
+        "size": 161,
+        "isThunk": false,
+        "isExternal": false,
+        "hasVarArgs": false,
+        "namespace": "Storm::Source::SFile",
+        "comment": "@function SFILE_InsertFileRecordIntoList5\n@address Game.exe.ram:004184b0\n@date 2026.06.06\n@params\n  pNode: Stack[0x4]:4 (int * *)\n  nInsertMode: Stack[0x8]:4 (int32_t)\n  ppListHead: Stack[0xc]:4 (int * *)\n  ppListContainer: ECX:4 (int * *)\n@description Diablo 2 1.14d reverse team\nhttps://blizzhackers.dev\n\nFunction uses custom registers for function arguments!\n[int * * pNode@Stack[0x4]:4]\n[int32_t nInsertMode@Stack[0x8]:4]\n[int * * ppListHead@Stack[0xc]:4]\n[int * * ppListContainer@ECX:4]",
+        "sourceFile": null,
+        "sourceLine": null,
+        "sourceInfo": null,
+        "parameters": [
+          {
+            "name": "ppListContainer",
+            "dataType": "int * *",
+            "size": 4,
+            "ordinal": 0,
+            "storage": "ECX:4",
+            "stackOffset": null,
+            "resolvedType": null
+          },
+          {
+            "name": "pNode",
+            "dataType": "int * *",
+            "size": 4,
+            "ordinal": 1,
+            "storage": "Stack[0x4]:4",
+            "stackOffset": 4,
+            "resolvedType": null
+          },
+          {
+            "name": "nInsertMode",
+            "dataType": "int32_t",
+            "size": 4,
+            "ordinal": 2,
+            "storage": "Stack[0x8]:4",
+            "stackOffset": 8,
+            "resolvedType": null
+          },
+          {
+            "name": "ppListHead",
+            "dataType": "int * *",
+            "size": 4,
+            "ordinal": 3,
+            "storage": "Stack[0xc]:4",
+            "stackOffset": 12,
+            "resolvedType": null
+          }
+        ],
+        "localVariables": [
+          {
+            "name": "ppSlot",
+            "dataType": "StormLinkStrc *",
+            "size": 4,
+            "storage": "EAX:4",
+            "stackOffset": null,
+            "resolvedType": null
+          },
+          {
+            "name": "pLink",
+            "dataType": "StormLinkStrc * *",
+            "size": 4,
+            "storage": "ESI:4",
+            "stackOffset": null,
+            "resolvedType": null
+          },
+          {
+            "name": "pEntry",
+            "dataType": "StormLinkStrc *",
+            "size": 4,
+            "storage": "HASH:5f98d9ae6c:4",
+            "stackOffset": null,
+            "resolvedType": "StormLinkStrc *"
+          },
+          {
+            "name": "piVar2",
+            "dataType": "uint",
+            "size": 4,
+            "storage": "HASH:5f73162679:4",
+            "stackOffset": null,
+            "resolvedType": "uint"
+          }
+        ],
+        "tags": [
+          {
+            "type": "llm-artifact-fix"
+          },
+          {
+            "type": "proto-asm-verified"
+          },
+          {
+            "type": "x64-typing"
+          }
+        ],
+        "decompiled": "\n/* @function SFILE_InsertFileRecordIntoList5\n   @address Game.exe.ram:004184b0\n   @date 2026.06.06\n   @params\n     pNode: Stack[0x4]:4 (int * *)\n     nInsertMode: Stack[0x8]:4 (int32_t)\n     ppListHead: Stack[0xc]:4 (int * *)\n     ppListContainer: ECX:4 (int * *)\n   @description Diablo 2 1.14d reverse team\n   https://blizzhackers.dev\n   \n   Function uses custom registers for function arguments!\n   [int * * pNode@Stack[0x4]:4]\n   [int32_t nInsertMode@Stack[0x8]:4]\n   [int * * ppListHead@Stack[0xc]:4]\n   [int * * ppListContainer@ECX:4] */\n\nvoid __fastcall\nStorm::Source::SFile::SFILE_InsertFileRecordIntoList5\n          (int **ppListContainer,int **pNode,int32_t nInsertMode,int **ppListHead)\n\n{\n  StormLinkStrc *ppSlot;\n  StormLinkStrc **pLink;\n  int *piVar1;\n  StormLinkStrc *pEntry;\n  uint piVar2;\n  \n  ppSlot = (StormLinkStrc *)pNode;\n  if (pNode == (int **)0x0) {\n    ppSlot = (StormLinkStrc *)(ppListContainer + 1);\n  }\n  pEntry = ppSlot->pPrevLink;\n  if (pEntry != (StormLinkStrc *)0x0) {\n    piVar2 = ppSlot->pNext;\n    if ((int)piVar2 < 0) {\n      pLink = (StormLinkStrc **)~piVar2;\n    }\n    else {\n      pLink = (StormLinkStrc **)((int)ppSlot + (piVar2 - pEntry->pNext));\n    }\n    *pLink = pEntry;\n    ppSlot->pPrevLink->pNext = ppSlot->pNext;\n    ppSlot->pPrevLink = (StormLinkStrc *)0x0;\n    ppSlot->pNext = 0;\n  }\n  if (ppListHead == (int **)0x0) {\n    ppListHead = ppListContainer + 1;\n  }\n  if (nInsertMode != 1) {\n    pEntry = ((StormLinkStrc *)ppListHead)->pPrevLink;\n    ppSlot->pPrevLink = pEntry;\n    ppSlot->pNext = pEntry->pNext;\n    pEntry->pNext = (intptr_t)pNode;\n    ((StormLinkStrc *)ppListHead)->pPrevLink = ppSlot;\n    return;\n  }\n  ppSlot->pPrevLink = (StormLinkStrc *)ppListHead;\n  ppSlot->pNext = ((StormLinkStrc *)ppListHead)->pNext;\n  piVar1 = *ppListContainer;\n  piVar2 = ((StormLinkStrc *)ppListHead)->pNext;\n  if ((int)piVar2 < 0) {\n    *(StormLinkStrc **)~piVar2 = ppSlot;\n    ((StormLinkStrc *)ppListHead)->pNext = (intptr_t)pNode;\n    return;\n  }\n  if ((int)piVar1 < 0) {\n    piVar1 = (int *)((int)ppListHead - ((StormLinkStrc *)ppListHead)->pPrevLink->pNext);\n  }\n  *(StormLinkStrc **)(piVar2 + (int)piVar1) = ppSlot;\n  ((StormLinkStrc *)ppListHead)->pNext = (intptr_t)pNode;\n  return;\n}\n\n",
+        "branchLayout": {
+          "lineCount": 75,
+          "lines": [
+            [
+              31,
+              [
+                13
+              ]
+            ],
+            [
+              35,
+              [
+                22
+              ]
+            ],
+            [
+              37,
+              [
+                29
+              ]
+            ],
+            [
+              48,
+              [
+                70
+              ]
+            ],
+            [
+              51,
+              [
+                81
+              ]
+            ],
+            [
+              52,
+              [
+                83
+              ]
+            ],
+            [
+              59,
+              [
+                105
+              ]
+            ],
+            [
+              63,
+              [
+                120
+              ]
+            ],
+            [
+              68,
+              [
+                138
+              ]
+            ]
+          ],
+          "ifs": [
+            [
+              31,
+              13
+            ],
+            [
+              35,
+              22
+            ],
+            [
+              37,
+              29
+            ],
+            [
+              48,
+              70
+            ],
+            [
+              51,
+              81
+            ],
+            [
+              63,
+              120
+            ],
+            [
+              68,
+              138
+            ]
+          ],
+          "tests": [
+            [
+              31,
+              {
+                "op": "==",
+                "mnemonic": "TEST",
+                "reg": "EBX",
+                "k": 0,
+                "size": 4,
+                "at": 7
+              }
+            ],
+            [
+              35,
+              {
+                "op": "!=",
+                "mnemonic": "TEST",
+                "reg": "EDI",
+                "k": 0,
+                "size": 4,
+                "at": 20
+              }
+            ],
+            [
+              48,
+              {
+                "op": "==",
+                "mnemonic": "TEST",
+                "reg": "EDX",
+                "k": 0,
+                "size": 4,
+                "at": 68
+              }
+            ],
+            [
+              51,
+              {
+                "op": "!=",
+                "mnemonic": "SUB",
+                "reg": "ESI",
+                "k": 1,
+                "size": 4,
+                "at": 78,
+                "delta": 1
+              }
+            ]
+          ]
+        }
+      },
+      "tu": "3rdparty/Storm/Source/SFile",
+      "dh": "6be1ec44",
+      "existingMatchControl": true,
+      "expectedCurrentMain": "// 1.14d: 004184b0\nvoid __thiscall SFILE_InsertFileRecordIntoList5(int * * ppListContainer, int * * pNode, int32_t nInsertMode, int * * ppListHead) {\n    StormLinkStrc* ppSlot = (StormLinkStrc*)pNode;\n    if (!pNode) {\n      ppSlot = (StormLinkStrc*)(ppListContainer + 1);\n    }\n\n    StormLinkStrc* pEntry = ppSlot->pPrevLink;\n    if (pEntry) {\n      StormLinkStrc** pLink;\n      pLink = (StormLinkStrc**)D2_StormNextLink(ppSlot, -1);\n      *pLink = pEntry;\n      ppSlot->pPrevLink->pNext = ppSlot->pNext;\n      ppSlot->pPrevLink = 0;\n      ppSlot->pNext = 0;\n    }\n    if (!ppListHead) {\n      ppListHead = ppListContainer + 1;\n    }\n\n    switch (nInsertMode) {\n      case 1:\n        {\n          ppSlot->pPrevLink = (StormLinkStrc*)ppListHead;\n          ppSlot->pNext = ((StormLinkStrc*)ppListHead)->pNext;\n          *(StormLinkStrc**)D2_StormNextLink((StormLinkStrc*)ppListHead, (intptr_t)*ppListContainer) = (StormLinkStrc*)ppSlot;\n          ((StormLinkStrc*)ppListHead)->pNext = (intptr_t)pNode;\n          return;\n        }\n      default:\n        {\n          pEntry = ((StormLinkStrc*)ppListHead)->pPrevLink;\n          ppSlot->pPrevLink = pEntry;\n          ppSlot->pNext = pEntry->pNext;\n          pEntry->pNext = (intptr_t)pNode;\n          ((StormLinkStrc*)ppListHead)->pPrevLink = ppSlot;\n          return;\n        }\n    }\n}"
+    },
+    {
+      "fn": {
+        "name": "SSYSTEM_ListUnlinkAndInsert",
+        "address": "0041c580",
+        "entryPoint": "0041c580",
+        "signature": "void SSYSTEM_ListUnlinkAndInsert(int * * pList, int * * pNode, int32_t nInsertMode, int * * ppTarget)",
+        "returnType": "void",
+        "callingConvention": "__fastcall",
+        "size": 161,
+        "isThunk": false,
+        "isExternal": false,
+        "hasVarArgs": false,
+        "namespace": "Storm::Source::SErr",
+        "comment": "@function SSYSTEM_ListUnlinkAndInsert\n@address Game.exe.ram:0041c580\n@date 2026.06.12\n@params\n  pNode: Stack[0x4]:4 (int * *)\n  nInsertMode: Stack[0x8]:4 (int32_t)\n  ppTarget: Stack[0xc]:4 (int * *)\n  pList: ECX:4 (int * *)\n@description Diablo 2 1.14d reverse team\nhttps://blizzhackers.dev\n\nFunction uses custom registers for function arguments!\n[int * * pNode@Stack[0x4]:4]\n[int32_t nInsertMode@Stack[0x8]:4]\n[int * * ppTarget@Stack[0xc]:4]\n[int * * pList@ECX:4]",
+        "sourceFile": null,
+        "sourceLine": null,
+        "sourceInfo": null,
+        "parameters": [
+          {
+            "name": "pList",
+            "dataType": "int * *",
+            "size": 4,
+            "ordinal": 0,
+            "storage": "ECX:4",
+            "stackOffset": null,
+            "resolvedType": null
+          },
+          {
+            "name": "pNode",
+            "dataType": "int * *",
+            "size": 4,
+            "ordinal": 1,
+            "storage": "Stack[0x4]:4",
+            "stackOffset": 4,
+            "resolvedType": null
+          },
+          {
+            "name": "nInsertMode",
+            "dataType": "int32_t",
+            "size": 4,
+            "ordinal": 2,
+            "storage": "Stack[0x8]:4",
+            "stackOffset": 8,
+            "resolvedType": null
+          },
+          {
+            "name": "ppTarget",
+            "dataType": "int * *",
+            "size": 4,
+            "ordinal": 3,
+            "storage": "Stack[0xc]:4",
+            "stackOffset": 12,
+            "resolvedType": null
+          }
+        ],
+        "localVariables": [
+          {
+            "name": "pEffectiveNode",
+            "dataType": "StormLinkStrc *",
+            "size": 4,
+            "storage": "EAX:4",
+            "stackOffset": null,
+            "resolvedType": null
+          },
+          {
+            "name": "ppPrevLink",
+            "dataType": "StormLinkStrc * *",
+            "size": 4,
+            "storage": "ESI:4",
+            "stackOffset": null,
+            "resolvedType": null
+          },
+          {
+            "name": "pLink",
+            "dataType": "StormLinkStrc *",
+            "size": 4,
+            "storage": "HASH:5f0ec5b4c3:4",
+            "stackOffset": null,
+            "resolvedType": "StormLinkStrc *"
+          },
+          {
+            "name": "piVar2",
+            "dataType": "uint",
+            "size": 4,
+            "storage": "HASH:5faa573f06:4",
+            "stackOffset": null,
+            "resolvedType": "uint"
+          }
+        ],
+        "tags": [
+          {
+            "type": "structural-1103"
+          },
+          {
+            "type": "llm-artifact-fix"
+          },
+          {
+            "type": "proto-asm-verified"
+          },
+          {
+            "type": "x64-typing"
+          }
+        ],
+        "decompiled": "\n/* @function SSYSTEM_ListUnlinkAndInsert\n   @address Game.exe.ram:0041c580\n   @date 2026.06.12\n   @params\n     pNode: Stack[0x4]:4 (int * *)\n     nInsertMode: Stack[0x8]:4 (int32_t)\n     ppTarget: Stack[0xc]:4 (int * *)\n     pList: ECX:4 (int * *)\n   @description Diablo 2 1.14d reverse team\n   https://blizzhackers.dev\n   \n   Function uses custom registers for function arguments!\n   [int * * pNode@Stack[0x4]:4]\n   [int32_t nInsertMode@Stack[0x8]:4]\n   [int * * ppTarget@Stack[0xc]:4]\n   [int * * pList@ECX:4] */\n\nvoid __fastcall\nStorm::Source::SErr::SSYSTEM_ListUnlinkAndInsert\n          (int **pList,int **pNode,int32_t nInsertMode,int **ppTarget)\n\n{\n  StormLinkStrc *pEffectiveNode;\n  StormLinkStrc **ppPrevLink;\n  int *piVar1;\n  StormLinkStrc *pLink;\n  uint piVar2;\n  \n  pEffectiveNode = (StormLinkStrc *)pNode;\n  if (pNode == (int **)0x0) {\n    pEffectiveNode = (StormLinkStrc *)(pList + 1);\n  }\n  pLink = pEffectiveNode->pPrevLink;\n  if (pLink != (StormLinkStrc *)0x0) {\n    piVar2 = pEffectiveNode->pNext;\n    if ((int)piVar2 < 0) {\n      ppPrevLink = (StormLinkStrc **)~piVar2;\n    }\n    else {\n      ppPrevLink = (StormLinkStrc **)((int)pEffectiveNode + (piVar2 - pLink->pNext));\n    }\n    *ppPrevLink = pLink;\n    pEffectiveNode->pPrevLink->pNext = pEffectiveNode->pNext;\n    pEffectiveNode->pPrevLink = (StormLinkStrc *)0x0;\n    pEffectiveNode->pNext = 0;\n  }\n  if (ppTarget == (int **)0x0) {\n    ppTarget = pList + 1;\n  }\n  if (nInsertMode != 1) {\n    pLink = ((StormLinkStrc *)ppTarget)->pPrevLink;\n    pEffectiveNode->pPrevLink = pLink;\n    pEffectiveNode->pNext = pLink->pNext;\n    pLink->pNext = (intptr_t)pNode;\n    ((StormLinkStrc *)ppTarget)->pPrevLink = pEffectiveNode;\n    return;\n  }\n  pEffectiveNode->pPrevLink = (StormLinkStrc *)ppTarget;\n  pEffectiveNode->pNext = ((StormLinkStrc *)ppTarget)->pNext;\n  piVar1 = *pList;\n  piVar2 = ((StormLinkStrc *)ppTarget)->pNext;\n  if ((int)piVar2 < 0) {\n    *(StormLinkStrc **)~piVar2 = pEffectiveNode;\n    ((StormLinkStrc *)ppTarget)->pNext = (intptr_t)pNode;\n    return;\n  }\n  if ((int)piVar1 < 0) {\n    piVar1 = (int *)((int)ppTarget - ((StormLinkStrc *)ppTarget)->pPrevLink->pNext);\n  }\n  *(StormLinkStrc **)(piVar2 + (int)piVar1) = pEffectiveNode;\n  ((StormLinkStrc *)ppTarget)->pNext = (intptr_t)pNode;\n  return;\n}\n\n",
+        "branchLayout": {
+          "lineCount": 75,
+          "lines": [
+            [
+              31,
+              [
+                13
+              ]
+            ],
+            [
+              35,
+              [
+                22
+              ]
+            ],
+            [
+              37,
+              [
+                29
+              ]
+            ],
+            [
+              48,
+              [
+                70
+              ]
+            ],
+            [
+              51,
+              [
+                81
+              ]
+            ],
+            [
+              52,
+              [
+                83
+              ]
+            ],
+            [
+              59,
+              [
+                105
+              ]
+            ],
+            [
+              63,
+              [
+                120
+              ]
+            ],
+            [
+              68,
+              [
+                138
+              ]
+            ]
+          ],
+          "ifs": [
+            [
+              31,
+              13
+            ],
+            [
+              35,
+              22
+            ],
+            [
+              37,
+              29
+            ],
+            [
+              48,
+              70
+            ],
+            [
+              51,
+              81
+            ],
+            [
+              63,
+              120
+            ],
+            [
+              68,
+              138
+            ]
+          ],
+          "tests": [
+            [
+              31,
+              {
+                "op": "==",
+                "mnemonic": "TEST",
+                "reg": "EBX",
+                "k": 0,
+                "size": 4,
+                "at": 7
+              }
+            ],
+            [
+              35,
+              {
+                "op": "!=",
+                "mnemonic": "TEST",
+                "reg": "EDI",
+                "k": 0,
+                "size": 4,
+                "at": 20
+              }
+            ],
+            [
+              48,
+              {
+                "op": "==",
+                "mnemonic": "TEST",
+                "reg": "EDX",
+                "k": 0,
+                "size": 4,
+                "at": 68
+              }
+            ],
+            [
+              51,
+              {
+                "op": "!=",
+                "mnemonic": "SUB",
+                "reg": "ESI",
+                "k": 1,
+                "size": 4,
+                "at": 78,
+                "delta": 1
+              }
+            ]
+          ]
+        }
+      },
+      "tu": "3rdparty/Storm/Source/SErr",
+      "dh": "1d33c949",
+      "existingMatchControl": true,
+      "expectedCurrentMain": "// 1.14d: 0041c580\nvoid __thiscall SSYSTEM_ListUnlinkAndInsert(int * * pList, int * * pNode, int32_t nInsertMode, int * * ppTarget) {\n    StormLinkStrc* pEffectiveNode = (StormLinkStrc*)pNode;\n    if (!pNode) {\n      pEffectiveNode = (StormLinkStrc*)(pList + 1);\n    }\n\n    StormLinkStrc* pLink = pEffectiveNode->pPrevLink;\n    if (pLink) {\n      StormLinkStrc** ppPrevLink;\n      ppPrevLink = (StormLinkStrc**)D2_StormNextLink(pEffectiveNode, -1);\n      *ppPrevLink = pLink;\n      pEffectiveNode->pPrevLink->pNext = pEffectiveNode->pNext;\n      pEffectiveNode->pPrevLink = 0;\n      pEffectiveNode->pNext = 0;\n    }\n    if (!ppTarget) {\n      ppTarget = pList + 1;\n    }\n\n    switch (nInsertMode) {\n      case 1:\n        {\n          pEffectiveNode->pPrevLink = (StormLinkStrc*)ppTarget;\n          pEffectiveNode->pNext = ((StormLinkStrc*)ppTarget)->pNext;\n          *(StormLinkStrc**)D2_StormNextLink((StormLinkStrc*)ppTarget, (intptr_t)*pList) = (StormLinkStrc*)pEffectiveNode;\n          ((StormLinkStrc*)ppTarget)->pNext = (intptr_t)pNode;\n          return;\n        }\n      default:\n        {\n          pLink = ((StormLinkStrc*)ppTarget)->pPrevLink;\n          pEffectiveNode->pPrevLink = pLink;\n          pEffectiveNode->pNext = pLink->pNext;\n          pLink->pNext = (intptr_t)pNode;\n          ((StormLinkStrc*)ppTarget)->pPrevLink = pEffectiveNode;\n          return;\n        }\n    }\n}"
+    },
+    {
+      "fn": {
+        "name": "LINKEDLIST_MoveNode",
+        "address": "0041ed90",
+        "entryPoint": "0041ed90",
+        "signature": "void LINKEDLIST_MoveNode(int * * pListHead, int * * pNode, int32_t nInsertAtHead, int * * pInsertRef)",
+        "returnType": "void",
+        "callingConvention": "__fastcall",
+        "size": 161,
+        "isThunk": false,
+        "isExternal": false,
+        "hasVarArgs": false,
+        "namespace": "Storm::Source::SComp",
+        "comment": "@function LINKEDLIST_MoveNode\n@address Game.exe.ram:0041ed90\n@date 2026.06.06\n@params\n  pNode: Stack[0x4]:4 (int * *)\n  nInsertAtHead: Stack[0x8]:4 (int32_t)\n  pInsertRef: Stack[0xc]:4 (int * *)\n  pListHead: ECX:4 (int * *)\n@description Diablo 2 1.14d reverse team\nhttps://blizzhackers.dev\n\nFunction uses custom registers for function arguments!\n[int * * pNode@Stack[0x4]:4]\n[int32_t nInsertAtHead@Stack[0x8]:4]\n[int * * pInsertRef@Stack[0xc]:4]\n[int * * pListHead@ECX:4]",
+        "sourceFile": null,
+        "sourceLine": null,
+        "sourceInfo": null,
+        "parameters": [
+          {
+            "name": "pListHead",
+            "dataType": "int * *",
+            "size": 4,
+            "ordinal": 0,
+            "storage": "ECX:4",
+            "stackOffset": null,
+            "resolvedType": null
+          },
+          {
+            "name": "pNode",
+            "dataType": "int * *",
+            "size": 4,
+            "ordinal": 1,
+            "storage": "Stack[0x4]:4",
+            "stackOffset": 4,
+            "resolvedType": null
+          },
+          {
+            "name": "nInsertAtHead",
+            "dataType": "int32_t",
+            "size": 4,
+            "ordinal": 2,
+            "storage": "Stack[0x8]:4",
+            "stackOffset": 8,
+            "resolvedType": null
+          },
+          {
+            "name": "pInsertRef",
+            "dataType": "int * *",
+            "size": 4,
+            "ordinal": 3,
+            "storage": "Stack[0xc]:4",
+            "stackOffset": 12,
+            "resolvedType": null
+          }
+        ],
+        "localVariables": [
+          {
+            "name": "pNodeCur",
+            "dataType": "StormLinkStrc *",
+            "size": 4,
+            "storage": "EAX:4",
+            "stackOffset": null,
+            "resolvedType": null
+          },
+          {
+            "name": "pLinkTarget",
+            "dataType": "StormLinkStrc * *",
+            "size": 4,
+            "storage": "ESI:4",
+            "stackOffset": null,
+            "resolvedType": null
+          },
+          {
+            "name": "pNeighbor",
+            "dataType": "StormLinkStrc *",
+            "size": 4,
+            "storage": "HASH:5f53031681:4",
+            "stackOffset": null,
+            "resolvedType": "StormLinkStrc *"
+          },
+          {
+            "name": "pNeighbor2",
+            "dataType": "uint",
+            "size": 4,
+            "storage": "HASH:5fb8cc9e94:4",
+            "stackOffset": null,
+            "resolvedType": "uint"
+          }
+        ],
+        "tags": [
+          {
+            "type": "llm-artifact-fix"
+          },
+          {
+            "type": "proto-asm-verified"
+          },
+          {
+            "type": "x64-typing"
+          }
+        ],
+        "decompiled": "\n/* @function LINKEDLIST_MoveNode\n   @address Game.exe.ram:0041ed90\n   @date 2026.06.06\n   @params\n     pNode: Stack[0x4]:4 (int * *)\n     nInsertAtHead: Stack[0x8]:4 (int32_t)\n     pInsertRef: Stack[0xc]:4 (int * *)\n     pListHead: ECX:4 (int * *)\n   @description Diablo 2 1.14d reverse team\n   https://blizzhackers.dev\n   \n   Function uses custom registers for function arguments!\n   [int * * pNode@Stack[0x4]:4]\n   [int32_t nInsertAtHead@Stack[0x8]:4]\n   [int * * pInsertRef@Stack[0xc]:4]\n   [int * * pListHead@ECX:4] */\n\nvoid __fastcall\nStorm::Source::SComp::LINKEDLIST_MoveNode\n          (int **pListHead,int **pNode,int32_t nInsertAtHead,int **pInsertRef)\n\n{\n  StormLinkStrc *pNodeCur;\n  StormLinkStrc **pLinkTarget;\n  int *piVar1;\n  StormLinkStrc *pNeighbor;\n  uint pNeighbor2;\n  \n  pNodeCur = (StormLinkStrc *)pNode;\n  if (pNode == (int **)0x0) {\n    pNodeCur = (StormLinkStrc *)(pListHead + 1);\n  }\n  pNeighbor = pNodeCur->pPrevLink;\n  if (pNeighbor != (StormLinkStrc *)0x0) {\n    pNeighbor2 = pNodeCur->pNext;\n    if ((int)pNeighbor2 < 0) {\n      pLinkTarget = (StormLinkStrc **)~pNeighbor2;\n    }\n    else {\n      pLinkTarget = (StormLinkStrc **)((int)pNodeCur + (pNeighbor2 - pNeighbor->pNext));\n    }\n    *pLinkTarget = pNeighbor;\n    pNodeCur->pPrevLink->pNext = pNodeCur->pNext;\n    pNodeCur->pPrevLink = (StormLinkStrc *)0x0;\n    pNodeCur->pNext = 0;\n  }\n  if (pInsertRef == (int **)0x0) {\n    pInsertRef = pListHead + 1;\n  }\n  if (nInsertAtHead != 1) {\n    pNeighbor = ((StormLinkStrc *)pInsertRef)->pPrevLink;\n    pNodeCur->pPrevLink = pNeighbor;\n    pNodeCur->pNext = pNeighbor->pNext;\n    pNeighbor->pNext = (intptr_t)pNode;\n    ((StormLinkStrc *)pInsertRef)->pPrevLink = pNodeCur;\n    return;\n  }\n  pNodeCur->pPrevLink = (StormLinkStrc *)pInsertRef;\n  pNodeCur->pNext = ((StormLinkStrc *)pInsertRef)->pNext;\n  piVar1 = *pListHead;\n  pNeighbor2 = ((StormLinkStrc *)pInsertRef)->pNext;\n  if ((int)pNeighbor2 < 0) {\n    *(StormLinkStrc **)~pNeighbor2 = pNodeCur;\n    ((StormLinkStrc *)pInsertRef)->pNext = (intptr_t)pNode;\n    return;\n  }\n  if ((int)piVar1 < 0) {\n    piVar1 = (int *)((int)pInsertRef - ((StormLinkStrc *)pInsertRef)->pPrevLink->pNext);\n  }\n  *(StormLinkStrc **)(pNeighbor2 + (int)piVar1) = pNodeCur;\n  ((StormLinkStrc *)pInsertRef)->pNext = (intptr_t)pNode;\n  return;\n}\n\n",
+        "branchLayout": {
+          "lineCount": 75,
+          "lines": [
+            [
+              31,
+              [
+                13
+              ]
+            ],
+            [
+              35,
+              [
+                22
+              ]
+            ],
+            [
+              37,
+              [
+                29
+              ]
+            ],
+            [
+              48,
+              [
+                70
+              ]
+            ],
+            [
+              51,
+              [
+                81
+              ]
+            ],
+            [
+              52,
+              [
+                83
+              ]
+            ],
+            [
+              59,
+              [
+                105
+              ]
+            ],
+            [
+              63,
+              [
+                120
+              ]
+            ],
+            [
+              68,
+              [
+                138
+              ]
+            ]
+          ],
+          "ifs": [
+            [
+              31,
+              13
+            ],
+            [
+              35,
+              22
+            ],
+            [
+              37,
+              29
+            ],
+            [
+              48,
+              70
+            ],
+            [
+              51,
+              81
+            ],
+            [
+              63,
+              120
+            ],
+            [
+              68,
+              138
+            ]
+          ],
+          "tests": [
+            [
+              31,
+              {
+                "op": "==",
+                "mnemonic": "TEST",
+                "reg": "EBX",
+                "k": 0,
+                "size": 4,
+                "at": 7
+              }
+            ],
+            [
+              35,
+              {
+                "op": "!=",
+                "mnemonic": "TEST",
+                "reg": "EDI",
+                "k": 0,
+                "size": 4,
+                "at": 20
+              }
+            ],
+            [
+              48,
+              {
+                "op": "==",
+                "mnemonic": "TEST",
+                "reg": "EDX",
+                "k": 0,
+                "size": 4,
+                "at": 68
+              }
+            ],
+            [
+              51,
+              {
+                "op": "!=",
+                "mnemonic": "SUB",
+                "reg": "ESI",
+                "k": 1,
+                "size": 4,
+                "at": 78,
+                "delta": 1
+              }
+            ]
+          ]
+        }
+      },
+      "tu": "3rdparty/Storm/Source/SComp",
+      "dh": "a620cf7a",
+      "existingMatchControl": true,
+      "expectedCurrentMain": "// 1.14d: 0041ed90\nvoid __thiscall LINKEDLIST_MoveNode(int * * pListHead, int * * pNode, int32_t nInsertAtHead, int * * pInsertRef) {\n    StormLinkStrc* pNodeCur = (StormLinkStrc*)pNode;\n    if (!pNode) {\n      pNodeCur = (StormLinkStrc*)(pListHead + 1);\n    }\n\n    StormLinkStrc* pNeighbor = pNodeCur->pPrevLink;\n    if (pNeighbor) {\n      StormLinkStrc** pLinkTarget;\n      pLinkTarget = (StormLinkStrc**)D2_StormNextLink(pNodeCur, -1);\n      *pLinkTarget = pNeighbor;\n      pNodeCur->pPrevLink->pNext = pNodeCur->pNext;\n      pNodeCur->pPrevLink = 0;\n      pNodeCur->pNext = 0;\n    }\n    if (!pInsertRef) {\n      pInsertRef = pListHead + 1;\n    }\n\n    switch (nInsertAtHead) {\n      case 1:\n        {\n          pNodeCur->pPrevLink = (StormLinkStrc*)pInsertRef;\n          pNodeCur->pNext = ((StormLinkStrc*)pInsertRef)->pNext;\n          *(StormLinkStrc**)D2_StormNextLink((StormLinkStrc*)pInsertRef, (intptr_t)*pListHead) = (StormLinkStrc*)pNodeCur;\n          ((StormLinkStrc*)pInsertRef)->pNext = (intptr_t)pNode;\n          return;\n        }\n      default:\n        {\n          pNeighbor = ((StormLinkStrc*)pInsertRef)->pPrevLink;\n          pNodeCur->pPrevLink = pNeighbor;\n          pNodeCur->pNext = pNeighbor->pNext;\n          pNeighbor->pNext = (intptr_t)pNode;\n          ((StormLinkStrc*)pInsertRef)->pPrevLink = pNodeCur;\n          return;\n        }\n    }\n}"
+    },
+    {
+      "fn": {
+        "name": "WND_InsertListNode",
+        "address": "00420540",
+        "entryPoint": "00420540",
+        "signature": "void WND_InsertListNode(int * * ppList, int * * pNode, int32_t nMode, int * * ppAnchor)",
+        "returnType": "void",
+        "callingConvention": "__fastcall",
+        "size": 161,
+        "isThunk": false,
+        "isExternal": false,
+        "hasVarArgs": false,
+        "namespace": "Storm::WindowHandle",
+        "comment": "@function WND_InsertListNode\n@address Game.exe.ram:00420540\n@date 2026.06.06\n@params\n  pNode: Stack[0x4]:4 (int * *)\n  nMode: Stack[0x8]:4 (int32_t)\n  ppAnchor: Stack[0xc]:4 (int * *)\n  ppList: ECX:4 (int * *)\n@description Diablo 2 1.14d reverse team\nhttps://blizzhackers.dev\n\nFunction uses custom registers for function arguments!\n[int * * pNode@Stack[0x4]:4]\n[int32_t nMode@Stack[0x8]:4]\n[int * * ppAnchor@Stack[0xc]:4]\n[int * * ppList@ECX:4]",
+        "sourceFile": null,
+        "sourceLine": null,
+        "sourceInfo": null,
+        "parameters": [
+          {
+            "name": "ppList",
+            "dataType": "int * *",
+            "size": 4,
+            "ordinal": 0,
+            "storage": "ECX:4",
+            "stackOffset": null,
+            "resolvedType": null
+          },
+          {
+            "name": "pNode",
+            "dataType": "int * *",
+            "size": 4,
+            "ordinal": 1,
+            "storage": "Stack[0x4]:4",
+            "stackOffset": 4,
+            "resolvedType": null
+          },
+          {
+            "name": "nMode",
+            "dataType": "int32_t",
+            "size": 4,
+            "ordinal": 2,
+            "storage": "Stack[0x8]:4",
+            "stackOffset": 8,
+            "resolvedType": null
+          },
+          {
+            "name": "ppAnchor",
+            "dataType": "int * *",
+            "size": 4,
+            "ordinal": 3,
+            "storage": "Stack[0xc]:4",
+            "stackOffset": 12,
+            "resolvedType": null
+          }
+        ],
+        "localVariables": [
+          {
+            "name": "ppCur",
+            "dataType": "StormLinkStrc *",
+            "size": 4,
+            "storage": "EAX:4",
+            "stackOffset": null,
+            "resolvedType": null
+          },
+          {
+            "name": "pBacklink",
+            "dataType": "StormLinkStrc * *",
+            "size": 4,
+            "storage": "ESI:4",
+            "stackOffset": null,
+            "resolvedType": null
+          },
+          {
+            "name": "piNext",
+            "dataType": "StormLinkStrc *",
+            "size": 4,
+            "storage": "HASH:5fea3bdfcf:4",
+            "stackOffset": null,
+            "resolvedType": "StormLinkStrc *"
+          },
+          {
+            "name": "piTmp",
+            "dataType": "uint",
+            "size": 4,
+            "storage": "HASH:5f4ea9540a:4",
+            "stackOffset": null,
+            "resolvedType": "uint"
+          }
+        ],
+        "tags": [
+          {
+            "type": "llm-artifact-fix"
+          },
+          {
+            "type": "proto-asm-verified"
+          },
+          {
+            "type": "x64-typing"
+          }
+        ],
+        "decompiled": "\n/* @function WND_InsertListNode\n   @address Game.exe.ram:00420540\n   @date 2026.06.06\n   @params\n     pNode: Stack[0x4]:4 (int * *)\n     nMode: Stack[0x8]:4 (int32_t)\n     ppAnchor: Stack[0xc]:4 (int * *)\n     ppList: ECX:4 (int * *)\n   @description Diablo 2 1.14d reverse team\n   https://blizzhackers.dev\n   \n   Function uses custom registers for function arguments!\n   [int * * pNode@Stack[0x4]:4]\n   [int32_t nMode@Stack[0x8]:4]\n   [int * * ppAnchor@Stack[0xc]:4]\n   [int * * ppList@ECX:4] */\n\nvoid __fastcall\nStorm::WindowHandle::WND_InsertListNode(int **ppList,int **pNode,int32_t nMode,int **ppAnchor)\n\n{\n  StormLinkStrc *ppCur;\n  StormLinkStrc **pBacklink;\n  int *piVar1;\n  StormLinkStrc *piNext;\n  uint piTmp;\n  \n  ppCur = (StormLinkStrc *)pNode;\n  if (pNode == (int **)0x0) {\n    ppCur = (StormLinkStrc *)(ppList + 1);\n  }\n  piNext = ppCur->pPrevLink;\n  if (piNext != (StormLinkStrc *)0x0) {\n    piTmp = ppCur->pNext;\n    if ((int)piTmp < 0) {\n      pBacklink = (StormLinkStrc **)~piTmp;\n    }\n    else {\n      pBacklink = (StormLinkStrc **)((int)ppCur + (piTmp - piNext->pNext));\n    }\n    *pBacklink = piNext;\n    ppCur->pPrevLink->pNext = ppCur->pNext;\n    ppCur->pPrevLink = (StormLinkStrc *)0x0;\n    ppCur->pNext = 0;\n  }\n  if (ppAnchor == (int **)0x0) {\n    ppAnchor = ppList + 1;\n  }\n  if (nMode != 1) {\n    piNext = ((StormLinkStrc *)ppAnchor)->pPrevLink;\n    ppCur->pPrevLink = piNext;\n    ppCur->pNext = piNext->pNext;\n    piNext->pNext = (intptr_t)pNode;\n    ((StormLinkStrc *)ppAnchor)->pPrevLink = ppCur;\n    return;\n  }\n  ppCur->pPrevLink = (StormLinkStrc *)ppAnchor;\n  ppCur->pNext = ((StormLinkStrc *)ppAnchor)->pNext;\n  piVar1 = *ppList;\n  piTmp = ((StormLinkStrc *)ppAnchor)->pNext;\n  if ((int)piTmp < 0) {\n    *(StormLinkStrc **)~piTmp = ppCur;\n    ((StormLinkStrc *)ppAnchor)->pNext = (intptr_t)pNode;\n    return;\n  }\n  if ((int)piVar1 < 0) {\n    piVar1 = (int *)((int)ppAnchor - ((StormLinkStrc *)ppAnchor)->pPrevLink->pNext);\n  }\n  *(StormLinkStrc **)(piTmp + (int)piVar1) = ppCur;\n  ((StormLinkStrc *)ppAnchor)->pNext = (intptr_t)pNode;\n  return;\n}\n\n",
+        "branchLayout": {
+          "lineCount": 74,
+          "lines": [
+            [
+              30,
+              [
+                13
+              ]
+            ],
+            [
+              34,
+              [
+                22
+              ]
+            ],
+            [
+              36,
+              [
+                29
+              ]
+            ],
+            [
+              47,
+              [
+                70
+              ]
+            ],
+            [
+              50,
+              [
+                81
+              ]
+            ],
+            [
+              51,
+              [
+                83
+              ]
+            ],
+            [
+              58,
+              [
+                105
+              ]
+            ],
+            [
+              62,
+              [
+                120
+              ]
+            ],
+            [
+              67,
+              [
+                138
+              ]
+            ]
+          ],
+          "ifs": [
+            [
+              30,
+              13
+            ],
+            [
+              34,
+              22
+            ],
+            [
+              36,
+              29
+            ],
+            [
+              47,
+              70
+            ],
+            [
+              50,
+              81
+            ],
+            [
+              62,
+              120
+            ],
+            [
+              67,
+              138
+            ]
+          ],
+          "tests": [
+            [
+              30,
+              {
+                "op": "==",
+                "mnemonic": "TEST",
+                "reg": "EBX",
+                "k": 0,
+                "size": 4,
+                "at": 7
+              }
+            ],
+            [
+              34,
+              {
+                "op": "!=",
+                "mnemonic": "TEST",
+                "reg": "EDI",
+                "k": 0,
+                "size": 4,
+                "at": 20
+              }
+            ],
+            [
+              47,
+              {
+                "op": "==",
+                "mnemonic": "TEST",
+                "reg": "EDX",
+                "k": 0,
+                "size": 4,
+                "at": 68
+              }
+            ],
+            [
+              50,
+              {
+                "op": "!=",
+                "mnemonic": "SUB",
+                "reg": "ESI",
+                "k": 1,
+                "size": 4,
+                "at": 78,
+                "delta": 1
+              }
+            ]
+          ]
+        }
+      },
+      "tu": "3rdparty/Storm/WindowHandle",
+      "dh": "79f5674b",
+      "existingMatchControl": true,
+      "expectedCurrentMain": "// 1.14d: 00420540\nvoid __thiscall WND_InsertListNode(int * * ppList, int * * pNode, int32_t nMode, int * * ppAnchor) {\n    StormLinkStrc* ppCur = (StormLinkStrc*)pNode;\n    if (!pNode) {\n      ppCur = (StormLinkStrc*)(ppList + 1);\n    }\n\n    StormLinkStrc* piNext = ppCur->pPrevLink;\n    if (piNext) {\n      StormLinkStrc** pBacklink;\n      pBacklink = (StormLinkStrc**)D2_StormNextLink(ppCur, -1);\n      *pBacklink = piNext;\n      ppCur->pPrevLink->pNext = ppCur->pNext;\n      ppCur->pPrevLink = 0;\n      ppCur->pNext = 0;\n    }\n    if (!ppAnchor) {\n      ppAnchor = ppList + 1;\n    }\n\n    switch (nMode) {\n      case 1:\n        {\n          ppCur->pPrevLink = (StormLinkStrc*)ppAnchor;\n          ppCur->pNext = ((StormLinkStrc*)ppAnchor)->pNext;\n          *(StormLinkStrc**)D2_StormNextLink((StormLinkStrc*)ppAnchor, (intptr_t)*ppList) = (StormLinkStrc*)ppCur;\n          ((StormLinkStrc*)ppAnchor)->pNext = (intptr_t)pNode;\n          return;\n        }\n      default:\n        {\n          piNext = ((StormLinkStrc*)ppAnchor)->pPrevLink;\n          ppCur->pPrevLink = piNext;\n          ppCur->pNext = piNext->pNext;\n          piNext->pNext = (intptr_t)pNode;\n          ((StormLinkStrc*)ppAnchor)->pPrevLink = ppCur;\n          return;\n        }\n    }\n}"
+    },
+    {
+      "fn": {
+        "name": "LINKEDLIST_LinkNode",
+        "address": "00426b00",
+        "entryPoint": "00426b00",
+        "signature": "void LINKEDLIST_LinkNode(int * * pList, int * * ppNodeSlot, int32_t nInsertMode, int * * ppTargetList)",
+        "returnType": "void",
+        "callingConvention": "__thiscall",
+        "size": 161,
+        "isThunk": false,
+        "isExternal": false,
+        "hasVarArgs": false,
+        "namespace": "Storm::Source::SEVT",
+        "comment": "@function LINKEDLIST_LinkNode\n@wasnamed LINKEDLIST_IsEmpty - WRONG in kind. It is not a predicate: it returns void and mutates\nlinks.\n@evidence The body unlinks the node from its current list (00426b12..00426b3a) and then relinks it\ninto a target list, at the head or the tail depending on nInsertMode != 1. Four arguments, confirmed\nfrom register use: ECX is read at 00426b0f (LEA EAX,[ECX+0x4]) before any write, so it is a genuine\nincoming register argument, and purge=12 accounts for the three stack arguments. A four-argument\nvoid relinker cannot be an emptiness test.\n@oracle The 1.10b PPC Storm .debug namespace gives TSList<T,TSGetLink<T>>::LinkNode(T*, unsigned long,\nT*) - three arguments plus this = four - while the real IsEmpty(void) const takes zero.\n@note The same relink body is instantiated at least seven more times in 1.14d and is named correctly\neverywhere else (ARCHIVE_LinkNode @0045bbe0, SFILE_InsertFileRecordIntoList1..5). This was the only\nfalse one.",
+        "sourceFile": null,
+        "sourceLine": null,
+        "sourceInfo": null,
+        "parameters": [
+          {
+            "name": "pList",
+            "dataType": "int * *",
+            "size": 4,
+            "ordinal": 0,
+            "storage": "ECX:4",
+            "stackOffset": null,
+            "resolvedType": null
+          },
+          {
+            "name": "ppNodeSlot",
+            "dataType": "int * *",
+            "size": 4,
+            "ordinal": 1,
+            "storage": "Stack[0x4]:4",
+            "stackOffset": 4,
+            "resolvedType": null
+          },
+          {
+            "name": "nInsertMode",
+            "dataType": "int32_t",
+            "size": 4,
+            "ordinal": 2,
+            "storage": "Stack[0x8]:4",
+            "stackOffset": 8,
+            "resolvedType": null
+          },
+          {
+            "name": "ppTargetList",
+            "dataType": "int * *",
+            "size": 4,
+            "ordinal": 3,
+            "storage": "Stack[0xc]:4",
+            "stackOffset": 12,
+            "resolvedType": null
+          }
+        ],
+        "localVariables": [
+          {
+            "name": "pTargetNode",
+            "dataType": "StormLinkStrc *",
+            "size": 4,
+            "storage": "EAX:4",
+            "stackOffset": null,
+            "resolvedType": null
+          },
+          {
+            "name": "pLinkSlot",
+            "dataType": "StormLinkStrc * *",
+            "size": 4,
+            "storage": "ESI:4",
+            "stackOffset": null,
+            "resolvedType": null
+          },
+          {
+            "name": "pPrevNode",
+            "dataType": "StormLinkStrc *",
+            "size": 4,
+            "storage": "HASH:5fc2e6d07c:4",
+            "stackOffset": null,
+            "resolvedType": "StormLinkStrc *"
+          },
+          {
+            "name": "piVar2",
+            "dataType": "uint",
+            "size": 4,
+            "storage": "HASH:5f66745bb9:4",
+            "stackOffset": null,
+            "resolvedType": "uint"
+          }
+        ],
+        "tags": [
+          {
+            "type": "x64-typing"
+          }
+        ],
+        "decompiled": "\n/* @function LINKEDLIST_LinkNode\n   @wasnamed LINKEDLIST_IsEmpty - WRONG in kind. It is not a predicate: it returns void and mutates\n   links.\n   @evidence The body unlinks the node from its current list (00426b12..00426b3a) and then relinks\n   it\n   into a target list, at the head or the tail depending on nInsertMode != 1. Four arguments,\n   confirmed\n   from register use: ECX is read at 00426b0f (LEA EAX,[ECX+0x4]) before any write, so it is a\n   genuine\n   incoming register argument, and purge=12 accounts for the three stack arguments. A four-argument\n   void relinker cannot be an emptiness test.\n   @oracle The 1.10b PPC Storm .debug namespace gives TSList<T,TSGetLink<T>>::LinkNode(T*, unsigned\n   long,\n   T*) - three arguments plus this = four - while the real IsEmpty(void) const takes zero.\n   @note The same relink body is instantiated at least seven more times in 1.14d and is named\n   correctly\n   everywhere else (ARCHIVE_LinkNode @0045bbe0, SFILE_InsertFileRecordIntoList1..5). This was the\n   only\n   false one. */\n\nvoid __thiscall\nStorm::Source::SEVT::LINKEDLIST_LinkNode\n          (int **pList,int **ppNodeSlot,int32_t nInsertMode,int **ppTargetList)\n\n{\n  StormLinkStrc *pTargetNode;\n  StormLinkStrc **pLinkSlot;\n  int *piVar1;\n  StormLinkStrc *pPrevNode;\n  uint piVar2;\n  \n  pTargetNode = (StormLinkStrc *)ppNodeSlot;\n  if (ppNodeSlot == (int **)0x0) {\n    pTargetNode = (StormLinkStrc *)(pList + 1);\n  }\n  pPrevNode = pTargetNode->pPrevLink;\n  if (pPrevNode != (StormLinkStrc *)0x0) {\n    piVar2 = pTargetNode->pNext;\n    if ((int)piVar2 < 0) {\n      pLinkSlot = (StormLinkStrc **)~piVar2;\n    }\n    else {\n      pLinkSlot = (StormLinkStrc **)((int)pTargetNode + (piVar2 - pPrevNode->pNext));\n    }\n    *pLinkSlot = pPrevNode;\n    pTargetNode->pPrevLink->pNext = pTargetNode->pNext;\n    pTargetNode->pPrevLink = (StormLinkStrc *)0x0;\n    pTargetNode->pNext = 0;\n  }\n  if (ppTargetList == (int **)0x0) {\n    ppTargetList = pList + 1;\n  }\n  if (nInsertMode != 1) {\n    pPrevNode = ((StormLinkStrc *)ppTargetList)->pPrevLink;\n    pTargetNode->pPrevLink = pPrevNode;\n    pTargetNode->pNext = pPrevNode->pNext;\n    pPrevNode->pNext = (intptr_t)ppNodeSlot;\n    ((StormLinkStrc *)ppTargetList)->pPrevLink = pTargetNode;\n    return;\n  }\n  pTargetNode->pPrevLink = (StormLinkStrc *)ppTargetList;\n  pTargetNode->pNext = ((StormLinkStrc *)ppTargetList)->pNext;\n  piVar1 = *pList;\n  piVar2 = ((StormLinkStrc *)ppTargetList)->pNext;\n  if ((int)piVar2 < 0) {\n    *(StormLinkStrc **)~piVar2 = pTargetNode;\n    ((StormLinkStrc *)ppTargetList)->pNext = (intptr_t)ppNodeSlot;\n    return;\n  }\n  if ((int)piVar1 < 0) {\n    piVar1 = (int *)((int)ppTargetList - ((StormLinkStrc *)ppTargetList)->pPrevLink->pNext);\n  }\n  *(StormLinkStrc **)(piVar2 + (int)piVar1) = pTargetNode;\n  ((StormLinkStrc *)ppTargetList)->pNext = (intptr_t)ppNodeSlot;\n  return;\n}\n\n",
+        "branchLayout": {
+          "lineCount": 78,
+          "lines": [
+            [
+              34,
+              [
+                13
+              ]
+            ],
+            [
+              38,
+              [
+                22
+              ]
+            ],
+            [
+              40,
+              [
+                29
+              ]
+            ],
+            [
+              51,
+              [
+                70
+              ]
+            ],
+            [
+              54,
+              [
+                81
+              ]
+            ],
+            [
+              55,
+              [
+                83
+              ]
+            ],
+            [
+              62,
+              [
+                105
+              ]
+            ],
+            [
+              66,
+              [
+                120
+              ]
+            ],
+            [
+              71,
+              [
+                138
+              ]
+            ]
+          ],
+          "ifs": [
+            [
+              34,
+              13
+            ],
+            [
+              38,
+              22
+            ],
+            [
+              40,
+              29
+            ],
+            [
+              51,
+              70
+            ],
+            [
+              54,
+              81
+            ],
+            [
+              66,
+              120
+            ],
+            [
+              71,
+              138
+            ]
+          ],
+          "tests": [
+            [
+              34,
+              {
+                "op": "==",
+                "mnemonic": "TEST",
+                "reg": "EBX",
+                "k": 0,
+                "size": 4,
+                "at": 7
+              }
+            ],
+            [
+              38,
+              {
+                "op": "!=",
+                "mnemonic": "TEST",
+                "reg": "EDI",
+                "k": 0,
+                "size": 4,
+                "at": 20
+              }
+            ],
+            [
+              51,
+              {
+                "op": "==",
+                "mnemonic": "TEST",
+                "reg": "EDX",
+                "k": 0,
+                "size": 4,
+                "at": 68
+              }
+            ],
+            [
+              54,
+              {
+                "op": "!=",
+                "mnemonic": "SUB",
+                "reg": "ESI",
+                "k": 1,
+                "size": 4,
+                "at": 78,
+                "delta": 1
+              }
+            ]
+          ]
+        }
+      },
+      "tu": "3rdparty/Storm/Source/SEVT",
+      "dh": "68d01e92",
+      "existingMatchControl": true,
+      "expectedCurrentMain": "// @wasnamed LINKEDLIST_IsEmpty - WRONG in kind. It is not a predicate: it returns void and mutates\n// links.\n// @evidence The body unlinks the node from its current list (00426b12..00426b3a) and then relinks it\n// into a target list, at the head or the tail depending on nInsertMode != 1. Four arguments, confirmed\n// from register use: ECX is read at 00426b0f (LEA EAX,[ECX+0x4]) before any write, so it is a genuine\n// incoming register argument, and purge=12 accounts for the three stack arguments. A four-argument\n// void relinker cannot be an emptiness test.\n// @oracle The 1.10b PPC Storm .debug namespace gives TSList<T,TSGetLink<T>>::LinkNode(T*, unsigned long,\n// T*) - three arguments plus this = four - while the real IsEmpty(void) const takes zero.\n// @note The same relink body is instantiated at least seven more times in 1.14d and is named correctly\n// everywhere else (ARCHIVE_LinkNode @0045bbe0, SFILE_InsertFileRecordIntoList1..5). This was the only\n// false one.\n// 1.14d: 00426b00\nvoid __thiscall LINKEDLIST_LinkNode(int * * pList, int * * ppNodeSlot, int32_t nInsertMode, int * * ppTargetList) {\n    StormLinkStrc* pTargetNode = (StormLinkStrc*)ppNodeSlot;\n    if (!ppNodeSlot) {\n      pTargetNode = (StormLinkStrc*)(pList + 1);\n    }\n\n    StormLinkStrc* pPrevNode = pTargetNode->pPrevLink;\n    if (pPrevNode) {\n      StormLinkStrc** pLinkSlot;\n      pLinkSlot = (StormLinkStrc**)D2_StormNextLink(pTargetNode, -1);\n      *pLinkSlot = pPrevNode;\n      pTargetNode->pPrevLink->pNext = pTargetNode->pNext;\n      pTargetNode->pPrevLink = 0;\n      pTargetNode->pNext = 0;\n    }\n    if (!ppTargetList) {\n      ppTargetList = pList + 1;\n    }\n\n    switch (nInsertMode) {\n      case 1:\n        {\n          pTargetNode->pPrevLink = (StormLinkStrc*)ppTargetList;\n          pTargetNode->pNext = ((StormLinkStrc*)ppTargetList)->pNext;\n          *(StormLinkStrc**)D2_StormNextLink((StormLinkStrc*)ppTargetList, (intptr_t)*pList) = (StormLinkStrc*)pTargetNode;\n          ((StormLinkStrc*)ppTargetList)->pNext = (intptr_t)ppNodeSlot;\n          return;\n        }\n      default:\n        {\n          pPrevNode = ((StormLinkStrc*)ppTargetList)->pPrevLink;\n          pTargetNode->pPrevLink = pPrevNode;\n          pTargetNode->pNext = pPrevNode->pNext;\n          pPrevNode->pNext = (intptr_t)ppNodeSlot;\n          ((StormLinkStrc*)ppTargetList)->pPrevLink = pTargetNode;\n          return;\n        }\n    }\n}"
     }
   ],
   "native": {
-    "functions": 3,
+    "functions": 13,
+    "newMatches": 4,
+    "existingMatchControls": 9,
     "bytesPerFunction": 161,
     "instructionsPerFunction": 73,
     "rawSHA256": "3f533273f098c3cb7fad91a32b8fba6bbca2e5bc030435abaf0dd24b1c7b42d0"
   },
-  "provenance": "Current read-only live resolved function/type models and normal template/member model; Archive is an ordinary function. All7conditional branches,4equality tokens and2insertion-arm entry instructions per function manually native-attested; all3original161-byte functions literally identical and equal the reference PE. Normal branch-layout mapper consumed these facts. This is not an owning extractor snapshot; native gains require full-TU replay."
+  "provenance": "Resolved read-only live function/type models and normal template/member registry; only two template instantiations are COMDATs. All7conditional branches,4equality tokens and2insertion-arm entries per function manually native-attested. All13original161-byte PE bodies literally identical; Fog live memory and contiguous assembly also agree with PE. Normal branch-layout mapper consumed these facts. Main controls and candidates replayed in9completeTUs/513rows:4localMATCHgains,0losses; all9existingMATCHcontrols emit exactly the current-main C++. Not an owning extraction snapshot."
 }
