@@ -37,11 +37,27 @@
  *   if (C) { fail; return; }                       -> block ending in D2_CHECKS_END_VOID(fail)
  *   if (C) { fail; } else E   followed by `return R;` (or the end of a void function)
  *                                                  -> the block, then E, then the return
+ *
+ * A check that also blanks an out parameter (Storm's VALIDATEANDBLANK) is no mask: it is
+ * `if (p) *p = 0; else <accumulator> = 0`, one TEST and a conditional jump, and the block's
+ * failure arm is laid out after the code that follows the check. The decompiler folds the
+ * accumulator away and leaves `if (p) { *p = 0; ...leaves... } fail; return R;`, which VC8
+ * lays out with the failure arm at the end of the function (SFILE_GetFileTime 004160f0,
+ * SFileGetArchiveName 00416030). Written back as
+ *
+ *     D2_CHECKS_BEGIN;
+ *     D2_CHECK_BLANK(p, *p = 0);
+ *     D2_CHECKS_END(SErr::SErrSetLastError(0x57), R);
+ *     ...the rest of the arm...
+ *
+ * Gated on one leaf that is a bare name, tested by a TEST or CMP (not a NEG), whose arm opens
+ * with a store of zero through that name (behind calls that never name it) and always leaves. Value-preserving: the store runs
+ * exactly when the name is non-null, the failure arm exactly when it is null.
  */
 
 import { NodeKind } from '../../../ast/kinds.js';
 import type {
-  AnyNode, ASTNode, BinaryExpr, CallExpr, CompoundStmt, DeclStmt, ExprStmt, Expression,
+  AnyNode, ASTNode, AssignExpr, BinaryExpr, CallExpr, CharLiteralExpr, CompoundStmt, CStyleCastExpr, DeclStmt, ExprStmt, Expression,
   FunctionDecl, IfStmt, IntegerLiteralExpr, MemberExpr, ParenExpr, ReturnStmt, Statement, UnaryExpr,
   VariableDecl, BuiltinType,
 } from '../../../ast/nodes.js';
@@ -57,6 +73,7 @@ export const CHECKS_BEGIN = 'D2_CHECKS_BEGIN';
 export const CHECK = 'D2_CHECK';
 export const CHECKS_END = 'D2_CHECKS_END';
 export const CHECKS_END_VOID = 'D2_CHECKS_END_VOID';
+export const CHECK_BLANK = 'D2_CHECK_BLANK';
 
 /** The macros' text; the platform header includes it verbatim. C++03, so VC8 compiles it too. */
 export const CHECK_BLOCK_SUPPORT_LINES: readonly string[] = [
@@ -73,6 +90,7 @@ export const CHECK_BLOCK_SUPPORT_LINES: readonly string[] = [
   `#define ${CHECK}(c) d2Checks_ &= (c) ? -1 : 0`,
   `#define ${CHECKS_END}(fail, r) if (!d2Checks_) { fail; return r; } D2_CHECKS_ASSUME_(d2Checks_); } while (0)`,
   `#define ${CHECKS_END_VOID}(fail) if (!d2Checks_) { fail; return; } D2_CHECKS_ASSUME_(d2Checks_); } while (0)`,
+  `#define ${CHECK_BLANK}(c, blank) if (c) blank; else d2Checks_ = 0`,
 ];
 
 export interface ParamCheckBlockOptions extends PluginOptions {
@@ -83,7 +101,7 @@ export interface ParamCheckBlockOptions extends PluginOptions {
   /** The code it is called with. */
   errorCode?: number;
   /** Called once per rewritten block. */
-  onSite?: (site: { line: number; checks: number; form: 'return' | 'void' | 'else' }) => void;
+  onSite?: (site: { line: number; checks: number; form: 'return' | 'void' | 'else' | 'blank' }) => void;
   /** Called once per failure arm left as it is, with the reason. */
   onLeft?: (site: { line: number; why: string }) => void;
 }
@@ -166,6 +184,50 @@ function alwaysLeaves(s: Statement): boolean {
     return !!i.elseBranch && alwaysLeaves(i.thenBranch) && alwaysLeaves(i.elseBranch);
   }
   return false;
+}
+
+/** The name a pure leaf tests for non-null: `p`, `p != 0`, `(T)p`; undefined otherwise. */
+function testedName(leaf: Expression): string | undefined {
+  let x = stripParens(leaf);
+  if (x.kind === NodeKind.BinaryExpr && (x as BinaryExpr).operator === '!=') {
+    const r = stripParens((x as BinaryExpr).right);
+    if (!(r.kind === NodeKind.NullptrLiteral || (r.kind === NodeKind.IntegerLiteral && (r as IntegerLiteralExpr).value === 0n))) return undefined;
+    x = stripParens((x as BinaryExpr).left);
+  }
+  while (x.kind === NodeKind.CStyleCastExpr) x = stripParens((x as CStyleCastExpr).expression);
+  return x.kind === NodeKind.Identifier ? emit(x as AnyNode) : undefined;
+}
+
+/** Whether `s` is `*p = 0` (through casts of `p`) for the name `p`. */
+function isBlankStore(s: Statement, name: string): boolean {
+  if (s.kind !== NodeKind.ExprStmt) return false;
+  const a = stripParens((s as ExprStmt).expression);
+  if (a.kind !== NodeKind.AssignExpr || (a as AssignExpr).operator !== '=') return false;
+  const lhs = stripParens((a as AssignExpr).left);
+  const rhs = stripParens((a as AssignExpr).right);
+  const zero = (rhs.kind === NodeKind.IntegerLiteral && (rhs as IntegerLiteralExpr).value === 0n)
+    || (rhs.kind === NodeKind.CharLiteral && (rhs as CharLiteralExpr).value === 0);
+  if (!zero || lhs.kind !== NodeKind.UnaryExpr || (lhs as UnaryExpr).operator !== '*') return false;
+  let p = stripParens((lhs as UnaryExpr).operand);
+  while (p.kind === NodeKind.CStyleCastExpr) p = stripParens((p as CStyleCastExpr).expression);
+  return p.kind === NodeKind.Identifier && emit(p as AnyNode) === name;
+}
+
+/**
+ * Where the blank store of `name` opens an arm: the first statement, or one behind calls that
+ * never name it (the decompiler can print the store after a call the original stored before;
+ * the store-order facts put it back first). -1 when there is none.
+ */
+function blankStoreIndex(arm: readonly Statement[], name: string): number {
+  for (let k = 0; k < arm.length; k++) {
+    if (isBlankStore(arm[k], name)) return k;
+    const s = arm[k];
+    if (s.kind !== NodeKind.ExprStmt || stripParens((s as ExprStmt).expression).kind !== NodeKind.CallExpr) return -1;
+    for (const n of traverseAST((s as ExprStmt).expression)) {
+      if (n.kind === NodeKind.Identifier && emit(n as AnyNode) === name) return -1;
+    }
+  }
+  return -1;
 }
 
 function isVoid(fn: FunctionDecl): boolean {
@@ -281,6 +343,25 @@ function createParamCheckBlockTransformer(options: ParamCheckBlockOptions = {}):
         if (!leaves.every(pureLeaf)) { left('a check has a side effect or can fault'); continue; }
         const tests = headerTests(ifs);
         if (!tests || tests.length !== leaves.length) { left(`${tests?.length ?? 'no'} equality tests for ${leaves.length} checks`); continue; }
+        // `if (p) { *p = 0; ...leaves... } fail; return R;` or `if (!p) { fail; return R; } *p = 0; ...`
+        const guardForm = negated && !passArm && failing.ret !== undefined && alwaysLeaves(Stmt.compound(after));
+        const blankArm = leaves.length === 1 && tests[0].mnemonic !== 'NEG'
+          ? (consumed > 0 ? statementsOf(ifs.thenBranch) : guardForm ? after : null) : null;
+        const blankName = blankArm ? testedName(negated ? negate(leaves[0]) : leaves[0]) : undefined;
+        const at = blankArm && blankName ? blankStoreIndex(blankArm, blankName) : -1;
+        if (blankArm && at >= 0 && blankArm.length > at + 1) {
+          out.push(Stmt.expr(Expr.identifier(CHECKS_BEGIN)));
+          out.push(Stmt.expr(Expr.call(CHECK_BLANK, [macroArg(negated ? negate(leaves[0]) : leaves[0]), (blankArm[at] as ExprStmt).expression])));
+          out.push(Stmt.expr(ret === null
+            ? Expr.call(CHECKS_END_VOID, [failing.call])
+            : Expr.call(CHECKS_END, [failing.call, macroArg(ret)])));
+          const rest = [...blankArm.slice(0, at), ...blankArm.slice(at + 1)];
+          out.push(...(consumed > 0 && declaredNames(rest).some(n => outer.has(n)) ? [Stmt.compound(rest)] : rest));
+          i += consumed > 0 ? consumed : after.length;
+          changed = true;
+          options.onSite?.({ line: ifs.location?.start?.line ?? 0, checks: 1, form: 'blank' });
+          continue;
+        }
         if (!tests.every(t => t.mnemonic === 'NEG')) { left(`a test on ${tests.find(t => t.mnemonic !== 'NEG')!.mnemonic}, not a mask`); continue; }
         if (leaves.length > 1) {
           const ops = reader.operandBranches(ifs, leaves.length);
