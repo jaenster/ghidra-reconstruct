@@ -553,6 +553,11 @@ export {
 } from './builtins/record-null-fold.js';
 
 export {
+  flagBitGetterPlugin,
+  type FlagBitGetterOptions,
+} from './builtins/flag-bit-getter.js';
+
+export {
   applyVc8Forms,
   definitionOf,
   parseVc8Form,
@@ -990,6 +995,7 @@ import { recordGetterGuardPlugin } from './builtins/record-getter-guard.js';
 import { recordGetterSplitPlugin } from './builtins/record-getter-split.js';
 import { getterTwinPlugin } from './builtins/getter-twin.js';
 import { recordNullFoldPlugin } from './builtins/record-null-fold.js';
+import { flagBitGetterPlugin } from './builtins/flag-bit-getter.js';
 import { armConstantCallPlugin } from './builtins/arm-constant-call.js';
 import { fieldPointerFoldPlugin } from './builtins/field-pointer-fold.js';
 import { newResultTempPlugin } from './builtins/new-result-temp.js';
@@ -1239,6 +1245,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   declInitMergePlugin,        // Cleanup: int x; x = expr; → int x = expr; (priority 60)
   recordGetterGuardPlugin,    // Matching: an inlined record getter's guard gets its pointer local, read through (priority 60.5)
   recordGetterSplitPlugin,    // Matching: a record getter's split range tests and null test become one conditional pointer again (priority 60.55)
+  flagBitGetterPlugin,        // Matching: a flag bit the original ANDs in a register reads through a null-guarded getter (priority 989.9)
   recordNullFoldPlugin,       // Matching: a null guard before a record lookup through the pointer goes into its condition (priority 60.56)
   getterTwinPlugin,           // Matching: a getter the callers expanded in place calls its forced-inline twin (priority 60.58)
   fieldPointerFoldPlugin,     // Matching: a field-pointer temporary goes; the field updated in place or the record held (priority 62.5)

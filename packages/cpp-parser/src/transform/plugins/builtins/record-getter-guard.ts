@@ -22,7 +22,9 @@
  * function never reads gets its local too: the original tests the pointer the add left
  * in a register, and with the sum printed inside the condition VC8 colours the table and
  * the index differently (Skills_CltDoFunc_Sor_SimpleMakeMissile 004e3a30, a null test
- * only). Reads it may not route still leave the guard as printed.
+ * only). So does a leaving `!`-guard with no read of the record anywhere after it: it
+ * still tests the sum as a value (`p = getter; if (!p) return;`), which the printed chain
+ * does not. Reads it may not route still leave the guard as printed.
  *
  * The getter can also be one run of a longer chain: conditions before it, conditions
  * after it that read the record, an else-if arm, the index loaded by the chain itself as
@@ -610,10 +612,15 @@ function rewriteFunction(fn: FunctionDecl, opts: RecordGetterGuardOptions): Func
       }
       return n;
     };
-    // No read to route: take the getter only when the function reads the record nowhere
-    // else (a null test alone); reads it may not route leave the guard as printed.
+    // No read to route: take the getter when the function reads the record nowhere else
+    // (a null test alone), or when it is a leaving `!`-guard with no read after it: the
+    // decompile prints `base + i` as an operand only because the original tests the sum,
+    // and VC8 tests it only when it is a value of its own. Reads it may not route leave
+    // the guard as printed.
+    const bare = plain && (negated || failure) && !ifs.elseBranch
+      && block.statements.slice(b + 1).every(s => countReads(s, g) === 0);
     if (routeReads(reads, g, '', true) + postReads(true, '') === 0
-      && countReads(body, g) !== countReads(ifs.condition, g)) return null;
+      && countReads(body, g) !== countReads(ifs.condition, g) && !bare) return null;
     const name = fresh(recordName(g.last));
     const routed = routeReads(reads, g, name, false) + postReads(false, name);
     // A `!`-guard that leaves, with conditions before the getter and none after it, whose

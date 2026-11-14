@@ -94,6 +94,21 @@ describe('record-getter-guard', () => {
     assert.ok(r.out.includes('Use(pItemTypesTxt->throwable); return sgptDataTable->pTxtItemTypes[n].beltable;'), r.out);
   });
 
+  // Missiles_SrvDmgFunc_CopyColdLengthToFreezeLength 005ad2b0: nothing reads the record, but
+  // the original still tests the sum as a value of its own.
+  it('gives a leaving `!` guard its record when nothing reads it after', () => {
+    const r = run([
+      'int f(int n) {',
+      `  if (!(${GUARD})) {`,
+      '    return 0;',
+      '  }',
+      '  return Use(1);',
+      '}',
+    ]);
+    assert.deepStrictEqual(r.sites, ['pItemTypesTxt:0!']);
+    assert.ok(r.out.includes('if (!pItemTypesTxt) { return 0; } return Use(1);'), r.out);
+  });
+
   it('leaves a guard with no read it may route', () => {
     const r = run([
       'int f(int n) {',
