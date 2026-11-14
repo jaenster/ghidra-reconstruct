@@ -15,7 +15,7 @@ afterEach(() => setTemplateRegistry(undefined));
 function context(): ImplGenContext {
   const registry = TemplateRegistry.build(fixture.templateConfig, [...types.map(t => t.name), ...functions.map(f => f.namespace!)]);
   registry.setMembers(memberModel(registry, functions, []));
-  registry.setComdats(new Set(functions.map(f => f.address)));
+  registry.setComdats(new Set(fixture.comdatAddresses));
   setTemplateRegistry(registry);
   setAggregateTypeNames(types);
   const aggregates = fixture.dataTypes.filter((t: { kind: string }) => t.kind === 'STRUCTURE') as Array<{
@@ -33,19 +33,32 @@ function context(): ImplGenContext {
   } };
 }
 const options = fixture.options as ReconstructOptions;
-it('full emission recognizes both native-identical LinkNode insertion variants', () => {
+it('full emission recognizes the three native-identical LinkNode variants', () => {
   const facts = context(), count = getParseErrorCount();
   for (const r of fixture.functions) {
     assert.equal(vc8formBodyHash(r.fn.decompiled), r.dh);
     const code = generateFunctionImplementation(r.fn, undefined, options, facts);
-    assert.match(code, /switch \(nLinkType\)/, 'the normal native branch facts recover the existing switch');
+    assert.match(code, r.fn.address === '0045bbe0' ? /switch \(nMode\)/ : /switch \(nLinkType\)/, 'the normal native branch facts recover the existing switch');
     assert.equal(code.match(/D2_StormNextLink/g)?.length, 2, 'unlink and insert both use the existing helper');
     assert.doesNotMatch(code, /if \(nLinkBase < 0\)|if \(pListHead < 0\)|szName \+ pListHead/);
-    assert.match(code, r.fn.address === '00601fc0'
-      ? /D2_StormNextLink\(&pExisting->m_link, this->m_linkoffset\)/
-      : /D2_StormNextLink\(pExisting, this->m_linkoffset\)/);
+    if (r.fn.address === '0045bbe0') {
+      assert.match(code, /D2_StormNextLink\(ppCurNode, -1\)/);
+      assert.match(code, /D2_StormNextLink\(ppTarget, \(intptr_t\)\*ppList\)/);
+      assert.doesNotMatch(code, /pPrevLink = ppCurNode\[1\]/);
+      assert.match(code, /int\*\* pPrevLink;/, 'normal slot typing no longer has to also carry the raw next word');
+      assert.match(code, /\*pPrevLink = pNext;/);
+    } else assert.match(code, r.fn.address === '00601fc0'
+        ? /D2_StormNextLink\(&pExisting->m_link, this->m_linkoffset\)/
+        : /D2_StormNextLink\(pExisting, this->m_linkoffset\)/);
   }
   assert.equal(getParseErrorCount(), count);
+});
+it('word-array recovery needs no invented structure fields', () => {
+  const facts = context();
+  const code = generateFunctionImplementation(functions[2], undefined, options, {
+    ...facts, funcPtrArgCasts: { ...facts.funcPtrArgCasts!, structFields: {}, structFieldOffsets: {}, structLayouts: {}, aggregateSizes: {} },
+  });
+  assert.equal(code.match(/D2_StormNextLink/g)?.length, 2);
 });
 it('the owning emitter refuses an unknown byte-array extent or a shifted embedded link', () => {
   const facts = context(), tables = facts.funcPtrArgCasts!;
