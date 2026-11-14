@@ -49,9 +49,11 @@ export interface ProjectConfig {
    * The ratchet store (docs/ratchet.md): a directory of per-function bodies the generator
    * keeps where its fresh output differs from a body the VC8 oracle measured MATCH. Path
    * absolute, `~/`-relative or relative to the project dir. `RECON_RATCHET_STORE` overrides
-   * it, `RECON_RATCHET=0` turns the ratchet off (the unaided A/B).
+   * it, `RECON_RATCHET=0` turns the ratchet off (the unaided A/B). `previous` is the tree the
+   * regen replaces (ratchet/previous.ts), by default the tree the store sits in;
+   * `RECON_RATCHET_PREVIOUS` overrides it, empty for none.
    */
-  ratchet?: { store: string };
+  ratchet?: { store: string; previous?: string };
   /**
    * The Mac<->Windows data pairs (mac-win-data-pairs.tsv), a witness for which strings
    * were literals: Clang keeps anonymous literals in `__cstring` and named arrays out of

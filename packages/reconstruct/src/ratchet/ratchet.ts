@@ -9,7 +9,8 @@
  * body again under the current names. See docs/ratchet.md.
  */
 import { matchParams, paramIds, type ParamMatch } from './params.js';
-import { bindSites, bodyForm, bindingKey, scanSites, type Binding, type SiteScan } from './refs.js';
+import { migrateStored, renameTypeSpelling, type PreviousTree } from './previous.js';
+import { bindSites, bodyFormSites, bindingKey, scanSites, siteSpellings, type Binding, type SiteScan } from './refs.js';
 import { rewriteBody } from './rewrite.js';
 import type { RatchetRecord, RecordKind, StoredBody } from './store.js';
 import type { SymbolIndex } from './symbol-index.js';
@@ -138,6 +139,11 @@ export interface ApplyOptions {
   releases?: Set<string>;
   /** Re-spell every stored body even where the fresh one is equivalent (a rewrite test). */
   forceKeep?: boolean;
+  /**
+   * The tree this one replaces (previous.ts): what an unbound site of a stored body meant,
+   * the storage of parameters captured without it, and the types renamed since.
+   */
+  previous?: PreviousTree;
 }
 
 export interface ApplyOutcome {
@@ -175,18 +181,22 @@ function remapParams(bindings: Array<Binding | undefined>, map: number[]): Array
   return bindings.map(b => (b && b.k === 'param' ? { k: 'param', i: map[b.i] } : b));
 }
 
-function sameForm(a: string[], b: string[]): boolean {
-  return a.length === b.length && a.every((x, i) => x === b[i]);
-}
-
-/** Compare a stored body with the fresh one: equal modulo spelling? */
+/**
+ * Compare a stored body with the fresh one: equal modulo spelling? A site the stored
+ * bindings leave unbound (a record captured by an index that could not bind it) compares by
+ * its spelling, as the record was written to.
+ */
 function compare(stored: StoredBody, storedScan: SiteScan, storedBindings: Array<Binding | undefined>, fresh: Located, freshScan: SiteScan | undefined, index: SymbolIndex): boolean {
   if (stored.text === fresh.definition) return true;
   if (!freshScan) return false;
   const m = paramsNow(stored, freshScan.params, index);
   if ('error' in m) return false;
   const fb = bindSites(freshScan, index, fresh.scope);
-  return sameForm(bodyForm(storedScan, remapParams(storedBindings, m.map)), bodyForm(freshScan, fb));
+  const a = bodyFormSites(storedScan, remapParams(storedBindings, m.map));
+  const b = bodyFormSites(freshScan, fb);
+  if (a.form.length !== b.form.length) return false;
+  const freshSp = siteSpellings(freshScan);
+  return a.form.every((x, i) => x === b.form[i] || (a.spelling[i] !== undefined && b.site[i] && a.spelling[i] === freshSp[i]));
 }
 
 /**
@@ -224,6 +234,7 @@ export function applyRecords(index: SymbolIndex, records: RatchetRecord[], opts:
       if (m.scan.siteHash !== m.stored.siteHash) { broken = `stored body of ${m.stored.address} parses to other sites (parser changed): recapture it`; break; }
       m.bindings = new Array(m.scan.sites.length);
       for (const [i, b] of m.stored.bindings) m.bindings[i] = b;
+      if (opts.previous) ({ stored: m.stored, bindings: m.bindings } = migrateStored(m.stored, m.scan, m.bindings, opts.previous));
       if (m.stored.text === m.loc.definition) { m.equal = true; continue; }
       m.freshScan = scanSites(m.loc.definition);
       m.equal = compare(m.stored, m.scan, m.bindings, m.loc, m.freshScan, index);
@@ -258,7 +269,10 @@ export function applyRecords(index: SymbolIndex, records: RatchetRecord[], opts:
       const pm = paramsNow(m.stored, params, index);
       if ('error' in pm) { errors.push({ m, errors: [pm.error] }); continue; }
       const retyped: string[] = [];
-      const sig = storedSignature(m.stored);
+      const sig0 = storedSignature(m.stored);
+      const sig = opts.previous
+        ? { paramTypes: sig0.paramTypes?.map(t => renameTypeSpelling(t, opts.previous!)!), ret: renameTypeSpelling(sig0.ret, opts.previous) }
+        : sig0;
       if (sig.ret !== undefined && now?.retText !== undefined && now.retText !== sig.ret) retyped.push(`returns ${now.retText}, was ${sig.ret}`);
       if (sig.paramTypes && now?.paramTypes && sig.paramTypes.length === now.paramTypes.length) {
         sig.paramTypes.forEach((t, k) => {

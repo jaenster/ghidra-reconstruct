@@ -405,7 +405,17 @@ export function bindingKey(b: Binding): string {
  * differ only in how they spell the same things have the same form.
  */
 export function bodyForm(scan: SiteScan, bindings: Array<Binding | undefined>): string[] {
+  return bodyFormSites(scan, bindings).form;
+}
+
+/**
+ * The body's form with, per entry, the spelling of a site the bindings leave unbound:
+ * `spelling[k]` is set where `form[k]` is such a site.
+ */
+export function bodyFormSites(scan: SiteScan, bindings: Array<Binding | undefined>): { form: string[]; spelling: Array<string | undefined>; site: boolean[] } {
   const out: string[] = [];
+  const spelling: Array<string | undefined> = [];
+  const site: boolean[] = [];
   let si = 0;
   const sites = scan.sites;
   for (const t of scan.toks) {
@@ -415,12 +425,22 @@ export function bodyForm(scan: SiteScan, bindings: Array<Binding | undefined>): 
     if (s && t.start >= s.start && t.start < s.end) {
       if (t.start === s.start) {
         const b = bindings[si];
+        const sp = `${s.isGlobal ? '::' : ''}${s.parts.join('::')}`;
         // A member bound by candidates alone compares by spelling.
-        out.push(b && b.k !== 'fdc' ? `@{${bindingKey(b)}}` : `${s.isGlobal ? '::' : ''}${s.parts.join('::')}`);
+        out.push(b && b.k !== 'fdc' ? `@{${bindingKey(b)}}` : sp);
+        spelling.push(b ? undefined : sp);
+        site.push(true);
       }
       continue;
     }
     out.push(t.text);
+    spelling.push(undefined);
+    site.push(false);
   }
-  return out;
+  return { form: out, spelling, site };
+}
+
+/** The spelling of every site, bound or not, in form order (bodyFormSites). */
+export function siteSpellings(scan: SiteScan): Array<string | undefined> {
+  return bodyFormSites(scan, []).spelling;
 }

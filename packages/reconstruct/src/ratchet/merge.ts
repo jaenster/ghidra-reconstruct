@@ -22,6 +22,7 @@ import { followHandFile } from './follow.js';
 import { applyRecords, type ApplyRow } from './ratchet.js';
 import { scanCpp } from './scan.js';
 import { RatchetStore } from './store.js';
+import { previousTree } from './previous.js';
 import { SymbolIndex, diskTree } from './symbol-index.js';
 
 export interface RatchetMergeOptions {
@@ -108,7 +109,7 @@ export function ratchetMerge(tree: string, branch: string, opts: RatchetMergeOpt
     const beforeIndex = SymbolIndex.build(diskTree(before.root), GENERATED);
     if (pins.length > 0) {
       // Every pin printed under the regen's names, in the regen's own files.
-      const applied = applyRecords(theirsIndex, pins, {});
+      const applied = applyRecords(theirsIndex, pins, { previous: previousTree(beforeIndex, theirsIndex) });
       result.pins = applied.rows;
       const pinnedFiles = new Map<string, Map<string, string>>();
       for (const row of applied.rows) {

@@ -11,11 +11,17 @@
  * storage is not known (a record captured before maps carried storage) or changed. A stack
  * slot is an identity only while the stack layout is the same on both sides: a register
  * parameter that moved to the stack shifts every slot after it without re-ordering
- * anything. Where storage and name disagree - the value in ECX was called `nX` and now `nX`
- * is the parameter in EDX - the edit could be a re-order or a correction of which name sits on which storage, and nothing
- * here can tell them apart: that is reported, never guessed. A parameter that kept neither
- * its storage nor its name keeps its position, but only when that position is not claimed
- * by another parameter's identity.
+ * anything. When every parameter kept its storage, the values are where they were and only
+ * names moved: each parameter is the one with its storage now, whatever it is called (a
+ * permutation of names over the same storage is a rename, never a re-order; issue #293
+ * renamed 00678b80's parameters so, and reading it as a re-order permuted the arguments of
+ * every kept call). Where storage moved and storage and name disagree - the value in ECX was
+ * called `nX` and now `nX` is the parameter in EDX - the edit could be a re-order or a
+ * correction of which name sits on which storage, and nothing here can tell them apart: that
+ * is reported, never guessed. Names that moved where the storage before is unknown but the
+ * storage now is known are reported too: only the storage before tells a re-order from a
+ * rename. A parameter that kept neither its storage nor its name keeps its position, but
+ * only when that position is not claimed by another parameter's identity.
  */
 
 export interface ParamId {
@@ -55,6 +61,14 @@ export function matchParams(before: readonly ParamId[], after: readonly ParamId[
   const byName = distinct(before.map(p => p.name)) && distinct(after.map(p => p.name));
   const slots = (l: readonly ParamId[]) => l.map(p => p.storage!).filter(isStack).sort().join(',');
   const sameStack = byStorage && slots(before) === slots(after);
+  // Every parameter kept its storage: the values sit where they sat, whatever they are
+  // called now. Names that moved are renames, never a re-order.
+  if (sameStack && before.every(p => after.some(q => q.storage === p.storage))) {
+    return { map: before.map(p => after.findIndex(q => q.storage === p.storage)) };
+  }
+  // Storage known now but not before: a permutation of the names is a re-order or a
+  // rename, and only the storage before could tell.
+  const storageNow = after.every(p => !!p.storage) && before.every(p => !p.storage);
   const map: number[] = new Array(n).fill(-1);
   for (let i = 0; i < n; i++) {
     const st = before[i].storage;
@@ -64,6 +78,9 @@ export function matchParams(before: readonly ParamId[], after: readonly ParamId[
       return { error: `parameter ${show(before[i])} is ambiguous: its storage is ${show(after[js])} now, its name ${show(after[jn])}` };
     }
     map[i] = js >= 0 ? js : jn;
+  }
+  if (storageNow && map.some((j, i) => j >= 0 && j !== i)) {
+    return { error: `parameters ${before.map(show).join(', ')} -> ${after.map(show).join(', ')} moved by name, and their storage before is unknown` };
   }
   // Neither storage nor name found: the position, when no other identity claims it.
   const claimed = new Set(map.filter(j => j >= 0));

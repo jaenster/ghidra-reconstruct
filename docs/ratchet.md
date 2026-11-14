@@ -59,6 +59,32 @@ caller's bytes follow the callee's shape: deploy 1163 lost `0057eab0` because it
 Sites are found on the parse of the body (cpp-parser), numbered in walk order; edits are spliced
 at the parser's locations, so everything that is not a reference stays byte for byte.
 
+## The tree a regen replaces
+
+A binding says only what the capturing index knew. The store was seeded before the tree carried
+`Source/globals/globals.addr.tsv` (359 global bindings in 8565 records) and before the index read
+the generator's enum form (`typedef T E; namespace E_ns { constexpr E C = v; }` plus
+`using E_ns::C;`: no enum constant was bound at all), and most records predate parameter storage
+in the source maps. Such a body still spells what it meant in the tree it compiled in, so apply
+reads that tree too (`ratchet/previous.ts`):
+
+- an unbound site of a stored body is bound under the previous tree's index (a global by
+  address, an enum constant by value, a function, a type), then re-spelled under the new one;
+- a stored parameter list, and a callee binding's parameter list, take the previous tree's
+  storage where its names are the ones that tree emits;
+- a type that went and a type that appeared are one type renamed when every function parameter,
+  return type or global that spelled the one at a fixed address spells the other now, nothing
+  else pairs with either, they sit in the same scope and their layouts agree (the same field
+  offsets and field types, field names free; for an enum the same values). Type sites, fields
+  by (struct, offset), enum constants and every recorded type spelling then follow the new
+  name. Anything less is not a rename: the type is gone and the record unresolved, as before.
+
+The previous tree is `RECON_RATCHET_PREVIOUS` (empty: none), else the project's
+`ratchet.previous`, else the tree the store sits in (`<modified>/ratchet`) when it carries a
+globals index: at regen time that is `source/modified` before this regen is merged. `ratchet
+merge` gives its pins the tree before the merge. Without a previous tree, a site the record
+left unbound compares by its spelling and is printed as stored.
+
 ## Every regen: apply (generator, full regen and live daemon alike)
 
 `writeProject` (codegen/index.ts) runs `applyRatchetToProject` after the overrides, over every
@@ -128,12 +154,16 @@ A parameter is identified by Ghidra's storage (`ECX:4`, `Stack[0x8]:4`) and its 
 its position (`ratchet/params.ts`). The generator writes each function's parameters with their
 storage into its source map (`paramStorage`); the index attaches them only when the names are the
 emitted ones. Storage is what the binary fixes, so it decides; the name decides where storage is
-unknown (records captured before maps carried it) or changed. A stack slot counts only while the
-stack layout is the same on both sides, since a register parameter moving to the stack shifts
-every slot after it. Where storage and name disagree (the value in EAX was `nMousePosY`, now
-`nMousePosY` is in ECX) the edit is either a re-order or a correction of which name sits on which
-value, and the record is reported unresolved rather than guessed. A parameter that kept neither
-keeps its position, unless another parameter's identity claims it.
+unknown or changed. When every parameter kept its storage, only names moved: each parameter is
+the one with its storage now, a permutation of names is a rename and never re-orders a call's
+arguments (issue #293 renamed `00678b80`'s parameters that way; read as a re-order, the arguments
+of four kept callers were permuted). A stack slot counts only while the stack layout is the same
+on both sides, since a register parameter moving to the stack shifts every slot after it. Where
+storage moved and storage and name disagree (the value in EAX was `nMousePosY`, now `nMousePosY`
+is in EDX and EAX holds `nMousePosX`) the edit is either a re-order or a correction of which name
+sits on which value, and the record is reported unresolved rather than guessed; so are names that
+moved where the storage before is unknown and the storage now is known. A parameter that kept
+neither keeps its position, unless another parameter's identity claims it.
 
 Why: Game.exe v2097 (1165) swapped the two `int32_t` register parameters of 004a4a10; bound by
 position, its kept body read `nMousePosX` where the original reads `nMousePosY`.
