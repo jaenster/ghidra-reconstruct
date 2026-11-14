@@ -19,6 +19,19 @@ uint64_t WordViews(Region *p, uint32_t next) {
   UseIncoming(p);
   p = (Region *)(uint32_t)next;
   return Pack((int32_t)(uintptr_t)p, (uint32_t)(uintptr_t)p, (intptr_t)p);
+}
+uint32_t IntegerTests(Region *p, uint32_t next, Region *other) {
+  UseIncoming(p);
+  p = (Region *)(uint32_t)next;
+  uint32_t bits = 0;
+  if (p) bits |= 1;
+  if (!p) bits |= 2;
+  if (p != (Region *)100) bits |= 4;
+  if (p == (Region *)0) bits |= 8;
+  if (p < (Region *)100) bits |= 16;
+  if (p == other) bits |= 32;
+  if (p && next) bits |= 64;
+  return (uint32_t)(uintptr_t)p ^ bits;
 }`;
 
 export function harness(before: string, after: string): string {
@@ -70,6 +83,15 @@ int CheckCases() {
     seenCount = 0;
     uint64_t b = After::WordViews(&regions[0], word);
     if (b != expected || seen != (uintptr_t)&regions[0] || seenCount != 1) return 4;
+    uint32_t mask = (word ? 1 : 2) | (word != 100 ? 4 : 0)
+      | (word == 0 ? 8 : 0) | (word < 100 ? 16 : 0) | 32 | (word ? 64 : 0);
+    Region *other = (Region *)(uintptr_t)word;
+    seenCount = 0;
+    uint32_t c = Before::IntegerTests(&regions[0], word, other);
+    if (c != (word ^ mask) || seen != (uintptr_t)&regions[0] || seenCount != 1) return 5;
+    seenCount = 0;
+    uint32_t d = After::IntegerTests(&regions[0], word, other);
+    if (d != (word ^ mask) || seen != (uintptr_t)&regions[0] || seenCount != 1) return 6;
     ++cases;
   }
   std::printf("%u", cases);

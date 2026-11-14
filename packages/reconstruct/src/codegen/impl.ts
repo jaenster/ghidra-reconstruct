@@ -3276,12 +3276,14 @@ function transformDecompiledCode(
         // The value split (a reused stack-argument slot): which parameters have a
         // 4-byte stack slot, and the return types that say what a store holds.
         stackParameters: (enclosing?.stackSlots ?? []).filter(s => s.isParameter && s.size === 4).map(s => s.name),
+        deferScalarValues: Boolean(enclosing?.stackSlots?.length),
         functionReturnTypes: context.funcPtrArgCasts.functionReturnTypes,
         structFields: context.funcPtrArgCasts.structFields,
         fieldTypes: context.funcPtrArgCasts.fieldTypes,
         globalTypes: context.funcPtrArgCasts.globalTypes,
         enumConstants: context.funcPtrArgCasts.enumConstantNames,
         enumValues: context.funcPtrArgCasts.enumValues,
+        enumTypes: context.funcPtrArgCasts.enumTypes,
       };
       perPluginOptions['split-lives'] = {
         functionReturnTypes: context.funcPtrArgCasts.functionReturnTypes,

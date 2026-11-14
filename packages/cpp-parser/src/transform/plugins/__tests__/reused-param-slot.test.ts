@@ -234,7 +234,7 @@ describe('reused-param-slot: the second value typed by member reads, with consta
 });
 
 describe('reused-param-slot: mixed integer views of a reused pointer slot', () => {
-  const V: ReusedParamSlotOptions = { stackParameters: ['nParam'] };
+  const V: ReusedParamSlotOptions = { stackParameters: ['nParam'], enumTypes: ['Difficulty'] };
 
   it('MONSTER_InitStats @00573cb0: keeps the incoming pointer and gives the later difficulty its own word local', () => {
     const out = run(`void f(Game *pGame, short *nParam, Unit *pUnit) {
@@ -320,13 +320,46 @@ describe('reused-param-slot: mixed integer views of a reused pointer slot', () =
     }`;
     assert.strictEqual(run(src, V).replace(/\s+/g, ' '), run(src, {}).replace(/\s+/g, ' '));
   });
+
+  it('keeps truth tests and small constant comparisons integer, with a pointer view only at memory access', () => {
+    const out = run(`int f(Region *p, uint32_t next) {
+      UseRegion(p);
+      p = (Region *)(uint32_t)next;
+      if (!p) return 0;
+      if (p != (Region *)100) return (int)p;
+      return p[3].value;
+    }`, { stackParameters: ['p'] });
+    assert.match(out, /if \(!nP\)/);
+    assert.match(out, /if \(nP != 100\)/);
+    assert.match(out, /\(\(Region\*\)\(uintptr_t\)nP\)\[3\]\.value/);
+    assert.doesNotMatch(out, /\(Region\*\)nP/);
+  });
+
+  it('leaves scalar-only lifetimes to split-lives when full codegen supplies frame slots', () => {
+    const src = `int f(Region *p, uint32_t next) { UseRegion(p); p = (Region *)(uint32_t)next; if (!p) return 0; return (int)p; }`;
+    assert.strictEqual(run(src, { stackParameters: ['p'], deferScalarValues: true }), run(src, {}));
+  });
+
+  for (const use of ['if (p == other) return 1;', 'if (p && other) return 1;']) {
+    it(`refuses an unknown class operand: ${use}`, () => {
+      const src = `int f(Region *p, uint32_t next, Unknown other) { UseRegion(p); p = (Region *)(uint32_t)next; ${use} return (int)p; }`;
+      assert.strictEqual(run(src, { stackParameters: ['p'] }), run(src, {}));
+    });
+  }
+
+  for (const use of ['Save(&alias);', 'UseSize(sizeof(alias));', 'alias = Other();']) {
+    it(`refuses an alias whose type cannot follow the integer lifetime: ${use}`, () => {
+      const src = `int f(Region *p, uint32_t next) { Region *alias; UseRegion(p); p = (Region *)(uint32_t)next; alias = p; ${use} return (int)alias + (int)p; }`;
+      assert.strictEqual(run(src, { stackParameters: ['p'] }), run(src, {}));
+    });
+  }
 });
 
 describe('reused-param-slot: the current MONSTER_InitStats body', () => {
   it('preserves the incoming pointer, difficulty byte address, aliases and mixed word views', native, () => {
     const lower = (split: boolean) => transformGhidraCode(nativeInput, {
       preset: 'full', usePluginRegistry: true, tolerateErrors: false,
-      pluginOptions: { pluginOptions: { 'reused-param-slot': { stackParameters: split ? ['p'] : [] } } },
+      pluginOptions: { pluginOptions: { 'reused-param-slot': { stackParameters: split ? ['p'] : [], enumTypes: ['Difficulty'] } } },
     }).code;
     assert.strictEqual(compileAndRun(nativeHarness(lower(false), lower(true)), 'if (CheckCases()) return 1;',
       { optimize: true, flags: ['-fwrapv', '-fno-delete-null-pointer-checks'] }).trim(), '1548');
