@@ -1,0 +1,178 @@
+{
+  "source": "f369754f8064b9d202e986b134bfe13e2b663362",
+  "generatorBase": "fb6a8bc2734be2ff285004076d7e84c42cd1a85a",
+  "options": {
+    "outputDir": "./out",
+    "format": "cpp",
+    "organization": "namespace",
+    "generateCMake": false,
+    "generateSourceMaps": false,
+    "transformPreset": "full",
+    "includeAddressComments": false,
+    "promoteStaticGlobals": false
+  },
+  "raw": {
+    "name": "UNICODE_CompareWideStringsN",
+    "address": "00526540",
+    "entryPoint": "00526540",
+    "signature": "int32_t UNICODE_CompareWideStringsN(ushort * wszFirst, ushort * wszSecond, int32_t nMaxChars)",
+    "returnType": "int32_t",
+    "callingConvention": "__fastcall",
+    "size": 77,
+    "isThunk": false,
+    "isExternal": false,
+    "hasVarArgs": false,
+    "namespace": "D2Lang::Unicode::UNISYS",
+    "comment": "@function UNICODE_CompareWideStringsN\n@address Game.exe.ram:00526540\n@date 2026.06.09\n@calling __fastcall\n@description Diablo 2 1.14d reverse team\nhttps://blizzhackers.dev",
+    "sourceFile": null,
+    "sourceLine": null,
+    "sourceInfo": null,
+    "parameters": [
+      {
+        "name": "wszFirst",
+        "dataType": "ushort *",
+        "size": 4,
+        "ordinal": 0,
+        "storage": "ECX:4",
+        "stackOffset": null,
+        "resolvedType": null
+      },
+      {
+        "name": "wszSecond",
+        "dataType": "ushort *",
+        "size": 4,
+        "ordinal": 1,
+        "storage": "EDX:4",
+        "stackOffset": null,
+        "resolvedType": null
+      },
+      {
+        "name": "nMaxChars",
+        "dataType": "int32_t",
+        "size": 4,
+        "ordinal": 2,
+        "storage": "Stack[0x4]:4",
+        "stackOffset": 4,
+        "resolvedType": null
+      }
+    ],
+    "localVariables": [
+      {
+        "name": "wChar1",
+        "dataType": "undefined2",
+        "size": 2,
+        "storage": "HASH:5f65e65453:2",
+        "stackOffset": null,
+        "resolvedType": "ushort"
+      },
+      {
+        "name": "wChar2",
+        "dataType": "undefined2",
+        "size": 2,
+        "storage": "HASH:5feb6cad63:2",
+        "stackOffset": null,
+        "resolvedType": "ushort"
+      }
+    ],
+    "tags": [
+      {
+        "type": "community-proposal"
+      }
+    ]
+  },
+  "fn": {
+    "name": "UNICODE_CompareWideStringsN",
+    "address": "00526540",
+    "entryPoint": "00526540",
+    "signature": "int32_t UNICODE_CompareWideStringsN(ushort * wszFirst, ushort * wszSecond, int32_t nMaxChars)",
+    "returnType": "int32_t",
+    "callingConvention": "__fastcall",
+    "size": 77,
+    "isThunk": false,
+    "isExternal": false,
+    "hasVarArgs": false,
+    "namespace": "D2Lang::Unicode::UNISYS",
+    "comment": "@function UNICODE_CompareWideStringsN\n@address Game.exe.ram:00526540\n@date 2026.06.09\n@calling __fastcall\n@description Diablo 2 1.14d reverse team\nhttps://blizzhackers.dev",
+    "sourceFile": null,
+    "sourceLine": null,
+    "sourceInfo": null,
+    "parameters": [
+      {
+        "name": "wszFirst",
+        "dataType": "ushort *",
+        "size": 4,
+        "ordinal": 0,
+        "storage": "ECX:4",
+        "stackOffset": null,
+        "resolvedType": null
+      },
+      {
+        "name": "wszSecond",
+        "dataType": "ushort *",
+        "size": 4,
+        "ordinal": 1,
+        "storage": "EDX:4",
+        "stackOffset": null,
+        "resolvedType": null
+      },
+      {
+        "name": "nMaxChars",
+        "dataType": "int32_t",
+        "size": 4,
+        "ordinal": 2,
+        "storage": "Stack[0x4]:4",
+        "stackOffset": 4,
+        "resolvedType": null
+      }
+    ],
+    "localVariables": [
+      {
+        "name": "wChar1",
+        "dataType": "ushort",
+        "size": 2,
+        "storage": "HASH:5f65e65453:2",
+        "stackOffset": null,
+        "resolvedType": "ushort"
+      },
+      {
+        "name": "wChar2",
+        "dataType": "ushort",
+        "size": 2,
+        "storage": "HASH:5feb6cad63:2",
+        "stackOffset": null,
+        "resolvedType": "ushort"
+      }
+    ],
+    "tags": [
+      {
+        "type": "community-proposal"
+      }
+    ],
+    "decompiled": "\n/* @function UNICODE_CompareWideStringsN\n   @address Game.exe.ram:00526540\n   @date 2026.06.09\n   @calling __fastcall\n   @description Diablo 2 1.14d reverse team\n   https://blizzhackers.dev */\n\nint32_t __fastcall\nD2Lang::Unicode::UNISYS::UNICODE_CompareWideStringsN\n          (ushort *wszFirst,ushort *wszSecond,int32_t nMaxChars)\n\n{\n  ushort wChar1;\n  ushort wChar2;\n  \n  wChar1 = *wszFirst;\n  while (((wChar1 != 0 && (wChar2 = *wszSecond, wChar2 != 0)) && (nMaxChars != 0))) {\n    wszFirst = wszFirst + 1;\n    wszSecond = wszSecond + 1;\n    if (wChar1 != wChar2) {\n      return (-(uint)(wChar1 < wChar2) & 0xfffffffe) + 1;\n    }\n    wChar1 = *wszFirst;\n    nMaxChars = nMaxChars + -1;\n  }\n  return 0;\n}\n\n"
+  },
+  "tag": "postdec(nMaxChars,nRemaining);ev=735119fec4;bh=77-a6cab703;dh=33cca0d0",
+  "native": {
+    "length": 77,
+    "sha256": "a6cab7036b0d294d1b0d807a9ff7abf95881ded684acfe0934a0e882a3221b76",
+    "relocations": "none: function has no absolute data/call operands"
+  },
+  "rows": [
+    {
+      "address": "00526540",
+      "name": "UNICODE_CompareWideStringsN",
+      "tu": "Source/D2Lang/Unicode/UNISYS",
+      "baseline": "// 1.14d: 00526540\nint32_t __fastcall UNICODE_CompareWideStringsN(ushort * wszFirst, ushort * wszSecond, int32_t nMaxChars) {\n    uint16_t wChar2;\n    uint16_t wChar1 = *wszFirst;\n    while (wChar1 && (wChar2 = *wszSecond) && nMaxChars) {\n      wszFirst++;\n      wszSecond++;\n      if (wChar1 != wChar2) {\n        return wChar1 < wChar2 ? -1 : 1;\n      }\n\n      wChar1 = *wszFirst;\n      nMaxChars--;\n    }\n\n    return 0;\n}",
+      "candidate": "// 1.14d: 00526540\nint32_t __fastcall UNICODE_CompareWideStringsN(ushort * wszFirst, ushort * wszSecond, int32_t nMaxChars) {\n    uint16_t wChar2;\n    uint16_t wChar1 = *wszFirst;\n    if (wChar1) {\n      unsigned int nRemaining = (unsigned int)nMaxChars;\n      do {\n        if (!(wChar2 = *wszSecond) || !nRemaining--) {\n          break;\n        }\n\n        wszFirst++;\n        wszSecond++;\n        if (wChar1 != wChar2) {\n          return wChar1 < wChar2 ? -1 : 1;\n        }\n\n        wChar1 = *wszFirst;\n      } while (wChar1);\n    }\n\n    return 0;\n}"
+    }
+  ],
+  "scope": "Actual full emitter on a live hash-matched MCP model with the real mapper and empty optional context; one locally simulated, measured source-form tag. No owning extraction/regeneration or Ghidra proposal.",
+  "evidence": {
+    "row": "00526540\tD2Lang::Unicode::UNISYS::UNICODE_CompareWideStringsN\tpostdec(nMaxChars,nRemaining)\tf369754f8064b9d202e986b134bfe13e2b663362\tfb6a8bc2734be2ff285004076d7e84c42cd1a85a\t77\ta6cab7036b0d294d1b0d807a9ff7abf95881ded684acfe0934a0e882a3221b76\t33cca0d0\tOUR-4\t0.6571\tMATCH\t1.0000\n",
+    "sha256": "735119fec4cf2bf9122404a8c11e209ae58550bb1c9924dfe078ec827ae4db41",
+    "ev": "735119fec4",
+    "nativeRows": 35,
+    "losses": 0,
+    "callReferencesUnchanged": true,
+    "originalCounterInstructions": "00526559 MOV EBX,EDI;0052655b SUB EDI,1;0052655e TEST EBX,EBX;00526560 JZ00526575"
+  }
+}
