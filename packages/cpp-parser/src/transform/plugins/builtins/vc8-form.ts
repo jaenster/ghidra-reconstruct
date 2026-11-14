@@ -191,6 +191,12 @@
  *                        `T N = E;` and that life's reads read N (E may read V: it reads
  *                        the old value, and keeps V); refused when V is read again after
  *                        them before a new store, or inside a loop.
+ *   zerolife(V)          `T V = F(...); if (V) return;` becomes
+ *                        `if (F(...)) return; T V = 0;`: the continuing path's later
+ *                        lifetime starts at zero. Both T and the declared call result
+ *                        must be ordinary 32-bit integers of the same signedness. The statements must be
+ *                        adjacent; aliases, declaration specifiers, labels, jumps,
+ *                        lambdas and a return that reads V are refused.
  *   tsel(C[,i])          the i-th `if (C) { V1 = A1; ... } else { V1 = B1; ... }` storing the
  *                        same locals in both arms, followed by a call statement reading each
  *                        Vk once as a whole argument, is written with each read `C ? Ak : Bk`;
@@ -418,6 +424,7 @@ import { guardedPostDecrement } from './guarded-post-decrement.js';
 import { restoreSwitchDefault, switchDefaultValue } from './switch-default.js';
 
 export type Vc8Form =
+  | { op: 'zerolife'; name: string }
   | { op: 'nullfault32' }
   | { op: 'swdefault'; expr: string; values: string[]; index?: number }
   | { op: 'seq'; targets: string[]; index?: number }
@@ -530,7 +537,7 @@ export interface Vc8FormOptions {
   selectTables?: Vc8FormTables;
 }
 
-const OPS = new Set(['nullfault32', 'swdefault', 'seq', 'fold', 'join', 'coalesce', 'recordwalk', 'cache', 'own', 'guards', 'merge-guards', 'retval', 'branchret', 'width', 'boolflag', 'retwiden', 'arms',
+const OPS = new Set(['zerolife', 'nullfault32', 'swdefault', 'seq', 'fold', 'join', 'coalesce', 'recordwalk', 'cache', 'own', 'guards', 'merge-guards', 'retval', 'branchret', 'width', 'boolflag', 'retwiden', 'arms',
   'nest', 'merge-tail', 'tailguard', 'tailcopy', 'continue', 'dup', 'tarms', 'zero', 'nonzero', 'bool', 'cmp', 'swap', 'ifsel', 'clamp', 'split', 'select', 'decl', 'unselect', 'tsel', 'hoist',
   'nestcall', 'fill', 'elems', 'copy', 'shift', 'ptrwalk', 'rowptr', 'acc', 'retvar', 'onecall', 'roundup', 'swmerge', 'switch', 'dec', 'opas', 'range', 'castout', 'signbit', 'nullfield', 'zinit', 'znew', 'swclamp', 'retbase', 'postdec']);
 
@@ -564,6 +571,8 @@ export function parseVc8Form(text: string): Vc8Form | undefined {
   const anchor = args.length > 0 && args[args.length - 1].startsWith('@') ? args.pop()!.slice(1) : undefined;
   const int = (s: string | undefined, d: number) => (s === undefined || s === '' ? d : /^\d+$/.test(s) ? Number(s) : NaN);
   switch (m[1]) {
+    case 'zerolife': return args.length === 1 && !anchor && /^[A-Za-z_]\w*$/.test(args[0]) && !isKeywordString(args[0])
+      ? { op: 'zerolife', name: args[0] } : undefined;
     case 'swdefault': {
       const n = anchor === undefined ? undefined : /^\d+$/.test(anchor) ? Number(anchor) : NaN;
       const values = args.slice(1).map(switchDefaultValue);
@@ -2965,6 +2974,54 @@ function doClamp(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'clamp' }>): void {
   b.statements.splice(k + 1, 1);
 }
 
+/** A zero continuing path separates the call result from the later scalar lifetime. */
+function doZeroLife(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'zerolife' }>): void {
+  const v = f.name, word = new Map([['int', 's'], ['int32_t', 's'], ['uint32_t', 'u'], ['unsigned', 'u'], ['unsignedint', 'u']]);
+  if (text(fn.returnType) !== 'void') refuse('guard must return from a void function');
+  const decls = [...walk(fn.body!)].filter(x => x.node.kind === NodeKind.VariableDecl)
+    .map(x => x.node as VariableDecl).filter(d => d.name.name === v);
+  if (decls.length !== 1 || fn.parameters.some(p => p.name?.name === v)) refuse(`${v} needs one local binding`);
+  const decl = decls[0];
+  if (!word.has(text(decl.type)) || decl.specifiers.length || decl.attributes.length || decl.directInit || decl.copyListInit)
+    refuse(`${v} is not an ordinary 32-bit scalar declaration`);
+  if (addressTaken(fn, v)) refuse(`&${v} is taken`);
+  for (const { node } of walk(fn.body!)) {
+    if ([NodeKind.GotoStmt, NodeKind.LabelStmt, NodeKind.LambdaExpr, NodeKind.AsmDecl, NodeKind.TryStmt, NodeKind.SehTryStmt].includes(node.kind))
+      refuse('unmodelled control flow or capture');
+    if (node.kind === NodeKind.VariableDecl) {
+      const d = node as VariableDecl;
+      if ((d.type.kind === NodeKind.ReferenceType || d.type.kind === NodeKind.RValueReferenceType) && d.initializer && mentions(d.initializer, v))
+        refuse(`${v} is bound to a reference`);
+    }
+  }
+  const init = decl.initializer && unparen(decl.initializer as Expression);
+  if (!init || init.kind !== NodeKind.CallExpr || mentions(init, v)) refuse(`${v} needs an independent call initializer`);
+  const call = init as CallExpr, callee = calleeName(call.callee);
+  const result = callee ? selectTables?.functionReturnTypes?.[callee] : undefined;
+  if (!callee || localNames(fn).has(callee) || !result || !word.has(norm(result)))
+    refuse('call result is not a known 32-bit integer');
+  if (word.get(norm(result)) !== word.get(text(decl.type))) refuse('call result and local have different signedness');
+  const sites: Array<{ b: CompoundStmt; k: number; guard: IfStmt }> = [];
+  for (const b of blocks(fn)) for (let k = 0; k + 1 < b.statements.length; k++) {
+    if (declOf(b.statements[k]) !== decl || b.statements[k + 1].kind !== NodeKind.IfStmt) continue;
+    const guard = b.statements[k + 1] as IfStmt;
+    if (guard.elseBranch || guard.init || guard.isConstexpr || !isId(unparen(guard.condition), v)) continue;
+    const arm = guard.thenBranch;
+    const statements = arm.kind === NodeKind.CompoundStmt ? (arm as CompoundStmt).statements : [arm];
+    if (statements.length !== 1 || statements[0].kind !== NodeKind.ReturnStmt || (statements[0] as ReturnStmt).value) continue;
+    if (!b.statements.slice(k + 2).some(s => mentions(s, v))) continue;
+    sites.push({ b, k, guard });
+  }
+  if (sites.length !== 1) refuse('no adjacent nonzero return guard followed by the later lifetime');
+  const { b, k, guard } = sites[0];
+  // A same-width integer conversion preserves zero exactly. The call still runs
+  // once, at the same position, and its result is no longer stored on the return path.
+  guard.condition = init;
+  decl.initializer = parseExpr('0');
+  const statement = b.statements[k];
+  b.statements.splice(k, 2, guard, statement);
+}
+
 function doSplit(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'split' }>): void {
   if (localNames(fn).has(f.rename)) refuse(`${f.rename} exists`);
   if (addressTaken(fn, f.name)) refuse(`&${f.name} is taken`);
@@ -4930,6 +4987,7 @@ function doRetbase(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'retbase' }>): vo
 }
 
 const APPLY: { [K in Vc8Form['op']]: (fn: FunctionDecl, f: Extract<Vc8Form, { op: K }>) => void } = {
+  zerolife: doZeroLife,
   nullfault32: doNullfault32,
   swdefault: (fn, f) => { const why = restoreSwitchDefault(fn, f.expr, f.values, f.index, selectTables); if (why) refuse(why); },
   seq: doSeq, fold: doFold, join: doJoin, coalesce: doCoalesce, recordwalk: doRecordwalk, cache: doCache, own: doOwn, guards: doGuards, 'merge-guards': doMergeGuards,
