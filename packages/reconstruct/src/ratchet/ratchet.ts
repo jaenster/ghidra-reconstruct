@@ -144,6 +144,8 @@ export interface ApplyOptions {
    * the storage of parameters captured without it, and the types renamed since.
    */
   previous?: PreviousTree;
+  /** The previous tree of one record (evidence.ts); `previous` where it gives none. */
+  previousFor?: (rec: RatchetRecord) => PreviousTree | undefined;
 }
 
 export interface ApplyOutcome {
@@ -224,6 +226,7 @@ export function applyRecords(index: SymbolIndex, records: RatchetRecord[], opts:
     // Per member: where it is now, and whether its fresh body already is the stored one.
     type M = { stored: StoredBody; loc?: Located; scan?: SiteScan; bindings?: Array<Binding | undefined>; freshScan?: SiteScan; equal?: boolean; released: boolean };
     const ms: M[] = rec.members.map(stored => ({ stored, released: rec.kind === 'match' && releases.has(stored.address) }));
+    const previous = opts.previousFor?.(rec) ?? opts.previous;
     let broken = '';
     for (const m of ms) {
       m.loc = locate(index, m.stored.address);
@@ -234,7 +237,7 @@ export function applyRecords(index: SymbolIndex, records: RatchetRecord[], opts:
       if (m.scan.siteHash !== m.stored.siteHash) { broken = `stored body of ${m.stored.address} parses to other sites (parser changed): recapture it`; break; }
       m.bindings = new Array(m.scan.sites.length);
       for (const [i, b] of m.stored.bindings) m.bindings[i] = b;
-      if (opts.previous) ({ stored: m.stored, bindings: m.bindings } = migrateStored(m.stored, m.scan, m.bindings, opts.previous));
+      if (previous) ({ stored: m.stored, bindings: m.bindings } = migrateStored(m.stored, m.scan, m.bindings, previous));
       if (m.stored.text === m.loc.definition) { m.equal = true; continue; }
       m.freshScan = scanSites(m.loc.definition);
       m.equal = compare(m.stored, m.scan, m.bindings, m.loc, m.freshScan, index);
@@ -270,8 +273,8 @@ export function applyRecords(index: SymbolIndex, records: RatchetRecord[], opts:
       if ('error' in pm) { errors.push({ m, errors: [pm.error] }); continue; }
       const retyped: string[] = [];
       const sig0 = storedSignature(m.stored);
-      const sig = opts.previous
-        ? { paramTypes: sig0.paramTypes?.map(t => renameTypeSpelling(t, opts.previous!)!), ret: renameTypeSpelling(sig0.ret, opts.previous) }
+      const sig = previous
+        ? { paramTypes: sig0.paramTypes?.map(t => renameTypeSpelling(t, previous)!), ret: renameTypeSpelling(sig0.ret, previous) }
         : sig0;
       if (sig.ret !== undefined && now?.retText !== undefined && now.retText !== sig.ret) retyped.push(`returns ${now.retText}, was ${sig.ret}`);
       if (sig.paramTypes && now?.paramTypes && sig.paramTypes.length === now.paramTypes.length) {

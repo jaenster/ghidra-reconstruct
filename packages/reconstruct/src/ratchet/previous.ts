@@ -25,6 +25,8 @@ import type { SymbolIndex } from './symbol-index.js';
 
 export interface PreviousTree {
   index: SymbolIndex;
+  /** Where parameter storage is read, when not from `index` (evidence.ts). */
+  storage?: SymbolIndex;
   /** Type renames, old qualified name -> new. */
   types: Map<string, string>;
   /** The same by the unqualified name, where it decides alone (spellings in signatures). */
@@ -126,7 +128,7 @@ export function typeRenames(before: SymbolIndex, after: SymbolIndex): Map<string
   return out;
 }
 
-export function previousTree(index: SymbolIndex, current: SymbolIndex): PreviousTree {
+export function previousTree(index: SymbolIndex, current: SymbolIndex, storage?: SymbolIndex): PreviousTree {
   const types = typeRenames(index, current);
   const simple = new Map<string, string>();
   const ambiguous = new Set<string>();
@@ -136,7 +138,7 @@ export function previousTree(index: SymbolIndex, current: SymbolIndex): Previous
     simple.set(s, lastPart(n));
   }
   for (const s of ambiguous) simple.delete(s);
-  return { index, types, simple };
+  return { index, types, simple, ...(storage ? { storage } : {}) };
 }
 
 /** A type spelling with every renamed type spelled by its new name. */
@@ -169,7 +171,7 @@ export function migrateBinding(b: Binding, prev: PreviousTree): Binding {
     case 'fn': {
       const out: Binding = { ...b };
       if (!out.ps && out.p && out.a.length === 1) {
-        const was = prev.index.fnByAddr.get(out.a[0]);
+        const was = (prev.storage ?? prev.index).fnByAddr.get(out.a[0]);
         if (was?.storage && sameNames(was.params, out.p)) out.ps = [...was.storage];
       }
       if (out.pt) out.pt = out.pt.map(t => renameTypeSpelling(t, prev)!);
@@ -194,7 +196,7 @@ export function migrateStored(stored: StoredBody, scan: SiteScan, bindings: Arra
       if (t.k === 'fn' || t.k === 'gl' || t.k === 'en' || t.k === 'ty') out[i] = t;
     });
   }
-  const was = prev.index.fnByAddr.get(stored.address);
+  const was = (prev.storage ?? prev.index).fnByAddr.get(stored.address);
   const paramStorage = stored.paramStorage ?? (was?.storage && sameNames(was.params, stored.params) ? [...was.storage] : undefined);
   return {
     stored: {

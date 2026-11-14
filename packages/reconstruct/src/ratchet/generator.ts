@@ -12,7 +12,9 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 
 import type { ReconstructedProject, ReconstructOptions } from '../types.js';
+import { evidencePrevious, repoOf } from './evidence.js';
 import { previousTree, type PreviousTree } from './previous.js';
+import type { RatchetRecord } from './store.js';
 import { applyRecords, formatApplyReport, summarize } from './ratchet.js';
 import { RatchetStore, normalizeAddress } from './store.js';
 import { GLOBALS_INDEX_FILE, SymbolIndex, diskTree, formatGlobalsIndex, memoryTree } from './symbol-index.js';
@@ -29,16 +31,19 @@ export function ratchetStoreDir(options: ReconstructOptions): string | undefined
 }
 
 /**
- * The tree the regen replaces (previous.ts): `RECON_RATCHET_PREVIOUS` (empty: none), the
- * project's `ratchet.previous`, else the tree the store sits in (`<modified>/ratchet`) when
- * it carries a globals index.
+ * An explicit previous tree for every record (previous.ts): `RECON_RATCHET_PREVIOUS` (empty:
+ * none at all) or the project's `ratchet.previous`. Undefined when neither is set: each record
+ * is then read against its evidence commit (evidence.ts).
  */
-export function ratchetPreviousDir(options: ReconstructOptions, storeDir: string | undefined): string | undefined {
+export function ratchetPreviousOverride(options: ReconstructOptions): { dir?: string } | undefined {
   const env = process.env.RECON_RATCHET_PREVIOUS;
-  if (env !== undefined) return env ? resolveDir(env, options) : undefined;
+  if (env !== undefined) return env ? { dir: resolveDir(env, options) } : {};
   const raw = options.projectConfig?.ratchet?.previous;
-  if (raw) return resolveDir(raw, options);
-  if (!storeDir) return undefined;
+  return raw ? { dir: resolveDir(raw, options) } : undefined;
+}
+
+/** The tree the store sits in (`<modified>/ratchet`), when it carries a globals index. */
+function storeTree(storeDir: string): string | undefined {
   const parent = path.dirname(storeDir);
   return fs.existsSync(path.join(parent, GLOBALS_INDEX_FILE)) ? parent : undefined;
 }
@@ -84,13 +89,40 @@ export function applyRatchetToProject(project: ReconstructedProject, options: Re
   texts.set(GLOBALS_INDEX_FILE, globalsText);
   const index = SymbolIndex.build(memoryTree(texts));
   index.addParamStorage([...project.sourceMaps.values()].flatMap(m => m.functions ?? []));
-  const previous = loadPrevious(ratchetPreviousDir(options, dir), index);
+  // Each record against the tree its text was captured from: its evidence commit in the
+  // store's repo. The current tree the store sits in is no witness once a regen with renames
+  // has been merged into it; it serves only records whose evidence the repo lacks.
+  const override = ratchetPreviousOverride(options);
+  let previous: PreviousTree | undefined;
+  let previousFor: ((rec: RatchetRecord) => PreviousTree | undefined) | undefined;
+  const used = new Map<PreviousTree, number>();
+  let fellBack = 0;
+  let fallback: PreviousTree | undefined | null = null;
+  if (override) {
+    previous = loadPrevious(override.dir, index);
+  } else {
+    const repo = repoOf(dir!);
+    const byEvidence = repo ? evidencePrevious(repo, index, GENERATED) : undefined;
+    previousFor = rec => {
+      const p = byEvidence?.(rec.evidence);
+      if (p) { used.set(p, (used.get(p) ?? 0) + 1); return p; }
+      if (fallback === null) fallback = loadPrevious(storeTree(dir!), index);
+      fellBack++;
+      return fallback;
+    };
+  }
+  const previousNote = () => {
+    if (override) return previous ? `previous tree ${override.dir}, ${previous.types.size} type renames` : 'no previous tree';
+    const parts = [...used].map(([p, n]) => `${n} records, ${p.types.size} type renames`);
+    if (fellBack) parts.push(`${fellBack} records without one${fallback ? ' (read against the store\'s tree)' : ''}`);
+    return `previous trees by evidence: ${parts.join('; ') || 'none'}`;
+  };
   const releases = new Set(store.releases().map(r => r.address));
   for (const m of project.sourceMaps.values()) {
     for (const f of m.functions ?? []) if (f.ratchet === 'release') releases.add(normalizeAddress(f.address));
   }
   const records = store.list().filter(r => r.kind === 'match');
-  const out = applyRecords(index, records, { releases, previous });
+  const out = applyRecords(index, records, { releases, previous, previousFor });
   for (const [p, text] of out.changed) {
     const f = project.files.get(p);
     if (f) f.content = text;
@@ -113,6 +145,6 @@ export function applyRatchetToProject(project: ReconstructedProject, options: Re
   }
   console.log(`ratchet: ${records.length} match records from ${dir}: kept ${counts.kept}, equal ${counts.equal}, released ${counts.released}, `
     + `unresolved ${counts.unresolved}, stale ${counts.stale}, gone ${counts.gone} (${Date.now() - t0} ms)`
-    + `${previous ? `; previous tree ${ratchetPreviousDir(options, dir)}, ${previous.types.size} type renames` : '; no previous tree'}${reportPath ? `; report ${reportPath}` : ''}`);
+    + `; ${previousNote()}${reportPath ? `; report ${reportPath}` : ''}`);
   return { applied: true, counts, reportPath };
 }
