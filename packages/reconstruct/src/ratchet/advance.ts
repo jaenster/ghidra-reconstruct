@@ -14,7 +14,10 @@
  * - `retired`: the function was released and the measurement shows what the release cost.
  *   The record and the release go: the generated body won deliberately.
  *
- * A release is consumed by the measurement that follows it either way.
+ * A release is consumed by the measurement that follows it either way. A closure member's
+ * release (members.ts writes them) is consumed once every record holding it was captured
+ * MATCH: each now stores the body the release let through, so the release has nothing left to
+ * do. While a holder is not captured the row stays, or the next regen would put the old body back.
  */
 import { bindSites, bodyForm, scanSites, type Binding } from './refs.js';
 import { capture, locate } from './ratchet.js';
@@ -39,7 +42,7 @@ export function readAudit(text: string): Map<string, AuditRow> {
   return out;
 }
 
-export type AdvanceStatus = 'new' | 'refreshed' | 'unchanged' | 'uncapturable' | 'pin' | 'hand' | 'phase-noise' | 'lost' | 'retired' | 'absent';
+export type AdvanceStatus = 'new' | 'refreshed' | 'unchanged' | 'uncapturable' | 'pin' | 'hand' | 'phase-noise' | 'lost' | 'retired' | 'absent' | 'consumed';
 
 export interface AdvanceRow { address: string; name: string; status: AdvanceStatus; audit: string; detail: string }
 
@@ -122,12 +125,24 @@ export function advance(index: SymbolIndex, store: RatchetStore, audit: Map<stri
       ? { address: rec.address, name, status: 'phase-noise', audit: st, detail: 'the tree carries the stored body; not advanced' }
       : { address: rec.address, name, status: 'lost', audit: st, detail: carried.why ?? '' });
   }
+  const captured = new Set(rows.filter(r => r.status === 'new' || r.status === 'refreshed' || r.status === 'unchanged').map(r => r.address));
+  const holders = new Map<string, string[]>();
+  for (const rec of existing.values()) {
+    if (rec.kind !== 'match') continue;
+    for (const m of rec.members.slice(1)) holders.set(m.address, [...(holders.get(m.address) ?? []), rec.address]);
+  }
+  for (const [member, hs] of holders) {
+    if (released.has(member) && !existing.has(member) && hs.every(h => captured.has(h))) {
+      consumed.add(member);
+      rows.push({ address: member, name: '', status: 'consumed', audit: audit.get(member)?.status ?? 'not in audit', detail: `member release: ${hs.join(', ')} captured with the body it let through` });
+    }
+  }
   if (!opts.dryRun && consumed.size > 0) store.writeReleases(releases.filter(r => !consumed.has(r.address)));
   return rows;
 }
 
 export function formatAdvanceReport(rows: AdvanceRow[]): string {
-  const order: AdvanceStatus[] = ['lost', 'phase-noise', 'hand', 'uncapturable', 'retired', 'new', 'refreshed', 'pin', 'absent', 'unchanged'];
+  const order: AdvanceStatus[] = ['lost', 'phase-noise', 'hand', 'uncapturable', 'retired', 'consumed', 'new', 'refreshed', 'pin', 'absent', 'unchanged'];
   const sorted = [...rows].sort((a, b) => order.indexOf(a.status) - order.indexOf(b.status) || a.address.localeCompare(b.address));
   return `status\taddress\tname\taudit\tdetail\n${sorted.map(r => `${r.status}\t${r.address}\t${r.name}\t${r.audit}\t${r.detail.replace(/[\t\n]/gu, ' ')}`).join('\n')}\n`;
 }

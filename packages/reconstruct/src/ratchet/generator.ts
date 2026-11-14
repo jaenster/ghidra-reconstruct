@@ -15,7 +15,7 @@ import type { ReconstructedProject, ReconstructOptions } from '../types.js';
 import { evidencePrevious, repoOf } from './evidence.js';
 import { previousTree, type PreviousTree } from './previous.js';
 import type { RatchetRecord } from './store.js';
-import { applyRecords, formatApplyReport, summarize } from './ratchet.js';
+import { applyRecords, formatApplyReport, summarize, type ApplyRow } from './ratchet.js';
 import { RatchetStore, normalizeAddress } from './store.js';
 import { GLOBALS_INDEX_FILE, SymbolIndex, diskTree, formatGlobalsIndex, memoryTree } from './symbol-index.js';
 
@@ -64,6 +64,15 @@ function loadPrevious(dir: string | undefined, current: SymbolIndex): PreviousTr
 /** The globals index every tree carries (symbol-index.ts reads it back). */
 export function globalsIndexText(project: ReconstructedProject): string {
   return formatGlobalsIndex(project.globals as Array<{ address: string; name: string; namespace?: string; dataType?: string; platform?: string }>);
+}
+
+/** Beside the report: the generated bodies of the kept closure members (members.ts reads it). */
+export const RATCHET_FRESH_FILE = 'ratchet-fresh.json';
+
+export function formatFreshBodies(rows: ApplyRow[]): string {
+  const out: Record<string, string> = {};
+  for (const r of [...rows].sort((a, b) => a.address.localeCompare(b.address))) if (r.fresh !== undefined) out[r.address] = r.fresh;
+  return `${JSON.stringify(out, null, 1)}\n`;
 }
 
 export interface GeneratorRatchetResult {
@@ -117,12 +126,14 @@ export function applyRatchetToProject(project: ReconstructedProject, options: Re
     if (fellBack) parts.push(`${fellBack} records without one${fallback ? ' (read against the store\'s tree)' : ''}`);
     return `previous trees by evidence: ${parts.join('; ') || 'none'}`;
   };
-  const releases = new Set(store.releases().map(r => r.address));
+  const releaseRows = store.releases();
+  const releases = new Set(releaseRows.map(r => r.address));
+  const releaseBodies = new Map(releaseRows.flatMap(r => (r.body ? [[r.address, r.body] as [string, string]] : [])));
   for (const m of project.sourceMaps.values()) {
     for (const f of m.functions ?? []) if (f.ratchet === 'release') releases.add(normalizeAddress(f.address));
   }
   const records = store.list().filter(r => r.kind === 'match');
-  const out = applyRecords(index, records, { releases, previous, previousFor });
+  const out = applyRecords(index, records, { releases, releaseBodies, previous, previousFor });
   for (const [p, text] of out.changed) {
     const f = project.files.get(p);
     if (f) f.content = text;
@@ -135,6 +146,7 @@ export function applyRatchetToProject(project: ReconstructedProject, options: Re
     fs.mkdirSync(reportDir, { recursive: true });
     reportPath = path.join(reportDir, 'ratchet-report.tsv');
     fs.writeFileSync(reportPath, formatApplyReport(out.rows), 'utf-8');
+    fs.writeFileSync(path.join(reportDir, RATCHET_FRESH_FILE), formatFreshBodies(out.rows), 'utf-8');
   } catch {
     reportPath = undefined;
   }

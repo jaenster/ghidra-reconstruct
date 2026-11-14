@@ -3,6 +3,10 @@
  * ratchet: the per-function body store (docs/ratchet.md).
  *
  *   advance --tree T --audit A --evidence REV --store S [--regen R]   after a VC8 measurement
+ *           [--fresh F [--members-report M] [--verify vc8|none] [--oracle-zig BIN] [--jobs N]
+ *            [--trial-dir D] [--scratch D] [--trial-wrap CMD] [--generated G] [--sample-equal N]] [--dry-run]
+ *           --fresh: the regen's .ghidra-mcp/ratchet-fresh.json; releases the non-MATCH closure
+ *           members whose records stay MATCH with their generated body (members.ts)
  *   apply   --tree T --store S [--in-place | --out O]      a generated tree, offline
  *   pin     --tree T --store S <addr...> [--note N]        capture hand-edited bodies
  *   unpin   --store S <addr...>
@@ -22,6 +26,7 @@ import * as path from 'node:path';
 
 import { advance, formatAdvanceReport, readAudit } from './advance.js';
 import { followHandFile } from './follow.js';
+import { formatMemberReport, readFreshBodies, releaseNonMatchMembers, summarizeMembers } from './members.js';
 import { ratchetMerge } from './merge.js';
 import { applyRecords, capture, formatApplyReport, summarize } from './ratchet.js';
 import { RatchetStore, normalizeAddress } from './store.js';
@@ -107,21 +112,47 @@ export async function main(argv: string[]): Promise<number> {
       // The regen side of the measured merge: a tree path, or a ref checked out from the tree's repo.
       let regenTree: { root: string; done: () => void } | undefined;
       if (typeof opts.regen === 'string') regenTree = fs.existsSync(opts.regen) ? { root: opts.regen, done: () => {} } : treeAt(tree, opts.regen);
-      const rows = advance(treeIndex(tree), store, audit, evidence, {
-        dh: dhByAddress(tree), dryRun: opts['dry-run'] === true, regen: regenTree ? treeIndex(regenTree.root) : undefined,
-      });
-      regenTree?.done();
+      const index = treeIndex(tree);
+      const regenIndex = regenTree ? treeIndex(regenTree.root) : undefined;
+      const dryRun = opts['dry-run'] === true;
+      const rows = advance(index, store, audit, evidence, { dh: dhByAddress(tree), dryRun, regen: regenIndex });
       emit(opts, formatAdvanceReport(rows));
       const n = (s: string) => rows.filter(r => r.status === s).length;
-      console.error(`ratchet advance @${evidence}: new ${n('new')}, refreshed ${n('refreshed')}, unchanged ${n('unchanged')}, phase-noise ${n('phase-noise')}, lost ${n('lost')}, retired ${n('retired')}, hand ${n('hand')}, uncapturable ${n('uncapturable')}`);
+      console.error(`ratchet advance @${evidence}: new ${n('new')}, refreshed ${n('refreshed')}, unchanged ${n('unchanged')}, phase-noise ${n('phase-noise')}, lost ${n('lost')}, retired ${n('retired')}, hand ${n('hand')}, uncapturable ${n('uncapturable')}, member releases consumed ${n('consumed')}${dryRun ? ' (dry run)' : ''}`);
+      if (typeof opts.fresh === 'string') {
+        const { Vc8TrialCompiler } = await import('./vc8-verify.js');
+        const compiler = opts.verify === 'none' ? undefined : new Vc8TrialCompiler(tree, {
+          zig: typeof opts['oracle-zig'] === 'string' ? opts['oracle-zig'] : undefined,
+          jobs: typeof opts.jobs === 'string' ? Number(opts.jobs) : undefined,
+          trialDir: typeof opts['trial-dir'] === 'string' ? opts['trial-dir'] : undefined,
+          scratch: typeof opts.scratch === 'string' ? opts.scratch : undefined,
+          wrap: typeof opts['trial-wrap'] === 'string' ? opts['trial-wrap'].split(' ').filter(Boolean) : undefined,
+        });
+        try {
+          const generated = typeof opts.generated === 'string' ? treeIndex(opts.generated) : regenIndex;
+          const mrows = await releaseNonMatchMembers(index, store, audit, {
+            fresh: readFreshBodies(fs.readFileSync(opts.fresh, 'utf-8')), compiler, evidence, dryRun, generated,
+            sampleEqual: typeof opts['sample-equal'] === 'string' ? Number(opts['sample-equal']) : undefined,
+          });
+          const text = formatMemberReport(mrows);
+          if (typeof opts['members-report'] === 'string') fs.writeFileSync(opts['members-report'], text, 'utf-8');
+          else process.stdout.write(text);
+          console.error(`ratchet members @${evidence}: ${Object.entries(summarizeMembers(mrows)).map(([k, v]) => `${k} ${v}`).join(', ')}${dryRun ? ' (dry run)' : ''}`);
+        } finally {
+          compiler?.close();
+        }
+      }
+      regenTree?.done();
       return 0;
     }
     case 'apply': {
       const tree = need(opts, 'tree');
       const store = new RatchetStore(need(opts, 'store'));
       const index = treeIndex(tree);
-      const releases = new Set(store.releases().map(r => r.address));
-      const out = applyRecords(index, store.list(), { releases, forceKeep: opts['force-keep'] === true });
+      const rows0 = store.releases();
+      const releases = new Set(rows0.map(r => r.address));
+      const releaseBodies = new Map(rows0.flatMap(r => (r.body ? [[r.address, r.body] as [string, string]] : [])));
+      const out = applyRecords(index, store.list(), { releases, releaseBodies, forceKeep: opts['force-keep'] === true });
       const target = opts['in-place'] === true ? tree : typeof opts.out === 'string' ? opts.out : undefined;
       if (target) {
         for (const [file, text] of out.changed) {

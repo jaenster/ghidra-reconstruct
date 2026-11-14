@@ -12,7 +12,7 @@ import { matchParams, paramIds, type ParamMatch } from './params.js';
 import { migrateStored, renameTypeSpelling, type PreviousTree } from './previous.js';
 import { bindSites, bodyFormSites, bindingKey, scanSites, siteSpellings, type Binding, type SiteScan } from './refs.js';
 import { rewriteBody } from './rewrite.js';
-import type { RatchetRecord, RecordKind, StoredBody } from './store.js';
+import { bodyHash, type RatchetRecord, type RecordKind, type StoredBody } from './store.js';
 import type { SymbolIndex } from './symbol-index.js';
 import { TokenKind } from '@ghidra-mcp/cpp-parser';
 import { definitionSignature, lexTokens, misparsedTypes, type FunctionExtent } from './scan.js';
@@ -132,11 +132,18 @@ export interface ApplyRow {
   kind: RecordKind;
   status: ApplyStatus;
   detail: string;
+  /**
+   * A `kept` closure member of a match record: the generated body the stored one replaced.
+   * `ratchet advance` compiles it against the record (members.ts) to decide its release.
+   */
+  fresh?: string;
 }
 
 export interface ApplyOptions {
   /** Addresses whose generated body goes through (release.tsv plus `ratchet:release` tags). */
   releases?: Set<string>;
+  /** address -> the `bodyHash` a release is for: only that generated body goes through. */
+  releaseBodies?: Map<string, string>;
   /** Re-spell every stored body even where the fresh one is equivalent (a rewrite test). */
   forceKeep?: boolean;
   /**
@@ -208,6 +215,10 @@ function compare(stored: StoredBody, storedScan: SiteScan, storedBindings: Array
 export function applyRecords(index: SymbolIndex, records: RatchetRecord[], opts: ApplyOptions = {}): ApplyOutcome {
   const rows: ApplyRow[] = [];
   const releases = opts.releases ?? new Set<string>();
+  const releaseBodies = opts.releaseBodies ?? new Map<string, string>();
+  /** Released, and the generated body is the one the release names (if it names one). */
+  const isReleased = (address: string, fresh: string | undefined) =>
+    releases.has(address) && (!releaseBodies.has(address) || (fresh !== undefined && bodyHash(fresh) === releaseBodies.get(address)));
   const planned = new Map<string, Planned[]>();
   const claimed = new Map<string, string>();
   const inserts = new Map<string, Planned[]>();
@@ -219,18 +230,19 @@ export function applyRecords(index: SymbolIndex, records: RatchetRecord[], opts:
     const rootName = rec.members[0]?.name ?? rec.address;
     const row = (m: StoredBody, status: ApplyStatus, detail = '') =>
       rows.push({ address: m.address, name: index.fnByAddr.get(m.address)?.qname ?? m.name, record: rec.address, kind: rec.kind, status, detail });
-    if (rec.kind === 'match' && releases.has(rec.address)) {
+    if (rec.kind === 'match' && isReleased(rec.address, locate(index, rec.address)?.definition)) {
       row(rec.members[0], 'released', 'release.tsv or ratchet:release');
       continue;
     }
     // Per member: where it is now, and whether its fresh body already is the stored one.
     type M = { stored: StoredBody; loc?: Located; scan?: SiteScan; bindings?: Array<Binding | undefined>; freshScan?: SiteScan; equal?: boolean; released: boolean };
-    const ms: M[] = rec.members.map(stored => ({ stored, released: rec.kind === 'match' && releases.has(stored.address) }));
+    const ms: M[] = rec.members.map(stored => ({ stored, released: false }));
     const previous = opts.previousFor?.(rec) ?? opts.previous;
     let broken = '';
     for (const m of ms) {
       m.loc = locate(index, m.stored.address);
       if (!m.loc) { broken = `${m.stored.address} (${m.stored.name}) is not defined in the tree`; break; }
+      m.released = rec.kind === 'match' && isReleased(m.stored.address, m.loc.definition);
       if (m.released) continue;
       m.scan = scanSites(m.stored.text);
       if (!m.scan) { broken = `stored body of ${m.stored.address} no longer parses`; break; }
@@ -317,7 +329,9 @@ export function applyRecords(index: SymbolIndex, records: RatchetRecord[], opts:
       const l = planned.get(loc.file) ?? [];
       l.push({ start: loc.extent.bodyStart, end: loc.extent.end, text: o.text });
       planned.set(loc.file, l);
-      row(o.m.stored, rec.kind === 'pin' ? 'pinned' : 'kept', o.renames.length ? o.renames.join('; ') : '');
+      const notes = [...(releases.has(a) ? [`the release names another body than ${bodyHash(loc.definition)}`] : []), ...o.renames];
+      row(o.m.stored, rec.kind === 'pin' ? 'pinned' : 'kept', notes.join('; '));
+      if (rec.kind === 'match' && a !== rec.address) rows[rows.length - 1].fresh = loc.definition;
     }
     for (const m of ms) if (m.released) row(m.stored, 'released', `member of ${rec.address}`);
     for (const m of ms) if (m.equal && !m.released && !opts.forceKeep && !out.some(o => o.m === m)) row(m.stored, 'equal');
