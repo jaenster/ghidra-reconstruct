@@ -16,7 +16,11 @@ describe('loop-stride-hoist', () => {
   for (const example of native.functions) {
     it(`${example.address} ${example.name}: recovers the native-measured strides`, () => {
       const ast = parse(example.definition, { recover: false });
-      const code = emit(loopStrideHoistPlugin.createTransformer()(ast) as AnyNode);
+      // These tree-wide unambiguous field types are declared by the published
+      // D2DataTablesStrc headers, rather than guessed from their spelling.
+      const code = emit(loopStrideHoistPlugin.createTransformer({ fieldTypes: {
+        nTxtMissilesSize: 'int', pTxtMissiles: 'D2MissilesTxt *',
+      } })(ast) as AnyNode);
       assert.equal((code.match(/const uint32_t nByteStride/g) ?? []).length, example.expectedStrides);
       assert.doesNotMatch(code, /\+=\s*\w+\s*\*\s*4/);
     });
@@ -53,6 +57,28 @@ describe('loop-stride-hoist', () => {
     assert.match(code, /if \(stop\) return;/);
   });
 
+  it('allows ordinary scalar copies, casts and arithmetic without treating them as aliases', () => {
+    const code = run(`void f(int step) { int copy = step; short narrow = (short)step;
+      int twice; twice = step * 2; (void)step; ${loop} }`);
+    assert.match(code, /const uint32_t nByteStride/);
+  });
+
+  it('requires a proven primitive field type before excluding overloaded operators', () => {
+    const source = `void f(int step, Limits *p) { int copy = step + p->limit; ${loop} }`;
+    const transform = (type?: string) => emit(loopStrideHoistPlugin.createTransformer({
+      structFields: type ? { Limits: { limit: type } } : undefined,
+    })(parse(source)) as AnyNode);
+    assert.doesNotMatch(transform(), /nByteStride/);
+    assert.doesNotMatch(transform('StepRef'), /nByteStride/);
+    assert.match(transform('int'), /nByteStride/);
+  });
+
+  it('distinguishes a local from a same-named member or qualified global', () => {
+    const code = run(`void f(Data *p) { int step = p->step; int copy = Scope::step;
+      ${loop} }`);
+    assert.match(code, /nByteStride/);
+  });
+
   for (const [reason, source] of [
     ['an indeterminate local', `void f() { int step; ${loop} }`],
     ['a local initialized on only one path', `void f(int flag) { int step; if (flag) step = 4; ${loop} }`],
@@ -61,6 +87,17 @@ describe('loop-stride-hoist', () => {
     ['an address passed before the loop', `void f(int step) { bind(&step); ${loop} }`],
     ['a possible implicit reference argument', `void f(int step) { bind(step); ${loop} }`],
     ['a reference alias', `void f(int step) { int &alias = step; ${loop} }`],
+    ['a converting constructor that can retain a reference', `void f(int step) { StepRef alias = step; ${loop} }`],
+    ['an overloaded assignment that can retain a reference', `void f(int step) { StepRef alias; alias = step; ${loop} }`],
+    ['a C-style class conversion', `void f(int step) { (StepRef)step; ${loop} }`],
+    ['a named class conversion', `void f(int step) { static_cast<StepRef>(step); ${loop} }`],
+    ['an explicit reference cast', `void f(int step) { (int&)step; ${loop} }`],
+    ['a scalar initializer with an overloaded operator', `void f(int step) { int copied = step + marker; ${loop} }`],
+    ['an overloaded comma expression', `void f(int step) { (step, marker); ${loop} }`],
+    ['an overloaded subscript', `void f(int step) { indexRef[step]; ${loop} }`],
+    ['an overloaded compound assignment destination', `void f(int step) { marker += step; ${loop} }`],
+    ['an overloaded compound assignment with a scalar left side', `void f(int step) { step += marker; ${loop} }`],
+    ['an unknown conditional conversion', `void f(int step, int flag) { (void)(flag ? step : marker); ${loop} }`],
     ['volatile storage', `void f(volatile int step) { ${loop} }`],
     ['an unknown alias that may be volatile', `void f(VolatileWord step) { ${loop} }`],
     ['a narrow step subject to integer promotion', `void f(unsigned char step) { ${loop} }`],

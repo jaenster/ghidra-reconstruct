@@ -9,21 +9,40 @@
  * in the loop is the final increment. A separate unsigned temporary preserves
  * the target's 32-bit arithmetic without speculatively overflowing a signed
  * product before a call or an early exit. The step itself is never modified.
+ * Other uses must consume its value through proven primitive operations;
+ * unknown conversions/operators may retain an implicit reference. Existing
+ * snapshot type tables prove member reads when they participate in those uses.
  */
-import { NodeKind } from '../../../ast/kinds.js';
+import { NodeKind, isExpression } from '../../../ast/kinds.js';
 import type {
-  ASTNode, AssignExpr, BinaryExpr, CallExpr, CompoundStmt, DeclStmt, DoWhileStmt,
+  ASTNode, AssignExpr, BinaryExpr, CommaExpr, CompoundStmt, ConditionalExpr, CStyleCastExpr, DeclStmt, DoWhileStmt,
   ExprStmt, Expression, FunctionDecl, Identifier, IntegerLiteralExpr,
-  ParameterDecl, Statement, TypeNode, UnaryExpr, VariableDecl,
+  MemberExpr, ParameterDecl, PostfixExpr, Statement, TypeNode, UnaryExpr, VariableDecl,
 } from '../../../ast/nodes.js';
 import { Decl, Expr, Stmt, Type } from '../../../ast/factory.js';
-import { findNodesByKind, traverseAST } from '../../../ast/visitor.js';
+import { findNodesByKind, getChildren, traverseAST } from '../../../ast/visitor.js';
 import { emit } from '../../../emit/index.js';
 import { createTransformer, updateNode, cloneNode } from '../../transformer.js';
 import { buildFunctionFlow, ENTRY_DEF, type FunctionFlow } from '../../cfg/index.js';
-import type { TransformPlugin } from '../types.js';
+import type { PluginOptions, TransformPlugin } from '../types.js';
+import { createExprShape } from './expr-shape.js';
+import { shapeOfNode, type TypeShape } from './call-arg-cast.js';
+
+export interface LoopStrideHoistOptions extends PluginOptions {
+  globalTypes?: Record<string, string>;
+  enclosingVarTypes?: Record<string, string>;
+  structFields?: Record<string, Record<string, string>>;
+  fieldTypes?: Record<string, string>;
+  typedefTargets?: Record<string, string>;
+}
 
 const WORDS = new Set(['int', 'signed int', 'unsigned int', 'signed', 'unsigned', 'int32_t', 'uint32_t']);
+const SCALARS = new Set([...WORDS, 'bool', 'char', 'signed char', 'unsigned char',
+  'short', 'short int', 'signed short', 'signed short int', 'unsigned short', 'unsigned short int',
+  'long', 'long int', 'signed long', 'signed long int', 'unsigned long', 'unsigned long int',
+  'long long', 'long long int', 'unsigned long long', 'unsigned long long int',
+  '__int64', 'unsigned __int64', 'float', 'double', 'long double', 'wchar_t',
+  'int8_t', 'uint8_t', 'int16_t', 'uint16_t', 'int64_t', 'uint64_t']);
 const unwrap = (e: Expression): Expression => {
   let x = e;
   while (x.kind === NodeKind.ParenExpr) x = (x as { expression: Expression }).expression;
@@ -34,9 +53,11 @@ const nameOf = (e: Expression): string | null => {
   return x.kind === NodeKind.Identifier ? (x as Identifier).name : null;
 };
 function mentions(root: ASTNode, name: string): number {
-  let count = 0;
-  for (const n of traverseAST(root)) if (n.kind === NodeKind.Identifier && (n as Identifier).name === name) count++;
-  return count;
+  // A field or qualified name with the same spelling is not the local.
+  if (root.kind === NodeKind.MemberExpr) return mentions((root as MemberExpr).object, name);
+  if (root.kind === NodeKind.QualifiedId) return 0;
+  if (root.kind === NodeKind.Identifier) return (root as Identifier).name === name ? 1 : 0;
+  return getChildren(root).reduce((count, child) => count + mentions(child, name), 0);
 }
 function zeroTarget(s: Statement): string | null {
   let name: string | null = null, value: Expression | null = null;
@@ -78,7 +99,7 @@ function replaceNode(root: ASTNode, target: ASTNode, replacement: ASTNode): ASTN
   return root;
 }
 
-function rewrite(fn: FunctionDecl): CompoundStmt | null {
+function rewrite(fn: FunctionDecl, options: LoopStrideHoistOptions): CompoundStmt | null {
   if (!fn.body || !findNodesByKind(fn.body, NodeKind.DoWhileStmt).length) return null;
   const nodes = [...traverseAST(fn.body)];
   if (nodes.some(n => [NodeKind.GotoStmt, NodeKind.LabelStmt, NodeKind.LambdaExpr, NodeKind.AsmDecl, NodeKind.NewExpr].includes(n.kind))) return null;
@@ -100,16 +121,51 @@ function rewrite(fn: FunctionDecl): CompoundStmt | null {
     const t = types.get(name);
     return !!t && !duplicates.has(name) && WORDS.has(emit(t as never).trim().replace(/^const\s+/, ''));
   };
-  const escapes = (name: string) => nodes.some(n => {
-    if (n.kind === NodeKind.UnaryExpr && (n as UnaryExpr).operator === '&' && nameOf((n as UnaryExpr).operand) === name) return true;
-    // A C++ callee could bind a reference even without an explicit &.
-    if (n.kind === NodeKind.CallExpr && (n as CallExpr).arguments.some(a => mentions(a, name))) return true;
-    if (n.kind === NodeKind.InitListExpr && mentions(n, name)) return true;
-    if (n.kind === NodeKind.VariableDecl) {
-      const v = n as VariableDecl;
-      if (v.initializer && /&/.test(emit(v.type as never)) && mentions(v.initializer, name)) return true;
+  const resolve = (name: string) => options.typedefTargets?.[name];
+  const primitive = (s: TypeShape | null) => !!s && (s.stars > 0 || SCALARS.has(s.base));
+  const primitiveType = (type: TypeNode) => primitive(shapeOfNode(type, 0, resolve));
+  const shape = createExprShape(types, { ...options, resolve });
+  const primitiveName = (name: string | null) => name !== null && !duplicates.has(name)
+    && types.has(name) && primitiveType(types.get(name)!);
+  // Primitive syntax alone is not an escape proof: constructors, casts and
+  // overloaded operators can bind an int& without an explicit & or CallExpr.
+  // Only operations over proven scalar values may consume the step by value.
+  const valueOnly = (expression: Expression, step: string): boolean => {
+    const e = unwrap(expression);
+    if (e.kind === NodeKind.Identifier) return primitiveName((e as Identifier).name);
+    if (e.kind === NodeKind.MemberExpr || e.kind === NodeKind.QualifiedId) return primitive(shape(e));
+    if ([NodeKind.IntegerLiteral, NodeKind.FloatingLiteral, NodeKind.CharLiteral, NodeKind.BoolLiteral, NodeKind.NullptrLiteral].includes(e.kind)) return true;
+    if (e.kind === NodeKind.UnaryExpr || e.kind === NodeKind.PostfixExpr) {
+      const u = e as UnaryExpr | PostfixExpr;
+      return !['&', '*'].includes(u.operator) && valueOnly(u.operand, step);
+    }
+    if (e.kind === NodeKind.BinaryExpr) {
+      const b = e as BinaryExpr;
+      return valueOnly(b.left, step) && valueOnly(b.right, step);
+    }
+    if (e.kind === NodeKind.ConditionalExpr) {
+      const c = e as ConditionalExpr;
+      return valueOnly(c.condition, step) && valueOnly(c.thenExpr, step) && valueOnly(c.elseExpr, step);
+    }
+    if (e.kind === NodeKind.CommaExpr) return (e as CommaExpr).expressions.every(x => valueOnly(x, step));
+    if (e.kind === NodeKind.CStyleCastExpr || e.kind === NodeKind.StaticCastExpr) {
+      const c = e as CStyleCastExpr;
+      return (primitiveType(c.type) || emit(c.type as never).trim() === 'void') && valueOnly(c.expression, step);
+    }
+    if (e.kind === NodeKind.AssignExpr) {
+      const a = e as AssignExpr;
+      // A plain store into a primitive cannot overload assignment. A value
+      // produced without reading step cannot acquire a reference to it here.
+      return primitive(shape(a.left)) && ((a.operator === '=' && !mentions(a.right, step)) || valueOnly(a.right, step));
     }
     return false;
+  };
+  const escapes = (name: string) => nodes.some(n => {
+    if (n.kind === NodeKind.VariableDecl) {
+      const v = n as VariableDecl;
+      if (v.initializer && mentions(v.initializer, name) && !primitiveType(v.type)) return true;
+    }
+    return isExpression(n.kind) && mentions(n, name) > 0 && !valueOnly(n as Expression, name);
   });
   const used = new Set([
     ...types.keys(),
@@ -164,17 +220,17 @@ export const loopStrideHoistPlugin: TransformPlugin = {
   id: 'loop-stride-hoist',
   name: 'Loop Stride Hoist',
   description: 'Compute an invariant 32-bit byte stride before a zero-initialized do loop',
-  version: '0.1.0',
+  version: '0.1.1',
   defaultEnabled: true,
   priority: 69.7,
   tags: ['fidelity', 'loops'],
-  createTransformer: () => createTransformer({
+  createTransformer: (options: LoopStrideHoistOptions = {}) => createTransformer({
     visitFunctionDecl(fn: FunctionDecl): ASTNode | undefined {
       let current = fn;
       const limit = fn.body ? findNodesByKind(fn.body, NodeKind.DoWhileStmt).length : 0;
       // One site per graph: rebuild the proof after each inserted declaration.
       for (let i = 0; i < limit; i++) {
-        const body = rewrite(current);
+        const body = rewrite(current, options);
         if (!body) break;
         current = updateNode(current, { body });
       }

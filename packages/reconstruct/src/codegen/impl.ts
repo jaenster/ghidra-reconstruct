@@ -3728,6 +3728,13 @@ function transformDecompiledCode(
         enclosingVarTypes,
       };
       perPluginOptions['pow2-remainder'] = perPluginOptions['arith-idioms'];
+      perPluginOptions['loop-stride-hoist'] = {
+        globalTypes: context.funcPtrArgCasts.globalTypes,
+        fieldTypes: context.funcPtrArgCasts.fieldTypes,
+        structFields: context.funcPtrArgCasts.structFields,
+        typedefTargets: context.funcPtrArgCasts.typedefTargets,
+        enclosingVarTypes,
+      };
       perPluginOptions['pseudo-op-lower'] = {
         stackSlots: enclosing?.stackSlots,
         unionNames: context.funcPtrArgCasts.unionNames,
