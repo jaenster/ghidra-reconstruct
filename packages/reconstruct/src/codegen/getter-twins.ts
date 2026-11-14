@@ -39,8 +39,35 @@ export interface GetterTwinDef extends GetterTwin {
   address: string;
   /** The twin's bare name. */
   name: string;
-  /** The twin's definition, namespace-free, for the unit's inline header. */
-  definition: string;
+  /** The getter as extracted: its definition is spelled when the inline header is written. */
+  func: ExtractedFunction;
+  /** The called function's name as the decompile spells it, qualified. */
+  calleeSpelled: string;
+  /** The called function's return type, when the extraction has it. */
+  calleeReturn?: string;
+}
+
+/** The struct a type names through pointers: `struct D2UnitStrc *` -> `D2UnitStrc`. */
+export function pointee(type: string | undefined): string | undefined {
+  const m = /^\s*(?:const\s+)?(?:struct\s+|union\s+)?(?:::)?([A-Za-z_]\w*)\s*\**\s*$/.exec(type ?? '');
+  return m ? m[1] : undefined;
+}
+
+/**
+ * The twin's definition, for the getter's unit's inline header, inside the namespace the
+ * getter is declared in. Spelled when the header is written, so the types are spelled as
+ * the unit header spells the getter's own declaration (a type a namespace shadows is
+ * root-qualified).
+ */
+export function getterTwinDefinition(t: GetterTwinDef): string {
+  const decl = declaredParameters(t.func);
+  const callee = t.calleeSpelled.includes('::') ? normalizeQualifiedReference(t.calleeSpelled) : t.calleeSpelled;
+  return [
+    `// ${t.func.name} as its callers expanded it: forced inline where the original read the record in place.`,
+    `static D2_FORCEINLINE ${returnSigType(t.func.returnType)} ${t.name}(${decl.map(p => `${p.type} ${p.name}`).join(', ')}) {`,
+    `    return ${callee}(${t.calleeArgs.map(i => decl[i].name).join(', ')})->${t.member}[${decl[t.indexParam].name}->${t.indexMember}];`,
+    `}`,
+  ].join('\n');
 }
 
 const unparen = (e: N): N => { while (e && e.kind === NodeKind.ParenExpr) e = e.expression; return e; };
@@ -122,11 +149,7 @@ export function getterTwins(functions: ReadonlyArray<ExtractedFunction>): Getter
     const body = bodyText(func.decompiled);
     const shape = body ? getterShape(body, params) : undefined;
     if (!shape) continue;
-    const decl = declaredParameters(func);
-    if (decl.length !== params.length) continue;
     const name = `${func.name}Inline`;
-    const calleeQualified = shape.callee.includes('::') ? normalizeQualifiedReference(shape.callee) : shape.callee;
-    const args = shape.calleeArgs.map(i => decl[i].name).join(', ');
     const key = `${shape.callee.replace(/^.*::/, '')}/${shape.calleeArgs.length}/${shape.member}/${shape.indexMember}`;
     seen.set(key, (seen.get(key) ?? 0) + 1);
     found.push({
@@ -137,12 +160,9 @@ export function getterTwins(functions: ReadonlyArray<ExtractedFunction>): Getter
       name,
       // Spelled as the getter's own references are, with the twin's name.
       call: `${normalizeQualifiedReference(`${func.namespace}::${func.name}`).replace(/[^:]+$/, '')}${name}`,
-      definition: [
-        `// ${func.name} as its callers expanded it: forced inline where the original read the record in place.`,
-        `static D2_FORCEINLINE ${returnSigType(func.returnType)} ${name}(${decl.map(p => `${p.type} ${p.name}`).join(', ')}) {`,
-        `    return ${calleeQualified}(${args})->${shape.member}[${decl[shape.indexParam].name}->${shape.indexMember}];`,
-        `}`,
-      ].join('\n'),
+      func,
+      calleeSpelled: shape.callee,
+      calleeReturn: functions.find(f => f.namespace && `${f.namespace}::${f.name}` === shape.callee)?.returnType,
     });
   }
   return found.filter(t => seen.get(`${t.callee}/${t.calleeArgs.length}/${t.member}/${t.indexMember}`) === 1);
