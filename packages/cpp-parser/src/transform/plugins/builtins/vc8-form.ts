@@ -1384,13 +1384,53 @@ function doCache(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'cache' }>): void {
   const byAddress = f.type !== undefined && norm(f.expr).startsWith('&');
   const want = byAddress ? norm(f.expr).slice(1) : norm(f.expr);
   const locals = localNames(fn);
-  const isE = (n: ASTNode) => isExpression(n.kind) && text(n as Expression) === want;
+  const parents = parentsOf(fn);
+  const scopes = new Set([NodeKind.FunctionDecl, NodeKind.MethodDecl, NodeKind.LambdaExpr,
+    NodeKind.ClassDecl, NodeKind.StructDecl, NodeKind.UnionDecl]);
+  const unevaluated = new Set([NodeKind.SizeofExpr, NodeKind.AlignofExpr, NodeKind.NoexceptExpr, NodeKind.TypeidExpr,
+    NodeKind.StaticAssertDecl, NodeKind.EnumeratorDecl, NodeKind.ExprTemplateArg, NodeKind.Attribute]);
+  const nested = (n: ASTNode): boolean => {
+    for (let p = parents.get(n); p; p = parents.get(p)) if (scopes.has(p.kind)) return true;
+    return false;
+  };
+  // Identifier is also the AST kind of a declaration's name. Count and rewrite
+  // value positions only; type syntax, qualified-name pieces and constant/type
+  // queries keep their original spelling (decltype(x) differs from decltype(*p)).
+  const isE = (n: ASTNode): boolean => {
+    if (!isExpression(n.kind) || text(n as Expression) !== want) return false;
+    // norm deliberately follows a global when it gains a namespace. A qualified
+    // global with the same leaf name as a local is nevertheless another binding.
+    if ([...walk(n)].some(x => x.node.kind === NodeKind.QualifiedId && localDependencies.has(text(x.node)))) return false;
+    let child = n;
+    for (let p = parents.get(child); p; child = p, p = parents.get(p)) {
+      const fields = p as unknown as Record<string, unknown>;
+      if (isType(p.kind) || unevaluated.has(p.kind) || p.kind === NodeKind.QualifiedId ||
+          fields.name === child || fields.label === child || fields.target === child ||
+          (p.kind === NodeKind.CaseStmt && fields.value === child)) return false;
+      if (p.kind === NodeKind.VariableDecl && (p as VariableDecl).specifiers.some(s =>
+          s === 'constexpr' || s === 'constinit' || s === 'static' || s === 'thread_local')) return false;
+    }
+    if (nested(n)) refuse(`${f.expr} occurs in a nested scope`);
+    return true;
+  };
+  const declarations = [...walk(fn.body!)].filter(x => x.node.kind === NodeKind.VariableDecl && !nested(x.node))
+    .map(x => x.node as VariableDecl);
+  const dependencies = identifiers(parseExpr(f.expr));
+  const localDependencies = new Set([...dependencies].filter(name => locals.has(name)));
+  if ([...walk(parseExpr(f.expr))].some(x => x.node.kind === NodeKind.QualifiedId && localDependencies.has(text(x.node))))
+    refuse(`${f.expr} has an ambiguous qualified binding`);
+  for (const name of dependencies) {
+    const count = declarations.filter(d => d.name.name === name).length + fn.parameters.filter(p => p.name?.name === name).length;
+    if (count > 1) refuse(`${name} has ambiguous bindings`);
+  }
   const stores = (n: ASTNode) => {
     for (const { node } of walk(n)) {
-      if (node.kind !== NodeKind.AssignExpr) continue;
-      const l = text((node as AssignExpr).left);
-      if (l === want || identifiers((node as AssignExpr).left).has(f.name)) return true;
-      if (isId(unparen((node as AssignExpr).left)) && identifiers(parseExpr(f.expr)).has((unparen((node as AssignExpr).left) as Identifier).name)) return true;
+      const target = node.kind === NodeKind.AssignExpr ? (node as AssignExpr).left
+        : node.kind === NodeKind.PostfixExpr || (node.kind === NodeKind.UnaryExpr && ['++', '--'].includes((node as UnaryExpr).operator))
+          ? (node as UnaryExpr | PostfixExpr).operand : undefined;
+      if (!target) continue;
+      if (text(target) === want || identifiers(target).has(f.name)) return true;
+      if (isId(unparen(target)) && dependencies.has((unparen(target) as Identifier).name)) return true;
     }
     return false;
   };
@@ -1399,7 +1439,9 @@ function doCache(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'cache' }>): void {
     for (const { node, slot } of [...walk(n)]) {
       if (!slot || !isE(node)) continue;
       const owner = !Array.isArray(slot.parent) ? (slot.parent as unknown as ASTNode) : undefined;
-      if (owner && owner.kind === NodeKind.AssignExpr && slot.key === 'left') refuse(`${f.expr} is stored`);
+      if (owner && ((owner.kind === NodeKind.AssignExpr && slot.key === 'left') ||
+          owner.kind === NodeKind.PostfixExpr || (owner.kind === NodeKind.UnaryExpr &&
+          ['++', '--'].includes((owner as UnaryExpr).operator)))) refuse(`${f.expr} is stored`);
       const id = { kind: NodeKind.Identifier, name: f.name } as Identifier;
       if (!byAddress) put(slot, id);
       else if (owner && owner.kind === NodeKind.MemberExpr && slot.key === 'object' && !(owner as unknown as { isArrow: boolean }).isArrow) {
@@ -1411,7 +1453,7 @@ function doCache(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'cache' }>): void {
     return k;
   };
   if (f.type) {
-    if (locals.has(f.name)) refuse(`${f.name} exists`);
+    freshName(fn, f.name);
     let block: CompoundStmt | undefined, at = -1;
     if (f.anchor) {
       const a = norm(f.anchor);
@@ -1445,6 +1487,27 @@ function doCache(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'cache' }>): void {
       }
       if (!block) refuse(`no block holds every ${f.expr}`);
     }
+    // The insertion is before a whole statement. A dependency declared in that
+    // statement (including another declarator) is not yet in scope/initialized.
+    // Declarations in enclosing blocks and loop/if initializers may dominate it.
+    const declaredBefore = (d: VariableDecl): boolean => {
+      let point: ASTNode = block!.statements[at];
+      for (let p = parents.get(point); p; point = p, p = parents.get(p)) {
+        if (p.kind === NodeKind.CompoundStmt) {
+          const statements = (p as CompoundStmt).statements, index = statements.indexOf(point as Statement);
+          if (index >= 0 && statements.slice(0, index).some(s => s.kind === NodeKind.DeclStmt &&
+              (s as DeclStmt).declarations.includes(d))) return true;
+        }
+        if ([NodeKind.ForStmt, NodeKind.IfStmt, NodeKind.SwitchStmt].includes(p.kind)) {
+          const node = p as unknown as { init?: ASTNode; body?: ASTNode; thenBranch?: ASTNode; elseBranch?: ASTNode };
+          if (node.init && [node.body, node.thenBranch, node.elseBranch].includes(point) &&
+              [...walk(node.init)].some(x => x.node === d)) return true;
+        }
+      }
+      return false;
+    };
+    for (const d of declarations) if (dependencies.has(d.name.name) && !declaredBefore(d))
+      refuse(`${d.name.name} is not declared before the cache`);
     const rest = block!.statements.slice(at);
     const reads = (s: ASTNode) => [...walk(s)].filter(x => isE(x.node)).length;
     // Without an anchor every read is after the local; with one, reads before it keep E.
@@ -1455,7 +1518,7 @@ function doCache(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'cache' }>): void {
     for (let k = 0; k < rest.length && seen < (f.count ?? Infinity); k++) { const r = reads(rest[k]); if (r > 0) { last = k; seen += r; } }
     if (last < 0) refuse(`${f.expr} is not read after the anchor`);
     if (f.count !== undefined && seen !== f.count) refuse(`the first ${f.count} reads of ${f.expr} do not end a statement`);
-    for (let k = 0; k < last; k++) if (stores(rest[k])) refuse(`${f.expr} changes before its last read`);
+    for (let k = 0; k <= last; k++) if (stores(rest[k])) refuse(`${f.expr} changes in the cached range`);
     let n = 0;
     for (const s of rest.slice(0, last + 1)) n += replaceIn(s);
     const decl = parse(`void __vc8f() { ${f.type} ${f.name} = ${f.expr}; }`).declarations[0] as FunctionDecl;
