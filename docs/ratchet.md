@@ -79,11 +79,18 @@ reads that tree too (`ratchet/previous.ts`):
   by (struct, offset), enum constants and every recorded type spelling then follow the new
   name. Anything less is not a rename: the type is gone and the record unresolved, as before.
 
-The previous tree is `RECON_RATCHET_PREVIOUS` (empty: none), else the project's
-`ratchet.previous`, else the tree the store sits in (`<modified>/ratchet`) when it carries a
-globals index: at regen time that is `source/modified` before this regen is merged. `ratchet
-merge` gives its pins the tree before the merge. Without a previous tree, a site the record
-left unbound compares by its spelling and is printed as stored.
+Each record is read against the tree its text was captured from: its `evidence` commit in the
+repo that holds the store (`ratchet/evidence.ts`). Where that tree did not yet carry what is
+read, the first commit after it on HEAD's first-parent line that does: the globals index for
+names, source maps with `paramStorage` for storage (the seed evidence `1985bb0f9` has neither).
+The current tree the store sits in is no witness: once a regen with renames is merged into it,
+it spells the new names (deploy 1167: the second daemon rebuild kept renamed globals again,
+strict red). Commits are read with `git cat-file`, never checked out, and their indices cached
+per commit. `RECON_RATCHET_PREVIOUS` (empty: none) or the project's `ratchet.previous` overrides
+this with one tree for every record; a record whose evidence the repo lacks falls back to the
+tree the store sits in. `ratchet merge` reads its pins the same way, falling back to the tree
+before the merge. Without a previous tree, a site the record left unbound compares by its
+spelling and is printed as stored.
 
 ## Every regen: apply (generator, full regen and live daemon alike)
 
