@@ -9,7 +9,7 @@
  * body again under the current names. See docs/ratchet.md.
  */
 import { matchParams, paramIds, type ParamMatch } from './params.js';
-import { migrateStored, renameTypeSpelling, type PreviousTree } from './previous.js';
+import { migrateBinding, migrateStored, renameTypeSpelling, type PreviousTree } from './previous.js';
 import { bindSites, bodyFormSites, bindingKey, scanSites, siteSpellings, type Binding, type SiteScan } from './refs.js';
 import { rewriteBody } from './rewrite.js';
 import type { RatchetRecord, RecordKind, StoredBody } from './store.js';
@@ -202,6 +202,25 @@ function compare(stored: StoredBody, storedScan: SiteScan, storedBindings: Array
 }
 
 /**
+ * A stored field site bound by candidate owners alone, bound to its one field where the
+ * stored text resolves it: by the tree the body compiled in when there is one, so the binding
+ * carries the field's type THEN and the rewrite refuses a field retyped since. A record
+ * captured before the scanner read the body's own structs bound every field reached through
+ * a frame record (`__frame0.dwTickCount.sHash`) this way, and a retype of such a field went
+ * through: the stored `&x.sHash`, right for a struct, was printed again for an array.
+ */
+function typedFields(scan: SiteScan, bindings: Array<Binding | undefined>, scope: string[], index: SymbolIndex, previous: PreviousTree | undefined): Array<Binding | undefined> {
+  if (!bindings.some(b => b?.k === 'fdc')) return bindings;
+  const there = bindSites(scan, previous?.index ?? index, scope);
+  return bindings.map((b, i) => {
+    const t0 = there[i];
+    if (!b || b.k !== 'fdc' || !t0 || t0.k !== 'fd') return b;
+    const t = previous ? migrateBinding(t0, previous) : t0;
+    return t.k === 'fd' && b.c.some(([s, o]) => s === t.s && o === t.o) ? t : b;
+  });
+}
+
+/**
  * Apply the store to a generated tree. `index` is the tree's own index (it holds the file
  * texts); the outcome lists the files that change.
  */
@@ -238,6 +257,7 @@ export function applyRecords(index: SymbolIndex, records: RatchetRecord[], opts:
       m.bindings = new Array(m.scan.sites.length);
       for (const [i, b] of m.stored.bindings) m.bindings[i] = b;
       if (previous) ({ stored: m.stored, bindings: m.bindings } = migrateStored(m.stored, m.scan, m.bindings, previous));
+      m.bindings = typedFields(m.scan, m.bindings, m.stored.scope, index, previous);
       if (m.stored.text === m.loc.definition) { m.equal = true; continue; }
       m.freshScan = scanSites(m.loc.definition);
       m.equal = compare(m.stored, m.scan, m.bindings, m.loc, m.freshScan, index);
