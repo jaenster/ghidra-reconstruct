@@ -586,11 +586,15 @@ function chainAt(stmts: readonly Statement[], i: number, ctx: Ctx, fallsOff: boo
   if (!chainTail(rest, ctx.noreturn, fallsOff)) return null;
   const e = ctx.reader.edge(ifs);
   if (!e) return null;
-  // Where the original's copy of R... lies: a lone constant return by the return facts,
-  // anything else by the lines of the statements.
+  // The test falls into the original's copy of R...: the fall-through block prints on R...'s
+  // lines and on none of the arm's (a lone constant return placed by the return facts, or
+  // the lowest offset R...'s lines print).
   const one = rest.length === 1 && rest[0].kind === NodeKind.ReturnStmt;
   const at = (one ? sharedReturn(rest[0], ctx) : null) ?? ctx.reader.entry(rest, e.jcc);
-  if (at === null || at !== e.fall) return null;
+  const own = ctx.reader.linesOf(rest), arm = ctx.reader.linesOf([then]);
+  // A lone return a pass copied into the arm (a goto to it) claims the same lines there.
+  const fallsInto = e.fallLines.some(l => own.has(l)) && (one || !e.fallLines.some(l => arm.has(l)));
+  if (at !== e.fall && !fallsInto) return null;
   if (holdsJump([then, ...rest]) || jumpedLabels([then, ...rest], ctx.gotos) || holdsFreeCase([then, ...rest])) return null;
   const inner = (body: readonly Statement[], before: readonly Statement[]): Statement[] | null => {
     const names = declaredNames(body);
@@ -609,7 +613,7 @@ function chainAt(stmts: readonly Statement[], i: number, ctx: Ctx, fallsOff: boo
     if (last && last.kind === NodeKind.IfStmt) {
       const d = last as IfStmt;
       const de = !d.elseBranch && !d.init && conditionShape(d.condition).kind === 'simple' ? ctx.reader.edge(d) : null;
-      if (de && de.target === at) {
+      if (de && de.target === e.fall) {
         out.push(...body.slice(0, -1));
         out.push(updateNode(d, { condition: negate(d.condition), thenBranch: Stmt.compound(copy()), elseBranch: null } as Partial<IfStmt>));
         const next = inner(bodyOf(d.thenBranch), [...stmts.slice(0, i), ...out]);

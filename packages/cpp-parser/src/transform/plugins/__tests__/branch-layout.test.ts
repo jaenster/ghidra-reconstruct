@@ -1352,3 +1352,47 @@ describe('branchLayoutPlugin - a value set and tested under a test, failure firs
     }
   });
 });
+
+// FILETOOLS_OpenFile_WriteMode_UTF8 004043c0: the shared `return 0` lies right after the first
+// test; the nested test jumps back to it. The source tested failure first, once per test.
+describe('branchLayoutPlugin - chain', () => {
+  const lines = [
+    'int f(int a) {',
+    '[0x30] int n = A(a);',
+    '[if 0x37 0x35,0x37] if (n) {',
+    '[0x4c,0x60] n = B(a);',
+    '[if 0x64 0x62,0x64] if (n) {',
+    '[0x66,0x6b] return C(a);',
+    '}',
+    '}',
+    '[0x39,0x40] return 0;',
+    '}',
+  ];
+  const edges = [
+    { line: 3, ord: 0, keyword: 'if' as const, jcc: 0x37, target: 0x4c, fall: 0x39, fallLines: [9], takenLines: [4, 5] },
+    { line: 5, ord: 0, keyword: 'if' as const, jcc: 0x64, target: 0x39, fall: 0x66, fallLines: [6], takenLines: [9] },
+  ];
+  const go = (e: typeof edges) => {
+    const { code, ev } = fixture(lines);
+    const sites: string[] = [];
+    const t = branchLayoutPlugin.createTransformer({ branchLayout: { ...ev, edges: e }, onSite: s => sites.push(s.rule) });
+    return { out: flat(emit(t(parse(code)) as AnyNode)), sites };
+  };
+
+  it('writes one guard per test on the copy the first test falls into', () => {
+    const { out, sites } = go(edges);
+    assert.deepStrictEqual(sites, ['chain']);
+    assert.ok(out.includes('if (!n) { return 0; } n = B(a); if (!n) { return 0; } return C(a); }'), out);
+  });
+
+  it('stops at a nested test that does not jump to that copy', () => {
+    const { out, sites } = go([edges[0], { ...edges[1], target: 0x70 }]);
+    assert.deepStrictEqual(sites, ['chain']);
+    assert.ok(out.includes('if (!n) { return 0; } n = B(a); if (n) { return C(a); } return 0; }'), out);
+  });
+
+  it('leaves the if when the test falls into the arm', () => {
+    const { sites } = go([{ ...edges[0], fall: 0x4c, target: 0x39, fallLines: [4, 5], takenLines: [9] }, edges[1]]);
+    assert.ok(!sites.includes('chain'), sites.join(','));
+  });
+});
