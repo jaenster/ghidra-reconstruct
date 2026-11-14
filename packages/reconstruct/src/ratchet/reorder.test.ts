@@ -123,9 +123,9 @@ describe('ratchet: a re-ordered parameter list', () => {
     });
   }
 
-  it('reports names that changed storage, and lets the fresh body through', () => {
-    // The names now sit on the other register: a re-order or a correction of which name is
-    // which value, and nothing tells them apart.
+  it('reads names swapped over the same storage as a rename', () => {
+    // Every parameter kept its register; only the names moved. The value in EAX is the one
+    // the stored body subtracted from, whatever it is called now.
     const rec = record(tree(files(CALLEE_V1, CALLER_V1), STORAGE_V1), '004a5f10');
     const fresh = CALLEE_V2.replace('return nMousePosY - nMousePosX * 2;', 'return nMousePosX - nMousePosY * 2;');
     const now = tree(files(fresh, CALLER_V2), [
@@ -133,9 +133,22 @@ describe('ratchet: a re-ordered parameter list', () => {
       STORAGE_V2[1],
     ]);
     const out = applyRecords(now, [rec]);
+    assert.deepStrictEqual(rowsOf(out.rows, '004a4a10').map(r => r.status), ['equal'], JSON.stringify(out.rows));
+  });
+
+  it('reports names that changed storage, and lets the fresh body through', () => {
+    // The register set changed and the name in EAX is another one: a re-order or a
+    // correction of which name is which value, and nothing tells them apart.
+    const rec = record(tree(files(CALLEE_V1, CALLER_V1), STORAGE_V1), '004a5f10');
+    const fresh = CALLEE_V2.replace('return nMousePosY - nMousePosX * 2;', 'return nMousePosX - nMousePosY * 2;');
+    const now = tree(files(fresh, CALLER_V2), [
+      { address: '004a4a10', paramStorage: [['nMousePosX', 'EAX:4'], ['nMousePosY', 'EDX:4']] },
+      STORAGE_V2[1],
+    ]);
+    const out = applyRecords(now, [rec]);
     const r = rowsOf(out.rows, '004a4a10')[0];
     assert.strictEqual(r.status, 'unresolved');
-    assert.match(r.detail, /nMousePosY@EAX:4 is ambiguous: its storage is nMousePosX@EAX:4 now, its name nMousePosY@ECX:4/u);
+    assert.match(r.detail, /nMousePosY@EAX:4 is ambiguous: its storage is nMousePosX@EAX:4 now, its name nMousePosY@EDX:4/u);
     assert.ok(body(now, out, '004a4a10').includes('return nMousePosX - nMousePosY * 2;'), 'the fresh body stays');
   });
 
@@ -189,7 +202,7 @@ describe('ratchet: parameter storage from the source maps', () => {
       const ok = applyRatchetToProject(project(STORAGE_V2) as never, options, '');
       assert.strictEqual(ok.counts?.unresolved, 0);
       assert.strictEqual(ok.counts?.kept, 1, 'the stored callee body, its parameters bound by identity');
-      const swapped = applyRatchetToProject(project([{ address: '004a4a10', paramStorage: [['nMousePosX', 'EAX:4'], ['nMousePosY', 'ECX:4']] }, STORAGE_V2[1]]) as never, options, '');
+      const swapped = applyRatchetToProject(project([{ address: '004a4a10', paramStorage: [['nMousePosX', 'EAX:4'], ['nMousePosY', 'EDX:4']] }, STORAGE_V2[1]]) as never, options, '');
       assert.ok((swapped.counts?.unresolved ?? 0) >= 1);
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
@@ -234,9 +247,9 @@ describe('ratchet: parameter identity (params.ts)', () => {
     assert.deepStrictEqual(m, { map: [0, 1] });
   });
 
-  it('reports stack names swapped over the same layout', () => {
+  it('reads stack names swapped over the same layout as a rename', () => {
     const m = matchParams(paramIds(['a', 'b'], ['Stack[0x4]:4', 'Stack[0x8]:4']), paramIds(['b', 'a'], ['Stack[0x4]:4', 'Stack[0x8]:4']));
-    assert.ok('error' in m && /ambiguous/u.test(m.error), JSON.stringify(m));
+    assert.deepStrictEqual(m, { map: [0, 1] });
   });
 
   it('keeps a renamed parameter in place unless another claims its position', () => {

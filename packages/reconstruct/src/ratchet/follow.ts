@@ -26,7 +26,7 @@ import { TokenKind, TriviaKind } from '@ghidra-mcp/cpp-parser';
 
 import type { Binding, Site, SiteScan } from './refs.js';
 import { rewriteBody } from './rewrite.js';
-import { lexTokens, matchParen, type Tok } from './scan.js';
+import { lexTokens, matchParen, skipAttribute, type Tok } from './scan.js';
 import type { SymbolIndex } from './symbol-index.js';
 
 export interface FollowResult {
@@ -104,6 +104,9 @@ export function handSites(text: string, toks: Tok[], index: SymbolIndex): { site
     }
     if (t.kind === TokenKind.LeftBrace) { nsStack.push(undefined); continue; }
     if (t.kind === TokenKind.RightBrace) { nsStack.pop(); continue; }
+    // An attribute group names no engine symbol: `__attribute__((noinline))` is not a call.
+    const attr = skipAttribute(toks, i);
+    if (attr > i) { i = attr - 1; continue; }
     const startsName = t.kind === TokenKind.Identifier || (t.kind === TokenKind.ColonColon && toks[i + 1]?.kind === TokenKind.Identifier);
     if (!startsName) continue;
     const prev = toks[i - 1];

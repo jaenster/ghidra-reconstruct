@@ -126,10 +126,43 @@ export function matchParen(toks: Tok[], open: number): number {
   return -1;
 }
 
-/** The declarator (name before the parameter list) of a signature token range. */
+/**
+ * Index one past an attribute group starting at token `i` - `__attribute__((..))`,
+ * `__declspec(..)`, `alignas(..)` or `[[..]]` - or `i` when none starts there.
+ */
+export function skipAttribute(toks: Tok[], i: number): number {
+  const t = toks[i];
+  if (t?.kind === IDENT && ATTRIBUTE_WORDS.has(t.text) && toks[i + 1]?.kind === TokenKind.LeftParen) {
+    const close = matchParen(toks, i + 1);
+    return close < 0 ? i : close + 1;
+  }
+  if (t?.kind === TokenKind.LeftAttrBracket) {
+    for (let k = i + 1; k < toks.length; k++) if (toks[k].kind === TokenKind.RightAttrBracket) return k + 1;
+  }
+  return i;
+}
+
+/** The tokens of `[from, to)` without their attribute groups. */
+function withoutAttributes(toks: Tok[], from: number, to: number): Tok[] {
+  const out: Tok[] = [];
+  for (let i = from; i < to;) {
+    const n = skipAttribute(toks, i);
+    if (n > i) { i = n; continue; }
+    out.push(toks[i++]);
+  }
+  return out;
+}
+
+/**
+ * The declarator (name before the parameter list) of a signature token range. Attribute
+ * groups (`__attribute__((noinline)) inline void f(..)`) are not the declarator: their
+ * parentheses are skipped.
+ */
 export function signatureDeclarator(toks: Tok[], from: number, to: number): { name: string[]; paren: number } | undefined {
   let depth = 0;
   for (let i = from; i < to; i++) {
+    const skip = skipAttribute(toks, i);
+    if (skip > i) { i = skip - 1; continue; }
     const k = toks[i].kind;
     if (k === TokenKind.Less) depth++;
     else if (k === TokenKind.Greater) depth--;
@@ -310,21 +343,66 @@ export function signatureParts(toks: Tok[], from: number, to: number): { params:
   // The return type: the tokens before the declarator's qualified name.
   let nameStart = d.paren - 1;
   while (toks[nameStart - 1]?.kind === TokenKind.ColonColon || toks[nameStart - 1]?.kind === TokenKind.Tilde) nameStart -= toks[nameStart - 1].kind === TokenKind.Tilde ? 1 : 2;
-  const ret = typeRefFromTokens(toks, from, nameStart);
-  const retText = typeSpelling(toks.slice(from, nameStart).filter(t => !SIGNATURE_WORDS.has(t.text)));
+  const retToks = withoutAttributes(toks, from, nameStart);
+  const ret = typeRefFromTokens(retToks);
+  const retText = typeSpelling(retToks.filter(t => !SIGNATURE_WORDS.has(t.text)));
   return { params, types, ret, retText };
+}
+
+/**
+ * Parameter type spellings an older scanner read off an attribute group's parentheses
+ * (`__attribute__((noinline)) inline void f(int)` stored as `( noinline )`): no parameter
+ * type spelling starts with a parenthesis.
+ */
+export function misparsedTypes(types: readonly string[] | undefined): boolean {
+  return !!types && types.some(t => t.startsWith('('));
+}
+
+/** The signature of a definition's text (`R f(..) {..}`): what signatureParts reads. */
+export function definitionSignature(text: string): ReturnType<typeof signatureParts> {
+  const toks = lexTokens(text);
+  if (!toks) return undefined;
+  let paren = 0;
+  for (let j = 0; j < toks.length; j++) {
+    const k = toks[j].kind;
+    if (k === TokenKind.LeftParen) paren++;
+    else if (k === TokenKind.RightParen) paren--;
+    else if (paren === 0 && k === TokenKind.LeftBrace) return signatureParts(toks, 0, j);
+    else if (paren === 0 && (k === TokenKind.Semicolon || k === TokenKind.EOF)) return undefined;
+  }
+  return undefined;
 }
 
 export interface HeaderDecl { address: string; scope: string[]; name: string[]; params: string[]; types: string[]; ret?: TypeRef; retText: string }
 export interface HeaderField { name: string; offset: number; type?: TypeRef }
 export interface HeaderStruct { qname: string; fields: HeaderField[] }
-export interface HeaderEnum { qname: string; scope: string[]; consts: Array<{ name: string; value: string }> }
+/**
+ * An enum's constants. A C++ `enum` declares them in its own scope (`scope`); the generator's
+ * form (codegen/header.ts, index.ts) is `typedef T E; namespace E_ns { constexpr E C = v; }`
+ * plus `using E_ns::C;` or `using namespace E_ns;` for the names it exports: then `ns` is the
+ * namespace the constants are declared in, and only the names in `exported` (all of them
+ * with `exportAll`) are visible in `scope`.
+ */
+export interface HeaderEnum {
+  qname: string;
+  scope: string[];
+  consts: Array<{ name: string; value: string }>;
+  ns?: string[];
+  exported?: Set<string>;
+  exportAll?: boolean;
+}
+/** `using N::C;` (`name` set) or `using namespace N;`, declared in `scope`. */
+export interface HeaderUsing { scope: string[]; target: string[]; name?: string }
 export interface HeaderScan {
   decls: HeaderDecl[];
   structs: HeaderStruct[];
   enums: HeaderEnum[];
   typedefs: string[];
+  usings: HeaderUsing[];
 }
+
+/** The suffix of the namespace the generator declares an enum's constants in. */
+export const ENUM_NAMESPACE_SUFFIX = '_ns';
 
 function parseOffsetComment(text: string): number | undefined {
   if (!text.startsWith('/*') || !text.endsWith('*/')) return undefined;
@@ -355,7 +433,7 @@ function evalEnumValue(toks: Tok[], prev: string | undefined): string {
 export function scanHeader(text: string): HeaderScan | undefined {
   const toks = lexTokens(text);
   if (!toks) return undefined;
-  const out: HeaderScan = { decls: [], structs: [], enums: [], typedefs: [] };
+  const out: HeaderScan = { decls: [], structs: [], enums: [], typedefs: [], usings: [] };
   // Markers by the line they sit on: a declaration's comment trails its `;`.
   const markerByLine = new Map<number, string>();
   for (const t of toks) {
@@ -479,6 +557,12 @@ export function scanHeader(text: string): HeaderScan | undefined {
     if (first.kind === TokenKind.Typedef || first.text === 'using') {
       if (first.text === 'using' && toks[from + 1]?.kind === IDENT && toks[from + 2]?.kind === TokenKind.Equal) {
         out.typedefs.push([...nsParts(), toks[from + 1].text].join('::'));
+      } else if (first.text === 'using' && toks[from + 1]?.text === 'namespace') {
+        const q = readQualified(toks, from + 2);
+        if (q.parts.length > 0 && q.next === i) out.usings.push({ scope: nsParts(), target: q.parts });
+      } else if (first.text === 'using') {
+        const q = readQualified(toks, from + 1);
+        if (q.parts.length > 1 && q.next === i) out.usings.push({ scope: nsParts(), target: q.parts.slice(0, -1), name: q.parts[q.parts.length - 1] });
       } else if (first.kind === TokenKind.Typedef) {
         // `typedef R (__stdcall *Name)(..)` or `typedef T Name[..]` or `typedef T Name`.
         let name: string | undefined;
@@ -491,6 +575,23 @@ export function scanHeader(text: string): HeaderScan | undefined {
           if (toks[stop - 1]?.kind === IDENT) name = toks[stop - 1].text;
         }
         if (name) out.typedefs.push([...nsParts(), name].join('::'));
+      }
+      continue;
+    }
+    const enumNs = top?.kind === 'ns' && top.name ? top.name[top.name.length - 1] : undefined;
+    if (enumNs && enumNs.endsWith(ENUM_NAMESPACE_SUFFIX) && enumNs.length > ENUM_NAMESPACE_SUFFIX.length && first.text === 'constexpr') {
+      // `constexpr E C = v;` inside `namespace E_ns`: a constant of the enum E.
+      const e = enumNs.slice(0, -ENUM_NAMESPACE_SUFFIX.length);
+      if (toks[from + 1]?.kind === IDENT && toks[from + 1].text === e && toks[from + 2]?.kind === IDENT && toks[from + 3]?.kind === TokenKind.Equal && from + 4 < i) {
+        const ns = nsParts();
+        const outer = ns.slice(0, -1);
+        const nsKey = ns.join('::');
+        let en = out.enums.find(x => x.ns?.join('::') === nsKey);
+        if (!en) {
+          en = { qname: [...outer, e].join('::'), scope: outer, consts: [], ns, exported: new Set() };
+          out.enums.push(en);
+        }
+        en.consts.push({ name: toks[from + 2].text, value: evalEnumValue(toks.slice(from + 4, i), undefined) });
       }
       continue;
     }
@@ -538,5 +639,22 @@ export function scanHeader(text: string): HeaderScan | undefined {
     if (!parts || !decl) continue;
     out.decls.push({ address: addr, scope: nsParts(), name: decl.name, params: parts.params, types: parts.types, ret: parts.ret, retText: parts.retText });
   }
+  // What each `using` exports of an enum namespace declared in this header.
+  for (const u of out.usings) {
+    for (const en of out.enums) {
+      if (!en.ns || !usingNames(u, en.ns)) continue;
+      if (u.name === undefined) en.exportAll = true;
+      else en.exported!.add(u.name);
+    }
+  }
   return out;
+}
+
+/** Does `using` `u` name namespace `ns` (by C++ lookup from the scope it is declared in)? */
+export function usingNames(u: HeaderUsing, ns: string[]): boolean {
+  const target = u.target.join('::');
+  for (let k = u.scope.length; k >= 0; k--) {
+    if ([...u.scope.slice(0, k), target].join('::') === ns.join('::')) return true;
+  }
+  return false;
 }

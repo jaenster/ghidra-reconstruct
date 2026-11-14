@@ -61,8 +61,14 @@ export function treeCarries(index: SymbolIndex, rec: RatchetRecord): { equal: bo
   return { equal: true };
 }
 
+/** Same text and sites, and the same signature types read off it (a scanner fix re-reads them). */
 function sameRecordText(a: RatchetRecord, b: RatchetRecord): boolean {
-  return a.members.length === b.members.length && a.members.every((m, i) => m.address === b.members[i].address && m.text === b.members[i].text && m.siteHash === b.members[i].siteHash);
+  const same = (x?: string[], y?: string[]) => JSON.stringify(x ?? null) === JSON.stringify(y ?? null);
+  return a.members.length === b.members.length && a.members.every((m, i) => {
+    const n = b.members[i];
+    return m.address === n.address && m.text === n.text && m.siteHash === n.siteHash
+      && m.ret === n.ret && same(m.paramTypes, n.paramTypes);
+  });
 }
 
 /**
