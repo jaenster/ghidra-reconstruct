@@ -315,6 +315,14 @@
  *                        and use V at every subsequent `V - K` read. V must be one
  *                        unaliased 32-bit integer local, have at least two such reads,
  *                        and have no other read or store after the new decrement.
+ *   postdec(C,N)         `while (A && R && C) { B; C--; }` becomes `if (A) { unsigned int
+ *                        N = (unsigned int)C; do { if (!R || !N--) break; B; } while (A); }`.
+ *                        A is a unique nonvolatile integer scalar; C a unique, initialized
+ *                        nonvolatile32bit scalar whose only value uses are the final truth
+ *                        test and tail decrement. N is fresh. The unsigned copy avoids new
+ *                        signed overflow on an early exit or zero-count test. Address and
+ *                        reference escapes, outside reads, continue and external control
+ *                        entry are refused (UNICODE_CompareWideStringsN 00526540).
  *   range(C[,i])         the unsigned comparison C of a difference with a constant, `K < E - L`
  *                        (`E - L > K`, `E - L >= K`, `E - L < K` and the mirrors; the difference
  *                        unsigned by a `U` on L, E's own type or a cast to a 32-bit unsigned
@@ -386,6 +394,7 @@ import type {
 } from '../../../ast/nodes.js';
 import { parse } from '../../../parser/index.js';
 import { emit } from '../../../emit/index.js';
+import { isKeywordString } from '../../../lexer/keywords.js';
 import { cloneNode } from '../../transformer.js';
 import { buildFunctionFlow } from '../../cfg/index.js';
 import { selectPairedArguments, SelectRefused, type SelectArgumentOptions } from './select-argument.js';
@@ -397,6 +406,7 @@ import { calleeName, scopedLookup } from './call-arg-cast.js';
 import { coalesceLocal } from './copy-coalesce.js';
 import { initializerIsDead } from './store-liveness.js';
 import { recordWalk, type RecordWalkTables } from './record-walk.js';
+import { guardedPostDecrement } from './guarded-post-decrement.js';
 
 export type Vc8Form =
   | { op: 'nullfault32' }
@@ -457,7 +467,8 @@ export type Vc8Form =
   | { op: 'zinit'; name: string }
   | { op: 'znew'; name: string; size?: string }
   | { op: 'swclamp'; name: string }
-  | { op: 'retbase'; param: string; name: string };
+  | { op: 'retbase'; param: string; name: string }
+  | { op: 'postdec'; counter: string; name: string };
 
 /**
  * A header inline that reads one field of a struct through a pointer, or returns a
@@ -511,7 +522,7 @@ export interface Vc8FormOptions {
 
 const OPS = new Set(['nullfault32', 'seq', 'fold', 'join', 'coalesce', 'recordwalk', 'cache', 'own', 'guards', 'merge-guards', 'retval', 'branchret', 'width', 'boolflag', 'retwiden', 'arms',
   'nest', 'merge-tail', 'tailguard', 'tailcopy', 'continue', 'dup', 'tarms', 'zero', 'nonzero', 'bool', 'cmp', 'swap', 'ifsel', 'clamp', 'split', 'select', 'decl', 'unselect', 'tsel', 'hoist',
-  'nestcall', 'fill', 'elems', 'copy', 'shift', 'ptrwalk', 'rowptr', 'acc', 'retvar', 'onecall', 'roundup', 'swmerge', 'switch', 'dec', 'opas', 'range', 'castout', 'signbit', 'nullfield', 'zinit', 'znew', 'swclamp', 'retbase']);
+  'nestcall', 'fill', 'elems', 'copy', 'shift', 'ptrwalk', 'rowptr', 'acc', 'retvar', 'onecall', 'roundup', 'swmerge', 'switch', 'dec', 'opas', 'range', 'castout', 'signbit', 'nullfield', 'zinit', 'znew', 'swclamp', 'retbase', 'postdec']);
 
 /** Split at commas outside brackets and parentheses. For cache, the third argument is a
  * type, so commas inside its template arguments also belong to that argument. */
@@ -631,6 +642,8 @@ export function parseVc8Form(text: string): Vc8Form | undefined {
     case 'znew':
       if (anchor || args.length < 1 || args.length > 2 || !/^[A-Za-z_]\w*$/.test(args[0]) || (args.length === 2 && !/^(?:0x[0-9a-fA-F]+|[1-9]\d*)$/.test(args[1]))) return undefined;
       return { op: 'znew', name: args[0], ...(args.length === 2 ? { size: args[1] } : {}) };
+    case 'postdec':
+      return !anchor && args.length === 2 && args.every(a => /^[A-Za-z_]\w*$/.test(a) && !isKeywordString(a)) && args[0] !== args[1] ? { op: 'postdec', counter: args[0], name: args[1] } : undefined;
     case 'retbase':
       return !anchor && args.length === 2 && args.every(a => /^[A-Za-z_]\w*$/.test(a)) && args[0] !== args[1] ? { op: 'retbase', param: args[0], name: args[1] } : undefined;
     case 'roundup': {
@@ -4804,6 +4817,11 @@ const APPLY: { [K in Vc8Form['op']]: (fn: FunctionDecl, f: Extract<Vc8Form, { op
   retvar: doRetvar, onecall: doOnecall, roundup: doRoundup, opas: doOpas, swmerge: doSwmerge, dec: doDec, switch: doSwitch,
   range: doRange, castout: doCastout, signbit: doSignbit,
   zinit: doZinit, znew: doZnew, swclamp: doSwclamp, retbase: doRetbase,
+  postdec: (fn, f) => {
+    const result = guardedPostDecrement(fn, f.counter, f.name);
+    if ('why' in result) refuse(result.why);
+    else fn.body = result.body;
+  },
 };
 
 /**

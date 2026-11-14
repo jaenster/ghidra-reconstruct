@@ -249,6 +249,32 @@ function sites(c: Ctx, maxAnchors: number): string[] {
   }
   const free = (stem: string) => { for (let k = 0; ; k++) if (!vars.has(`${stem}${k}`)) return `${stem}${k}`; };
 
+  // postdec: a final scalar count in a short-circuit while condition. The form
+  // proves the tail decrement, initialized value, dead count and alias safety.
+  // Reserve unused parameters, globals and member spellings too.
+  const postUsed = new Set([...vars.keys(), ...all.flatMap(n => n.kind === NodeKind.Identifier ? [n.name]
+    : n.kind === NodeKind.MemberExpr && n.member?.name ? [n.member.name] : [])]);
+  const postCounters = new Set<string>();
+  for (const n of all) {
+    if (n.kind !== NodeKind.WhileStmt) continue;
+    let e = unparen(n.condition);
+    if (e.kind !== NodeKind.BinaryExpr || e.operator !== '&&') continue;
+    while (e.kind === NodeKind.BinaryExpr && e.operator === '&&') e = unparen(e.right);
+    let v = e.kind === NodeKind.Identifier ? e.name : undefined;
+    if (e.kind === NodeKind.BinaryExpr && e.operator === '!=') {
+      const l = unparen(e.left), r = unparen(e.right);
+      if (l.kind === NodeKind.Identifier && r.kind === NodeKind.IntegerLiteral && r.value === 0n) v = l.name;
+      if (r.kind === NodeKind.Identifier && l.kind === NodeKind.IntegerLiteral && l.value === 0n) v = r.name;
+    }
+    if (v && /^(int|signed|signed int|unsigned|unsigned int|int32_t|uint32_t)$/.test(vars.get(v) ?? '')) postCounters.add(v);
+  }
+  for (const counter of postCounters) {
+    let name = 'nRemaining', k = 2;
+    while (postUsed.has(name)) name = `nRemaining${k++}`;
+    postUsed.add(name);
+    out.add(`postdec(${counter},${name})`);
+  }
+
   // seq: adjacent stores, every other order of each run of two to four.
   const seqRuns: string[][] = [];
   for (const b of blocks) {
@@ -661,7 +687,7 @@ function sites(c: Ctx, maxAnchors: number): string[] {
 
 /** The names a form declares, for the phase control: each new local is one more front-end symbol. */
 function adds(form: Vc8Form): number {
-  return (form.op === 'cache' && form.type) || form.op === 'recordwalk' || form.op === 'split' || (form.op === 'own' && form.rename) ? 1 : 0;
+  return (form.op === 'cache' && form.type) || form.op === 'recordwalk' || form.op === 'postdec' || form.op === 'split' || (form.op === 'own' && form.rename) ? 1 : 0;
 }
 
 function tryForm(tu: TranslationUnit, text: string): { text: string; form: Vc8Form } | { why: string } {
