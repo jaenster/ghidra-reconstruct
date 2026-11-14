@@ -133,6 +133,24 @@ describe('selectArgumentPlugin', () => {
     assert.match(refusal(paired(), 'pUnit'), /no if\/else #1/);
   });
 
+  // Unreferenced_005454e0, ITEMMODE_GetItemPageForUnit 0055c9a0: the original pushes the
+  // selects, then calls UNITS_GetRoom, which writes nothing.
+  it('takes an argument whose calls write only their own locals, and only those', () => {
+    const effects = (room: object): SelectArgumentOptions => ({ ...tables, writeEffects: { Room: room } });
+    const use = 'Alloc(Room(pUnit), 2, eType, nGuid)';
+    const out = tagged(paired({ use }), '!pUnit', 1, effects({}));
+    assert.ok(out.includes('Alloc(Room(pUnit), 2, !pUnit ? UNIT_COUNT : pUnit->eUnitType, !pUnit ? -1 : pUnit->nUnitGUID);'), out);
+    const refused = (t: SelectArgumentOptions, u = use): string => {
+      try { tagged(paired({ use: u }), '!pUnit', 1, t); return ''; } catch (e) { return (e as Error).message; }
+    };
+    assert.match(refused(effects({ memory: true })), /another argument is not pure/);
+    assert.match(refused(effects({ params: [0] })), /another argument is not pure/);
+    assert.match(refused(effects({ globals: ['g'] })), /another argument is not pure/);
+    assert.match(refused(effects({ unknown: true })), /another argument is not pure/);
+    assert.match(refused(effects({}), 'Alloc(Other(pUnit), 2, eType, nGuid)'), /another argument is not pure/);
+    assert.match(refused(effects({}), 'Alloc(Room(n = 1), 2, eType, nGuid)'), /another argument is not pure/);
+  });
+
   it('computes what the printed if/else computed', { skip: !hasNativeGpp() }, () => {
     const printed = [
       'struct U { int id; int type; };',
