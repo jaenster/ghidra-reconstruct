@@ -364,6 +364,23 @@ export function isConstantStore(e: Expression, enumConstants: ReadonlySet<string
 }
 
 /**
+ * Before nullptr-cleanup (25), Ghidra spells a small literal address such as 2
+ * as `&DAT_00000002`. Like a literal store, it supplies a value but no evidence
+ * for the reused slot's new type. A mapped/global address or a shadowing local
+ * still has to participate in type inference.
+ */
+function isNullPageAddressConstant(e: Expression, localTypes: ReadonlyMap<string, TypeNode>): boolean {
+  const x = unwrapParens(e);
+  if (x.kind !== NodeKind.UnaryExpr || (x as UnaryExpr).operator !== '&') return false;
+  const operand = unwrapParens((x as UnaryExpr).operand);
+  if (operand.kind !== NodeKind.Identifier) return false;
+  const name = (operand as Identifier).name;
+  if (localTypes.has(name)) return false;
+  const match = /^_?DAT_([0-9a-fA-F]{8})$/.exec(name);
+  return match !== null && parseInt(match[1], 16) < 0x1000;
+}
+
+/**
  * A name for the second value. Ghidra has no variable to carry one, so it comes from
  * the type where the type is a program struct (`D2RoomStrc *` -> pRoom, `D2MissilesTxt *`
  * -> pMissilesTxt), and from the parameter whose slot it shares otherwise.
@@ -433,32 +450,34 @@ export function splitReusedValueSlots(fn: FunctionDecl, o: ReusedParamSlotOption
     if (mixed) { o.onRefused?.(fnName, `${p}: a read is reached by the parameter and by a later store`); continue; }
     if (second.size === 0) continue;
 
-    // Every occurrence of P the second range reads, with the cast around it (if any).
+    // Every occurrence of P the second range reads, with its entire direct cast
+    // chain. The innermost cast determines the rewrite, but an outer cast can
+    // reveal a different use of the value (e.g. `(Other *)(int)P`).
     // The store statements' own left-hand sides are writes, not reads.
     const lhs = new Set<object>();
     for (const s of stores.values()) lhs.add(unwrapParens((unwrapParens(s.stmt.expression) as AssignExpr).left));
-    const occurrences: { id: Identifier; cast: CStyleCastExpr | null }[] = [];
+    const occurrences: { id: Identifier; cast: CStyleCastExpr | null; casts: readonly CStyleCastExpr[] }[] = [];
     for (const n of second) {
-      const walk = (x: unknown, parentCast: CStyleCastExpr | null): void => {
-        if (Array.isArray(x)) { for (const i of x) walk(i, null); return; }
+      const walk = (x: unknown, casts: readonly CStyleCastExpr[]): void => {
+        if (Array.isArray(x)) { for (const i of x) walk(i, []); return; }
         if (!x || typeof x !== 'object') return;
         const node = x as ASTNode;
         if (node.kind === NodeKind.Identifier && (node as Identifier).name === p && !lhs.has(node)) {
-          occurrences.push({ id: node as Identifier, cast: parentCast });
+          occurrences.push({ id: node as Identifier, cast: casts.at(-1) ?? null, casts });
           return;
         }
         if (node.kind === NodeKind.CStyleCastExpr) {
           const c = node as CStyleCastExpr;
           const inner = unwrapParens(c.expression);
-          walk(inner, c);
+          walk(inner, [...casts, c]);
           return;
         }
         for (const [k, v] of Object.entries(node)) {
           if (k === 'location' || k === 'leadingTrivia' || k === 'trailingTrivia' || k === 'type') continue;
-          if (v && typeof v === 'object') walk(v, null);
+          if (v && typeof v === 'object') walk(v, []);
         }
       };
-      walk(flow.ownExprs(n), null);
+      walk(flow.ownExprs(n), []);
     }
     if (occurrences.length === 0) continue;
 
@@ -470,7 +489,8 @@ export function splitReusedValueSlots(fn: FunctionDecl, o: ReusedParamSlotOption
     } else {
       // A literal store (`p = (T *)0x0`) holds a value of whichever type the others say;
       // the second range's type is what every other store agrees on.
-      const values = [...stores.values()].map(s => storedValue(s.value, paramType)).filter(v => !isConstantStore(v, enumConstants, localTypes));
+      const values = [...stores.values()].map(s => storedValue(s.value, paramType))
+        .filter(v => !isConstantStore(v, enumConstants, localTypes) && !isNullPageAddressConstant(v, localTypes));
       const evident = values.map(v => evidentType(v, o, localTypes));
       const spelled = evident.map(t => t ? spellingOf(t) : null);
       if (evident.length > 0 && spelled.every(t => t !== null) && new Set(spelled.map(t => canonicalWord(t!))).size === 1) target = evident[0];
@@ -483,9 +503,15 @@ export function splitReusedValueSlots(fn: FunctionDecl, o: ReusedParamSlotOption
     // Ghidra's untyped pointer, not the type the source declared.
     if (/\bcode\b/.test(targetType)) continue;
     if (targetClass !== 'ptr' && paramClass !== 'ptr') continue;
-    // Every cast read must agree with T: a read reinterpreting the slot as a third type
-    // is not one variable either.
-    if (readCasts.some(c => c !== null && !sameType(c, targetType) && !sameType(c, paramType))) {
+    // A pointer slot reused for a word-sized integer can be viewed through both
+    // signed and unsigned integer casts. Keep each differing cast at its read:
+    // `(int)p` becomes `(int)n`, rather than `(int)(P *)n`. A cast to another
+    // pointer type still makes the second value ambiguous.
+    const integerView = (c: string) => targetClass === 'int' && paramClass === 'ptr'
+      && WORD_INTEGERS[c] !== undefined;
+    const allReadCasts = occurrences.flatMap(oc => oc.casts.map(c => spellingOf(c.type)));
+    if (allReadCasts.some(c => !sameType(c, targetType)
+        && !sameType(c, paramType) && !integerView(c))) {
       o.onRefused?.(fnName, `${p}: the second range is read as more than one type`);
       continue;
     }
@@ -495,8 +521,13 @@ export function splitReusedValueSlots(fn: FunctionDecl, o: ReusedParamSlotOption
     const castReads = new Map<object, Expression>();
     const bareReads = new Set<object>();
     for (const oc of occurrences) {
-      if (oc.cast && sameType(spellingOf(oc.cast.type), targetType)) castReads.set(oc.cast, Expr.identifier(local));
-      else bareReads.add(oc.id);
+      if (oc.cast && sameType(spellingOf(oc.cast.type), targetType)) {
+        castReads.set(oc.cast, Expr.identifier(local));
+      } else if (oc.cast && integerView(spellingOf(oc.cast.type))) {
+        castReads.set(oc.cast, Expr.cast(oc.cast.type, Expr.identifier(local)));
+      } else {
+        bareReads.add(oc.id);
+      }
     }
     const storeStmts = new Map<object, Expression>();
     // An integer the slot's new type takes without a cast: a literal, or arithmetic on
