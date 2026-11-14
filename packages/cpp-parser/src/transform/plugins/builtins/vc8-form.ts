@@ -2561,8 +2561,105 @@ function doTarms(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'tarms' }>): void {
   c.elseExpr = t;
 }
 
+/** Arithmetic and pointer-sized bases, after typedefs resolve, whose operators are all builtin. */
+const BUILTIN_SCALAR = new Set(['bool', 'char', 'signed char', 'unsigned char', 'wchar_t', 'char16_t', 'char32_t',
+  'short', 'short int', 'signed short', 'signed short int', 'unsigned short', 'unsigned short int',
+  'int', 'signed', 'signed int', 'unsigned', 'unsigned int', 'long', 'long int', 'signed long', 'unsigned long', 'unsigned long int',
+  'long long', 'long long int', 'unsigned long long', 'unsigned long long int', '__int64', 'unsigned __int64',
+  'int8_t', 'uint8_t', 'int16_t', 'uint16_t', 'int32_t', 'uint32_t', 'int64_t', 'uint64_t', 'intptr_t', 'uintptr_t', 'size_t', 'ptrdiff_t',
+  'float', 'double', 'long double',
+  'BYTE', 'WORD', 'DWORD', 'UINT', 'INT', 'BOOL', 'LONG', 'ULONG', 'SHORT', 'USHORT', 'UCHAR', 'CHAR', 'WCHAR',
+  'byte', 'uchar', 'ushort', 'uint', 'ulong', 'dword', 'sdword']);
+
+/**
+ * Whether every operator in `e` is a builtin one and its value a scalar: an integer,
+ * floating, enumeration or pointer type the type tables prove, never a class. A truth
+ * form rewrites the operators around E (`!E` to `E == 0`, E to `(bool)(E)` or `E != 0`);
+ * that keeps the meaning only when no overload can be selected, before or after. Unknown
+ * is refused: a class E, or a class on the other side of the `&&`/`||` E stands in, can
+ * pick a user-defined operator the new spelling does not reach (redivivus#472).
+ */
+function builtinScalar(e: Expression, fn: FunctionDecl): boolean {
+  const tables = selectTables;
+  const resolve = (n: string) => tables?.typedefTargets?.[n];
+  const shapeOf = createExprShape(localTypesOf(fn), {
+    globalTypes: tables?.globalTypes ?? {}, enclosingVarTypes: tables?.enclosingVarTypes ?? {},
+    structFields: tables?.structFields ?? {}, fieldTypes: tables?.fieldTypes ?? {},
+    returnTypes: tables?.functionReturnTypes ?? {}, resolve,
+  });
+  const scalarShape = (s: { base: string; stars: number } | null) => !!s && (s.stars > 0 || BUILTIN_SCALAR.has(s.base));
+  const enumConstant = (x: Expression) => {
+    const name = calleeName(x);
+    if (!name || localTypesOf(fn).has(name)) return false;
+    const values = tables?.enumValues;
+    if (values && (Number.isSafeInteger(values[name]) || Number.isSafeInteger(values[name.replace(/^.*::/, '')]))) return true;
+    // The generator's enum form: `typedef T E; namespace E_ns { constexpr E C = v; }`. A
+    // constant named through E_ns has E's type even where its bare name is ambiguous.
+    const ns = /(?:^|::)([A-Za-z_]\w*)_ns::[A-Za-z_]\w*$/.exec(name);
+    return !!ns && scalarShape(shapeOfSpelling(ns[1], resolve)) && !!resolve(ns[1]);
+  };
+  const ok = (x: Expression): boolean => {
+    x = unparen(x);
+    switch (x.kind) {
+      case NodeKind.IntegerLiteral: case NodeKind.FloatingLiteral: case NodeKind.CharLiteral:
+      case NodeKind.BoolLiteral: case NodeKind.NullptrLiteral: case NodeKind.StringLiteral:
+        return true;
+      case NodeKind.UnaryExpr: {
+        const u = x as UnaryExpr;
+        // `*p` and `&v` read through the operand's own type; the rest act on its value.
+        if (u.operator === '*') return ok(u.operand) && scalarShape(shapeOf(x));
+        return ok(u.operand);
+      }
+      case NodeKind.PostfixExpr:
+        return ok((x as unknown as { operand: Expression }).operand);
+      case NodeKind.BinaryExpr: {
+        const b = x as BinaryExpr;
+        return ok(b.left) && ok(b.right);
+      }
+      case NodeKind.AssignExpr: {
+        const a = x as unknown as { left: Expression; right: Expression };
+        return ok(a.left) && ok(a.right);
+      }
+      case NodeKind.CommaExpr:
+        return (x as unknown as { expressions: Expression[] }).expressions.every(ok);
+      case NodeKind.ConditionalExpr: {
+        const c = x as ConditionalExpr;
+        return ok(c.condition) && ok(c.thenExpr) && ok(c.elseExpr);
+      }
+      case NodeKind.CStyleCastExpr: case NodeKind.StaticCastExpr: case NodeKind.ReinterpretCastExpr: {
+        // The cast's own type decides what the operators around it see.
+        const s = shapeOfNode((x as CStyleCastExpr).type, 0, resolve);
+        return scalarShape(s);
+      }
+      case NodeKind.Identifier: case NodeKind.QualifiedId:
+        return scalarShape(shapeOf(x)) || enumConstant(x);
+      case NodeKind.MemberExpr: case NodeKind.SubscriptExpr: case NodeKind.CallExpr:
+        return scalarShape(shapeOf(x));
+      default:
+        return false;
+    }
+  };
+  return ok(e);
+}
+
+/**
+ * The truth slot's operator, when the rewrite changes the type of one operand: E standing
+ * in `&&`/`||` is one side of an operator overload resolution picks with the other side.
+ */
+function truthSlotSafe(hit: Slot, e: Expression, fn: FunctionDecl, what: string): void {
+  if (!builtinScalar(e, fn)) refuse(`${what} is not known to be a builtin scalar`);
+  const parent = hit.parent as unknown as ASTNode;
+  if (parent.kind === NodeKind.BinaryExpr && ['&&', '||', '==', '!='].includes((parent as BinaryExpr).operator)) {
+    const b = parent as BinaryExpr;
+    const other = hit.key === 'left' ? b.right : b.left;
+    if (!builtinScalar(other, fn)) refuse(`the other operand of ${(parent as BinaryExpr).operator} is not known to be a builtin scalar`);
+  }
+}
+
 function doZero(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'zero' }>): void {
   const u = pick(fn, f.expr, f.index, (n): n is UnaryExpr => n.kind === NodeKind.UnaryExpr && (n as UnaryExpr).operator === '!', n => unparen(n.operand));
+  // `!E` and `E == 0` are the same test only through the builtin operators.
+  if (!builtinScalar(u.operand, fn)) refuse(`${f.expr} is not known to be a builtin scalar`);
   const e: BinaryExpr = { kind: NodeKind.BinaryExpr, operator: '==', left: u.operand, right: intLit(0n, 10) } as unknown as BinaryExpr;
   // The node keeps its identity: rewrite in place.
   for (const k of Object.keys(u)) delete (u as unknown as Record<string, unknown>)[k];
@@ -2581,6 +2678,7 @@ function doNonzero(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'nonzero' }>): vo
   const hit = f.index === 0 ? (slots.length === 1 ? slots[0] : refuse(`${slots.length} truth tests of ${f.expr}`)) : (slots[f.index - 1] ?? refuse(`no truth test #${f.index} of ${f.expr}`));
   const e = unparen((hit.parent as Record<string, unknown>)[hit.key as string] as Expression);
   if (e.kind === NodeKind.BinaryExpr && MIRROR[(e as BinaryExpr).operator] !== undefined) refuse(`${f.expr} is a comparison already`);
+  truthSlotSafe(hit, e, fn, f.expr);
   put(hit, { kind: NodeKind.BinaryExpr, operator: '!=', left: { kind: NodeKind.ParenExpr, expression: e }, right: intLit(0n, 10) } as unknown as BinaryExpr);
 }
 
@@ -2611,6 +2709,7 @@ function doBool(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'bool' }>): void {
   const holder = hit.parent as Record<string, unknown>;
   const e = unparen(holder[hit.key as string] as Expression);
   if (maybeFloat(e, fn)) refuse(`${f.expr} may be floating point`);
+  truthSlotSafe(hit, e, fn, f.expr);
   const cast = parseExpr('(bool)(__vc8e)') as CStyleCastExpr;
   (cast.expression as ParenExpr).expression = e;
   put(hit, cast);

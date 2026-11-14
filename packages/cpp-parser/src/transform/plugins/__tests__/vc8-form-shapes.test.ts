@@ -3,18 +3,22 @@ import assert from 'node:assert';
 import { parse } from '../../../parser/index.js';
 import { emit } from '../../../emit/index.js';
 import type { AnyNode, TranslationUnit } from '../../../ast/nodes.js';
-import { applyVc8Forms, parseVc8Form, type Vc8FormSite } from '../builtins/vc8-form.js';
+import { applyVc8Forms, parseVc8Form, type Vc8FormSite, type Vc8FormTables } from '../builtins/vc8-form.js';
 
 const flat = (s: string) => s.replace(/\s+/g, ' ').trim();
 
 function run(lines: string[], ...forms: string[]): { out: string; sites: Vc8FormSite[] } {
+  return runWith(undefined, lines, ...forms);
+}
+
+function runWith(tables: Vc8FormTables | undefined, lines: string[], ...forms: string[]): { out: string; sites: Vc8FormSite[] } {
   const sites: Vc8FormSite[] = [];
   const parsed = forms.map(f => {
     const form = parseVc8Form(f);
     assert.ok(form, `parses: ${f}`);
     return { form: form!, tag: f };
   });
-  const tu = applyVc8Forms(parse(lines.join('\n')) as TranslationUnit, parsed, s => sites.push(s));
+  const tu = applyVc8Forms(parse(lines.join('\n')) as TranslationUnit, parsed, s => sites.push(s), tables);
   return { out: flat(emit(tu as AnyNode)), sites };
 }
 
@@ -154,16 +158,17 @@ describe('vc8-form shapes: expressions', () => {
   // bool conversion keeps the original's `shr eax, 3` where the bare test folds it away.
   it('bool writes a truth test as (bool)(E)', () => {
     const lines = ['D2InventoryStrc* f(D2UnitStrc* pUnit, int* pUnit2) {', '  if (pUnit && pUnit->eUnitFlagsEx >> 3 & 1) {', '    return 0;', '  }', '  return pUnit->pInventory;', '}'];
-    const { out, sites } = run(lines, 'bool(pUnit->eUnitFlagsEx >> 3 & 1)');
+    const { out, sites } = runWith({ structFields: { D2UnitStrc: { eUnitFlagsEx: 'uint32_t' } } }, lines, 'bool(pUnit->eUnitFlagsEx >> 3 & 1)');
     assert.ok(sites[0].applied, sites[0].why);
     assert.strictEqual(out, 'D2InventoryStrc* f(D2UnitStrc* pUnit, int* pUnit2) { if (pUnit && (bool)(pUnit->eUnitFlagsEx >> 3 & 1)) { return 0; } return pUnit->pInventory; }');
   });
   it('bool reaches the operand of ! and of a comparison with 0, and picks the i-th', () => {
     const lines = ['int f(U* p) {', '  if (!(p->f >> 2 & 1)) {', '    return 0;', '  }', '  return (p->f >> 2 & 1) == 0;', '}'];
-    let r = run(lines, 'bool(p->f >> 2 & 1,1)');
+    const typed = { structFields: { U: { f: 'unsigned int' } } };
+    let r = runWith(typed, lines, 'bool(p->f >> 2 & 1,1)');
     assert.ok(r.sites[0].applied, r.sites[0].why);
     assert.strictEqual(r.out, 'int f(U* p) { if (!(bool)(p->f >> 2 & 1)) { return 0; } return (p->f >> 2 & 1) == 0; }');
-    r = run(lines, 'bool(p->f >> 2 & 1,2)');
+    r = runWith(typed, lines, 'bool(p->f >> 2 & 1,2)');
     assert.strictEqual(r.out, 'int f(U* p) { if (!(p->f >> 2 & 1)) { return 0; } return (bool)(p->f >> 2 & 1) == 0; }');
   });
   it('bool refuses several sites without an index, a value that is not tested, and a float', () => {
