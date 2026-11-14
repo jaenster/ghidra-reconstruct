@@ -58,7 +58,13 @@
  * none of those locals, and has the local's type or is a constant it holds (a literal,
  * or an enumerator, whose value every enum declaring the name agrees on): the select then
  * has the local's type, so the argument converts as the local did. A value read at the call reads what it read at the if: the callee and
- * the call's other arguments are pure.
+ * the call's other arguments are pure, or an other argument calls only functions that write
+ * nothing but their own locals (write-effects.ts) and stores nothing itself. VC8 evaluates
+ * the arguments right to left and GCC in an order of its own, so such a call may run before
+ * or after the selects read their values, and either way they read what the if read
+ * (`AllocDrlgDelete(UNITS_GetRoom(pUnit), !pUnit ? UNIT_COUNT : pUnit->eUnitType, ...)`,
+ * 005454e0 and ITEMMODE_GetItemPageForUnit 0055c9a0, where the original pushes the selects
+ * before it calls UNITS_GetRoom).
  */
 
 import { NodeKind } from '../../../ast/kinds.js';
@@ -70,9 +76,11 @@ import { traverseAST, getChildren } from '../../../ast/visitor.js';
 import { createTransformer, cloneNode, updateNode, type Transformer } from '../../transformer.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
 import { isPure } from './pseudo-op-lower.js';
-import { shapeOfNode, type TypeShape } from './call-arg-cast.js';
+import { calleeName, scopedLookup, shapeOfNode, type TypeShape } from './call-arg-cast.js';
 import { buildFunctionFlow, type FunctionFlow } from '../../cfg/dataflow.js';
 import { createExprShape } from './expr-shape.js';
+import { effectsOf } from './access-order-evidence.js';
+import type { WriteEffect } from './write-effects.js';
 import { sameShape } from './call-arg-cast.js';
 import { localTypesOf } from './compare-form.js';
 import { emit } from '../../../emit/index.js';
@@ -91,7 +99,32 @@ export interface SelectArgumentOptions extends PluginOptions {
   /** Function name -> its parameters' spellings, and the namespace the function sits in (vc8-form width). */
   functionParamTypes?: Record<string, string[]>;
   enclosingSegments?: readonly string[];
+  /** Callable spelling -> what a call to it may write (write-effects.ts); absent: anything. */
+  writeEffects?: Record<string, WriteEffect>;
   onSite?: (e: { variable: string; line: number }) => void;
+}
+
+/** A write effect that reaches nothing but the callee's own locals. */
+function writesNothing(w: WriteEffect | undefined): boolean {
+  return !!w && !w.unknown && !w.memory && !w.globals?.length && !w.params?.length;
+}
+
+/**
+ * An argument whose evaluation changes nothing a select could read: it stores nothing
+ * itself, and every call in it is a direct call to a function that writes only its own
+ * locals.
+ */
+function changesNothing(e: Expression, options: SelectArgumentOptions): boolean {
+  if (effectsOf(e).writes) return false;
+  const table = options.writeEffects;
+  if (!table) return false;
+  for (const n of traverseAST(e)) {
+    if (n.kind !== NodeKind.CallExpr) continue;
+    const name = calleeName((n as CallExpr).callee);
+    if (name === 'sizeof') continue;
+    if (!name || !writesNothing(scopedLookup(table, name, options.enclosingSegments ?? []))) return false;
+  }
+  return true;
 }
 
 const RANGES: Record<string, [bigint, bigint]> = {
@@ -438,7 +471,7 @@ export function selectPairedArguments(fn: FunctionDecl, cond: string, index: num
     }
   }
   const taken = new Set(argOf.values());
-  if (!top.call.arguments.every((x, j) => taken.has(j) || isPure(x))) refuse('another argument is not pure');
+  if (!top.call.arguments.every((x, j) => taken.has(j) || isPure(x) || changesNothing(x, options))) refuse('another argument is not pure');
   let flow: FunctionFlow | null;
   try { flow = buildFunctionFlow(body.statements, new Set([...locals.keys(), ...paramNames])); } catch { flow = null; }
   if (flow) {
