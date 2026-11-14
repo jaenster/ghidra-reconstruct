@@ -433,3 +433,49 @@ describe('rep-string-form: struct copies', () => {
     assert.match(out, /pDst = &packet;\n\s*\*pDst = \*pBytes;/);
   });
 });
+
+// SaveQuests 00569320 (`mov ecx, 0x4a; rep movsd; movsw`): the frame record copied out to the
+// save buffer, whose pointer was read from the caller before anything named the record.
+const QUESTS = [
+  { name: 'nMagic', offset: 0, size: 4, type: 'uint32_t' },
+  { name: 'nVersion', offset: 4, size: 4, type: 'uint32_t' },
+  { name: 'nSize', offset: 8, size: 2, type: 'uint16_t' },
+  { name: 'pActQuests', offset: 10, size: 288, type: 'char[288]' },
+];
+const SAVE_QUESTS = (head = '  pDst = *pStartAddress;') => `int32_t f(uint8_t **pStartAddress, D2BitBufferStrc **ppQuestBuf) {
+  uint8_t *pDst;
+  uint8_t *pEnd;
+  int i;
+  D2SaveFileQuestsStrc *pSrc;
+  D2SaveFileQuestsStrc pSaveQuests;
+${head}
+  pEnd = pDst + 0x12a;
+  memset(&pSaveQuests,0,0x12a);
+  pSaveQuests.nMagic = 0x216f6f57;
+  CopyQuestBitBuffer(*ppQuestBuf,pSaveQuests.pActQuests,0x60,1);
+  pSrc = &pSaveQuests;
+  for (i = 0x4a; i != 0; i = i + -1) {
+    *(int *)pDst = pSrc->nMagic;
+    pSrc = (D2SaveFileQuestsStrc *)&pSrc->nVersion;
+    pDst = pDst + 4;
+  }
+  *(short *)pDst = (short)pSrc->nMagic;
+  *pStartAddress = pEnd;
+  return 0;
+}`;
+const MOVS_QUESTS: RepStringOp = { op: 'movs', unit: 4, count: 0x4a, names: ['i', 'pDst', 'pSrc'] };
+const QUEST_LAYOUTS = { structLayouts: { D2SaveFileQuestsStrc: QUESTS }, aggregateSizes: { D2SaveFileQuestsStrc: 0x12a } };
+
+describe('rep-string-form: a copy out of a frame record', () => {
+  it('SaveQuests 00569320: a pointer set before the record was named, with a narrowed movsw tail', () => {
+    const { out, census } = run(SAVE_QUESTS(), [MOVS_QUESTS], QUEST_LAYOUTS);
+    assert.match(out, /pSrc = &pSaveQuests;\n\s*memcpy\(pDst, pSrc, 0x12a\);\n\s*\*pStartAddress = pEnd;/);
+    assert.deepStrictEqual(census, { fills: 0, copies: 1, untied: 0 });
+  });
+
+  it('leaves it when the pointer is set after the record was named', () => {
+    const code = SAVE_QUESTS('').replace('  pSrc = &pSaveQuests;', '  pDst = *pStartAddress;\n  pSrc = &pSaveQuests;');
+    assert.match(run(code.replace('  pEnd = pDst + 0x12a;\n', ''), [MOVS_QUESTS], QUEST_LAYOUTS).out, /for \(i = 0x4a/);
+    assert.match(run(SAVE_QUESTS('  pDst = *pStartAddress;\n  pDst = g(pDst);'), [MOVS_QUESTS], QUEST_LAYOUTS).out, /for \(i = 0x4a/);
+  });
+});
