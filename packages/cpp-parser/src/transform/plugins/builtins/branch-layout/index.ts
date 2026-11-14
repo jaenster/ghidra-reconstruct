@@ -35,6 +35,13 @@
  *             test falls into it: an inlined getter tested once, failure first,
  *             `V = A ? E : 0; if (!V) { R... } X`.
  *
+ *   chain     `if (c) { B... } R...`, c simple, outside a loop, B... not leaving, R... short
+ *             leaving code (or the end of a void function) laid out right after c's test,
+ *             where VC8 puts the arm of `if (c) X` that falls through: the source tested
+ *             failure first, `if (!c) { R... } B... R...`. When B... ends in `if (d) { B2... }`
+ *             whose jump lands on that same copy of R..., d was a guard of the same kind and
+ *             the rewrite goes on into B2... (VC8 merges the copies into the first).
+ *
  * The end of a void function's body is its return: a rest there that runs off the end
  * leaves too. Moved into a block ahead of X, it gets the `return;` it ran into, so control
  * still never reaches X after it: `if (c) X; Y;` at the end of a void function becomes
@@ -88,7 +95,7 @@ export interface BranchLayoutOptions extends PluginOptions {
   /** Further callees that never return, by unqualified name. */
   noreturnFunctions?: string[];
   /** Called once per rewrite and per site left for want of a source form. */
-  onSite?: (e: { rule: 'swap' | 'nest' | 'split' | 'getter' | 'left' | 'return-merge' | 'propagate' | 'join'; line: number; why?: string }) => void;
+  onSite?: (e: { rule: 'swap' | 'nest' | 'split' | 'getter' | 'chain' | 'left' | 'return-merge' | 'propagate' | 'join'; line: number; why?: string }) => void;
   /**
    * The null default of each field read through a null-guarded getter (`null-getter.ts`),
    * keyed `<pointee type>|<member path>`; without it no getter comparison is written.
@@ -527,6 +534,100 @@ function getterNestAt(stmts: readonly Statement[], i: number, ctx: Ctx, fallsOff
 }
 
 /**
+ * A tail `chain` may write once per guard: calls on plain operands and stores of a plain
+ * operand into a place without a call or a write in it, then a plain return or a halt; with
+ * `fallsOff` the code may run off the end of a void function instead.
+ */
+function chainTail(stmts: readonly Statement[], noreturn: ReadonlySet<string>, fallsOff: boolean): boolean {
+  if (stmts.length === 0 || stmts.length > 3) return false;
+  for (const s of stmts) {
+    if (s.kind === NodeKind.ReturnStmt) {
+      const v = (s as ReturnStmt).value;
+      if (v && !plainOperand(v)) return false;
+      continue;
+    }
+    if (s.kind !== NodeKind.ExprStmt) return false;
+    const e = (s as ExprStmt).expression;
+    if (e.kind === NodeKind.CallExpr) {
+      if (!(e as CallExpr).arguments.every(plainOperand)) return false;
+      continue;
+    }
+    if (e.kind !== NodeKind.AssignExpr) return false;
+    const a = e as AssignExpr;
+    if (a.operator !== '=' || !plainOperand(a.right) || hasCallOrWrite(a.left)) return false;
+  }
+  const last = stmts[stmts.length - 1];
+  if (last.kind === NodeKind.ReturnStmt) return true;
+  if (last.kind === NodeKind.ExprStmt && leaves(last, noreturn)) return true;
+  return fallsOff && !stmts.some(s => s.kind === NodeKind.ReturnStmt);
+}
+
+function holdsJump(stmts: readonly Statement[]): boolean {
+  for (const s of stmts) {
+    for (const n of traverseAST(s)) {
+      if (n.kind === NodeKind.BreakStmt || n.kind === NodeKind.ContinueStmt || n.kind === NodeKind.GotoStmt
+        || n.kind === NodeKind.LabelStmt || n.kind === NodeKind.CaseStmt || n.kind === NodeKind.DefaultStmt) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * chain: `if (c) { B... } R...` -> `if (!c) { R... } B... R...` where the original lays R...
+ * out right after c's test (see the header). Null when the rule does not apply.
+ */
+function chainAt(stmts: readonly Statement[], i: number, ctx: Ctx, fallsOff: boolean): Statement[] | null {
+  const ifs = stmts[i] as IfStmt;
+  const rest = stmts.slice(i + 1);
+  if (rest.length === 0 || ifs.elseBranch || ctx.loopIfs.has(lineOf(ifs))) return null;
+  if (conditionShape(ifs.condition).kind !== 'simple') return null;
+  const then = ifs.thenBranch;
+  if (leaves(then, ctx.noreturn)) return null;
+  if (!chainTail(rest, ctx.noreturn, fallsOff)) return null;
+  const e = ctx.reader.edge(ifs);
+  if (!e) return null;
+  // Where the original's copy of R... lies: a lone constant return by the return facts,
+  // anything else by the lines of the statements.
+  const one = rest.length === 1 && rest[0].kind === NodeKind.ReturnStmt;
+  const at = (one ? sharedReturn(rest[0], ctx) : null) ?? ctx.reader.entry(rest, e.jcc);
+  if (at === null || at !== e.fall) return null;
+  if (holdsJump([then, ...rest]) || jumpedLabels([then, ...rest], ctx.gotos) || holdsFreeCase([then, ...rest])) return null;
+  const inner = (body: readonly Statement[], before: readonly Statement[]): Statement[] | null => {
+    const names = declaredNames(body);
+    if (names.has('\0') || mentionsAny(rest, names) || [...declaredNames(before)].some(n => names.has(n))) return null;
+    return [...body];
+  };
+  const failing = withReturn(rest, ctx.noreturn);
+  const copy = (): Statement[] => failing.map(s => ({ ...cloneNode(s), leadingTrivia: [] }) as Statement);
+  const out: Statement[] = [updateNode(ifs, { condition: negate(ifs.condition), thenBranch: Stmt.compound(failing), elseBranch: null } as Partial<IfStmt>)];
+  let body = inner(bodyOf(then), [...stmts.slice(0, i), ...out]);
+  if (!body) return null;
+  let guards = 1;
+  for (;;) {
+    const last = body[body.length - 1];
+    if (last && leaves(last, ctx.noreturn)) { out.push(...body); break; }
+    if (last && last.kind === NodeKind.IfStmt) {
+      const d = last as IfStmt;
+      const de = !d.elseBranch && !d.init && conditionShape(d.condition).kind === 'simple' ? ctx.reader.edge(d) : null;
+      if (de && de.target === at) {
+        out.push(...body.slice(0, -1));
+        out.push(updateNode(d, { condition: negate(d.condition), thenBranch: Stmt.compound(copy()), elseBranch: null } as Partial<IfStmt>));
+        const next = inner(bodyOf(d.thenBranch), [...stmts.slice(0, i), ...out]);
+        if (!next) return null;
+        body = next;
+        guards++;
+        continue;
+      }
+    }
+    out.push(...body, ...copy());
+    break;
+  }
+  ctx.reader.taint(rest);
+  ctx.onSite?.({ rule: 'chain', line: lineOf(ifs), why: `${guards} guard(s) on the tail laid after the first test` });
+  return out;
+}
+
+/**
  * The operands of a guard condition that takes the arm, flattened over its one operator:
  * `a || b || c` gives the tests a, b, c (each takes the arm) and the conjuncts !a, !b, !c;
  * `!(x && y && z)` gives the tests !x, !y, !z and the conjuncts x, y, z. Null for anything
@@ -869,7 +970,7 @@ function rewriteList(stmts: readonly Statement[], ctx: Ctx, fallsOff: boolean): 
       if (r) { cur = [...cur.slice(0, i), ...r, ...cur.slice(i + 1)]; changed = true; }
       continue;
     }
-    const r = nestAt(cur, i, cb, ctx, fallsOff) ?? getterNestAt(cur, i, ctx, fallsOff);
+    const r = nestAt(cur, i, cb, ctx, fallsOff) ?? getterNestAt(cur, i, ctx, fallsOff) ?? chainAt(cur, i, ctx, fallsOff);
     if (r) { cur = [...cur.slice(0, i), ...r]; changed = true; }
   }
   return changed ? cur : null;
