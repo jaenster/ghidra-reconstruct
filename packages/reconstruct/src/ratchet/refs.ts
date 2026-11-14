@@ -276,6 +276,29 @@ export function scanSites(text: string): SiteScan | undefined {
   return { sites, bodyStart, bodyEnd, params, siteHash, locals, paramTypes, root: fn, toks };
 }
 
+/**
+ * The structs a function body declares for itself, by name: each member's name and type.
+ * The frame-group pass emits one (`struct __frame0_t { ... }; __frame0_t __frame0;`), and
+ * the index, which reads headers, never sees it.
+ */
+function localStructs(body: AnyNode | undefined): Map<string, Map<string, TypeRef | undefined>> {
+  const out = new Map<string, Map<string, TypeRef | undefined>>();
+  const walk = (n: AnyNode | null | undefined): void => {
+    if (!n || typeof n !== 'object' || !('kind' in n)) return;
+    if (n.kind === NodeKind.StructDecl && n.name?.kind === NodeKind.Identifier && !n.isForwardDeclaration) {
+      const fields = new Map<string, TypeRef | undefined>();
+      for (const m of (n.members ?? []) as AnyNode[]) {
+        // The parser reads a block-scope struct's members as variable declarations.
+        if ((m.kind === NodeKind.FieldDecl || m.kind === NodeKind.VariableDecl) && m.name) fields.set(m.name.name, typeRefOfNode(m.type));
+      }
+      out.set(n.name.name, fields);
+    }
+    for (const c of getChildren(n)) walk(c as AnyNode);
+  };
+  walk(body);
+  return out;
+}
+
 /** What each site of a scan denotes under `index`, seen from `scope`. */
 export function bindSites(scan: SiteScan, index: SymbolIndex, scope: string[]): Array<Binding | undefined> {
   const out: Array<Binding | undefined> = new Array(scan.sites.length);
@@ -288,9 +311,18 @@ export function bindSites(scan: SiteScan, index: SymbolIndex, scope: string[]): 
     if (r.k === 'en') return { base: 'int', ptr: 0 };
     return undefined;
   };
+  const bodyStructs = localStructs(scan.root.body as AnyNode);
   const fieldOf = (ot: TypeRef | undefined, isArrow: boolean, member: AnyNode) => {
     if (!ot || member.kind !== NodeKind.Identifier) return undefined;
     if (ot.ptr !== (isArrow ? 1 : 0)) return undefined;
+    // A struct the body declares itself (the frame record `__frame0_t`): its members are the
+    // body's own and bind to nothing, but their types carry the access path on, so a field
+    // reached through one (`__frame0.dwTickCount.sHash`) binds with its type as anywhere else.
+    const local = bodyStructs.get(ot.base);
+    if (local) {
+      if (!local.has(member.name)) return undefined;
+      return { local: true as const, type: local.get(member.name) };
+    }
     const st = index.structOf(ot.base, scope);
     if (!st) return undefined;
     const f = st.fields.find(x => x.name === member.name);
@@ -349,7 +381,7 @@ export function bindSites(scan: SiteScan, index: SymbolIndex, scope: string[]): 
       const i = bySpan.get(m.location.start.offset);
       if (i !== undefined && scan.sites[i].kind === 'member') {
         const f = fieldOf(typeOf(n.object), n.isArrow, m);
-        if (f) out[i] = f.type ? { k: 'fd', s: f.struct, o: f.offset, t: typeRefString(f.type) } : { k: 'fd', s: f.struct, o: f.offset };
+        if (f && !('local' in f)) out[i] = f.type ? { k: 'fd', s: f.struct, o: f.offset, t: typeRefString(f.type) } : { k: 'fd', s: f.struct, o: f.offset };
         else {
           const owners = index.fieldOwners.get(m.name);
           if (owners && owners.length > 0) out[i] = { k: 'fdc', c: owners.map(o => [o.s, o.o] as [string, number]) };

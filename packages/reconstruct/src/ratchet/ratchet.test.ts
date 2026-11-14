@@ -7,6 +7,7 @@ import * as path from 'node:path';
 import { advance, readAudit } from './advance.js';
 import { followHandFile } from './follow.js';
 import { applyRecords, capture, type ApplyRow } from './ratchet.js';
+import { previousTree } from './previous.js';
 import { RatchetStore, type RatchetRecord } from './store.js';
 import { GLOBALS_INDEX_FILE, SymbolIndex, memoryTree } from './symbol-index.js';
 
@@ -470,5 +471,78 @@ __declspec(dllexport) void Pump(void) { Game::Net::SetJoinResult(1); }
     assert.deepStrictEqual(r.errors, []);
     assert.ok(r.text.includes('__attribute__((noinline)) inline void __stdcall Hook(int32_t n) {\n    Game::Mcp::SetJoinResult(n);'), r.text);
     assert.ok(r.text.includes('__declspec(dllexport) void Pump(void) { Game::Mcp::SetJoinResult(1); }'), r.text);
+  });
+  describe('a field reached through the frame record', () => {
+    // NET_SID_CLIENT_Send_0x31_ChangePassword 0051a7d0: the frame-group pass made the locals
+    // one `__frame0`, and the body hashes into a field of one of its members.
+    const header = (sHash: string) => `#pragma once
+struct D2XSHA1Strc {
+    /* 0x00 */ uint32_t dwState[5];
+};
+struct BnDoubleHashInput {
+    /* 0x00 */ uint32_t dwClientToken;
+    /* 0x04 */ uint32_t dwServerToken;
+    /* 0x08 */ ${sHash};
+};
+namespace G {
+void __stdcall XSHA1(struct D2XSHA1Strc * pOut, char * pData, int nLen); // 1.14d: 00401000
+int __fastcall ChangePassword(char * szPassword, int nLen); // 1.14d: 00401100
+}
+`;
+    const unit = (arg: string, tail = '') => `#include "Unit.h"
+namespace G {
+
+// 1.14d: 00401100
+int __fastcall ChangePassword(char * szPassword, int nLen) {
+    struct __frame0_t {
+      uint32_t dwClientToken;
+      BnDoubleHashInput dwTickCount;
+    };
+    __frame0_t __frame0;
+    __frame0.dwTickCount.dwClientToken = 1;
+    XSHA1(${arg}, szPassword, nLen);
+    return 1${tail};
+}
+
+}
+`;
+    const was = tree(header('D2XSHA1Strc sHash'), unit('&__frame0.dwTickCount.sHash'));
+    const now = tree(header('uint8_t sHash[20]'), unit('(D2XSHA1Strc*)__frame0.dwTickCount.sHash', ' + 0'));
+
+    it('binds the field with its type, not by candidate owners', () => {
+      const rec = record(was, '00401100');
+      const fields = rec.members[0].bindings.map(([, b]) => b).filter(b => b.k === 'fd');
+      assert.ok(fields.some(b => b.k === 'fd' && b.s === 'BnDoubleHashInput' && b.o === 8 && b.t === 'D2XSHA1Strc'),
+        JSON.stringify(rec.members[0].bindings));
+    });
+
+    it('refuses the stored body when that field was retyped since', () => {
+      const out = applyRecords(now, [record(was, '00401100')]);
+      const r = row(out.rows, '00401100');
+      assert.strictEqual(r.status, 'unresolved', r.detail);
+      assert.match(r.detail, /field BnDoubleHashInput::sHash retyped: D2XSHA1Strc -> uint8_t\*/u);
+      // The generated body stays, with the cast it needs; the old one is parked beside it.
+      const b = body(now, out, '00401100');
+      assert.ok(b.includes('XSHA1((D2XSHA1Strc*)__frame0.dwTickCount.sHash, szPassword, nLen);'), b);
+      assert.ok(out.changed.get('Source/G/Unit.cpp')!.includes('#if 0 // ratchet'), 'the stored body is kept beside it');
+    });
+
+    it('does the same for a record bound by candidate owners, through the tree it compiled in', () => {
+      const rec = record(was, '00401100');
+      // As the scanner bound it before it read the body's own structs.
+      rec.members[0].bindings = rec.members[0].bindings.map(([i, b]) =>
+        [i, b.k === 'fd' ? { k: 'fdc', c: [[b.s, b.o]] } : b] as [number, typeof b]);
+      const out = applyRecords(now, [rec], { previous: previousTree(was, now) });
+      const r = row(out.rows, '00401100');
+      assert.strictEqual(r.status, 'unresolved', r.detail);
+      assert.match(r.detail, /field BnDoubleHashInput::sHash retyped/u);
+    });
+
+    it('keeps the stored body while the field keeps its type', () => {
+      const same = tree(header('D2XSHA1Strc sHash'), unit('&__frame0.dwTickCount.sHash', ' + 0'));
+      const out = applyRecords(same, [record(was, '00401100')]);
+      assert.strictEqual(row(out.rows, '00401100').status, 'kept', row(out.rows, '00401100').detail);
+      assert.ok(body(same, out, '00401100').includes('XSHA1(&__frame0.dwTickCount.sHash, szPassword, nLen);'));
+    });
   });
 });
