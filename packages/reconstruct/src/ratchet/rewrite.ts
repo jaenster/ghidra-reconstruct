@@ -15,6 +15,7 @@
 import { isIdentity, matchParams, paramIds, type ParamId } from './params.js';
 import { bindingKey, typeRefString, type Binding, type SiteScan } from './refs.js';
 import { sameResolved, type Resolved, type SymbolIndex } from './symbol-index.js';
+import { misparsedTypes } from './scan.js';
 
 export interface RewriteContext {
   index: SymbolIndex;
@@ -147,8 +148,10 @@ export function rewriteBody(text: string, scan: SiteScan, bindings: Array<Bindin
         }
         if (b.k === 'fn' && b.a.length === 1) {
           const now = index.fnByAddr.get(b.a[0]);
-          if (b.rt !== undefined && now?.retText !== undefined && now.retText !== b.rt) { errors.push(`callee ${old} returns ${now.retText}, was ${b.rt}`); return; }
-          if (b.pt && now?.paramTypes && b.p && now.params) {
+          // Types an older scanner read off an attribute group are no evidence either way.
+          const known = !misparsedTypes(b.pt);
+          if (known && b.rt !== undefined && now?.retText !== undefined && now.retText !== b.rt) { errors.push(`callee ${old} returns ${now.retText}, was ${b.rt}`); return; }
+          if (known && b.pt && now?.paramTypes && b.p && now.params) {
             // Compared parameter by parameter, wherever each one is now.
             const m = b.p.length === now.params.length ? matchParams(paramIds(b.p, b.ps), paramIds(now.params, now.storage)) : undefined;
             for (let k = 0; k < b.pt.length; k++) {
