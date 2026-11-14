@@ -82,6 +82,32 @@ describe('platform header: compiles against both CRT flavours', { skip: !hasMing
   }
 });
 
+/**
+ * D2_Cpuid's slots are the ones the x86 SLEIGH <finish> block fills: eax, ebx, EDX, ECX at
+ * +0/+4/+8/+0xc. Ghidra prints every CPUID consumer against that layout - GetCpuVersionInfo
+ * (0040e960) returns CONCAT44(r[2], r[0]) == EDX:EAX, DetectCpuVendor copies +4..+0xc as the
+ * contiguous vendor string. The header once stored ecx at +8, so the rebuild returned ECX
+ * where the binary returns EDX, and read the vendor as "GenuntelineI".
+ */
+describe('platform header: D2_Cpuid slot order', { skip: !hasMingw() }, () => {
+  it('stores edx at +8 and ecx at +0xc', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'platform-cpuid-'));
+    try {
+      writeFileSync(join(dir, 'd2_platform.h'), generatePlatformHeader());
+      writeFileSync(join(dir, 'd2_enums.h'), '');
+      writeFileSync(join(dir, 't.cpp'), '#include "d2_platform.h"\nint f() { return D2_Cpuid(1); }\n');
+      const asm = execFileSync('i686-w64-mingw32-g++',
+        ['-std=c++17', '-O2', '-w', '-fms-extensions', '-masm=intel', '-S', '-o', '-', join(dir, 't.cpp')],
+        { stdio: 'pipe' }).toString();
+      const store = (off: string) => new RegExp(`aRegs\\+${off},\\s*(\\w+)`).exec(asm)?.[1];
+      assert.strictEqual(store('8'), 'edx', asm);
+      assert.strictEqual(store('12'), 'ecx', asm);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('platform header: artifact support', { skip: !hasNativeGpp() }, () => {
   it('refuses -ffast-math, which breaks isnan and float bit patterns', async () => {
     const { ARTIFACT_SUPPORT_LINES } = await import('@ghidra-mcp/cpp-parser');

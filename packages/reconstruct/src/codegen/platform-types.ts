@@ -1297,11 +1297,14 @@ export function generatePlatformHeader(
   lines.push('');
   // CPUID: Ghidra models the instruction as a pseudo-op per leaf, each returning
   // a POINTER to the four result registers — every body reads them back as
-  // `*(uint32_t*)(r + 0|4|8|0xc)` == eax|ebx|ecx|edx. Reproduce that contract
+  // `*(uint32_t*)(r + 0|4|8|0xc)` == eax|ebx|EDX|ECX - the order of the x86
+  // SLEIGH <finish> block (ia.sinc), which keeps a vendor string contiguous
+  // (ebx,edx,ecx = "Genu","ineI","ntel"). Reproduce that contract
   // rather than stub it: a stub returning zeroes would make CPU detection report
   // a vendorless CPU and every caller would silently take the wrong branch.
   lines.push('// Ghidra models CPUID as one pseudo-op per leaf, each returning a pointer to');
-  lines.push('// the four result registers, read back as *(uint32_t*)(r + 0|4|8|0xc).');
+  lines.push('// the four result registers, read back as *(uint32_t*)(r + 0|4|8|0xc) in the');
+  lines.push('// SLEIGH order eax, ebx, edx, ecx - not the eax, ebx, ecx, edx of __cpuid.');
   // The instruction itself, not GCC's <cpuid.h>: that header defines a 5-argument
   // `__cpuid` MACRO and mingw's <intrin.h> a 2-argument `__cpuid` FUNCTION, so any TU
   // that includes both fails to compile. And `__get_cpuid` first checks the leaf
@@ -1310,9 +1313,23 @@ export function generatePlatformHeader(
   lines.push('static inline int D2_Cpuid(uint32_t nLeaf) {');
   lines.push('  static uint32_t aRegs[4];');
   lines.push('#if defined(__GNUC__) && (defined(__i386__) || defined(__x86_64__))');
-  lines.push('  __asm__ volatile("cpuid" : "=a"(aRegs[0]), "=b"(aRegs[1]), "=c"(aRegs[2]), "=d"(aRegs[3]) : "a"(nLeaf), "c"(0u));');
+  lines.push('  __asm__ volatile("cpuid" : "=a"(aRegs[0]), "=b"(aRegs[1]), "=d"(aRegs[2]), "=c"(aRegs[3]) : "a"(nLeaf), "c"(0u));');
+  // x86 MSVC stores the registers straight into the slots, as the binary's own inline
+  // asm does; remapping __cpuid's eax,ebx,ecx,edx array costs VC8 a frame or extra
+  // loads. Where there is no inline asm (x64), swap the two slots after __cpuid.
+  lines.push('#elif defined(_MSC_VER) && defined(_M_IX86)');
+  lines.push('  __asm {');
+  lines.push('    mov eax, nLeaf');
+  lines.push('    xor ecx, ecx');
+  lines.push('    cpuid');
+  lines.push('    mov aRegs[0], eax');
+  lines.push('    mov aRegs[4], ebx');
+  lines.push('    mov aRegs[8], edx');
+  lines.push('    mov aRegs[12], ecx');
+  lines.push('  }');
   lines.push('#elif defined(_MSC_VER)');
   lines.push('  __cpuid((int*)aRegs, (int)nLeaf);');
+  lines.push('  { uint32_t nEcx = aRegs[2]; aRegs[2] = aRegs[3]; aRegs[3] = nEcx; }');
   lines.push('#else');
   lines.push('  aRegs[0] = aRegs[1] = aRegs[2] = aRegs[3] = 0;');
   lines.push('#endif');
