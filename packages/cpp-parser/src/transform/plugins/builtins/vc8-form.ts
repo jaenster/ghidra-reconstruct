@@ -390,6 +390,15 @@
  *                        calls or mutates state, or an arm holds a label or a break that
  *                        would leave the switch. Case values are integer literals or
  *                        uppercase enum-style names that are not local variables.
+ *                        A builtin integer truth test also names case zero: `if (X)`
+ *                        means `X != 0`, `if (!X)` means `X == 0`. Admitted for one
+ *                        builtin integer binding, or `*(int*)p`-style reads through
+ *                        an explicit builtin integer pointer cast of one plain pointer
+ *                        binding. Classes, unknown aliases, references, ambiguous
+ *                        bindings and volatile reads are not inferred as integers.
+ *                        Truth tests follow existing explicit comparisons in occurrence
+ *                        order and require the other case to be a literal in 0..INT_MAX,
+ *                        avoiding narrowing case labels under integral promotions.
  */
 
 import { NodeKind, isExpression, isType } from '../../../ast/kinds.js';
@@ -4378,6 +4387,60 @@ function breaksOut(s: Statement): boolean {
   return false;
 }
 
+// Truth tests in a two-case chain mean X != 0 (or X == 0 for !X).
+// Keep this deliberately smaller than C++'s contextual-bool rules: classes can
+// overload !, conversion and dereference, and aliases can hide volatile reads.
+const SWITCH_BUILTIN_INTS = new Set([
+  'bool', 'char', 'signedchar', 'unsignedchar', 'short', 'shortint',
+  'signedshort', 'signedshortint', 'unsignedshort', 'unsignedshortint',
+  'int', 'signed', 'signedint', 'unsigned', 'unsignedint', 'long', 'longint',
+  'signedlong', 'signedlongint', 'unsignedlong', 'unsignedlongint',
+  'longlong', 'longlongint', 'signedlonglong', 'signedlonglongint',
+  'unsignedlonglong', 'unsignedlonglongint',
+]);
+
+function switchBuiltinType(type: string, pointer: boolean): boolean {
+  if (/\bvolatile\b/.test(type)) return false;
+  const t = norm(type.replace(/\bconst\b/g, ''));
+  if (!pointer) return SWITCH_BUILTIN_INTS.has(t);
+  return t.endsWith('*') && (t === 'void*' || SWITCH_BUILTIN_INTS.has(t.slice(0, -1)));
+}
+
+function switchIntegerTruth(e: Expression, fn: FunctionDecl): boolean {
+  const u = unparen(e);
+  if (isId(u)) {
+    const type = declTypeOf(fn, u.name);
+    return type !== undefined && switchBuiltinType(type, false);
+  }
+  // The packet result *(int*)pPacketData is an integer read, not a call or a
+  // class conversion. Prove the cast's operand is one plain pointer binding.
+  if (u.kind !== NodeKind.UnaryExpr || (u as UnaryExpr).operator !== '*') return false;
+  const c = unparen((u as UnaryExpr).operand);
+  if (c.kind !== NodeKind.CStyleCastExpr) return false;
+  const cast = c as CStyleCastExpr;
+  const target = norm(emit(cast.type));
+  if (/\bvolatile\b/.test(emit(cast.type)) || !target.endsWith('*') ||
+      !SWITCH_BUILTIN_INTS.has(target.slice(0, -1))) return false;
+  const p = unparen(cast.expression);
+  if (!isId(p)) return false;
+  const type = declTypeOf(fn, p.name);
+  return type !== undefined && switchBuiltinType(type, true);
+}
+
+function switchComparison(condition: Expression, fn: FunctionDecl): BinaryExpr | undefined {
+  const c = unparen(condition);
+  if (c.kind === NodeKind.BinaryExpr) return c as BinaryExpr;
+  const negated = c.kind === NodeKind.UnaryExpr && (c as UnaryExpr).operator === '!';
+  const value = negated ? unparen((c as UnaryExpr).operand) : c;
+  if (!switchIntegerTruth(value, fn)) return undefined;
+  return { kind: NodeKind.BinaryExpr, operator: negated ? '==' : '!=', left: value, right: intLit(0n, 10) } as BinaryExpr;
+}
+
+function switchTruthCaseFits(value: Expression): boolean {
+  const v = litValue(value);
+  return !!v && v.v >= 0n && v.v <= 0x7fffffffn;
+}
+
 function doSwitch(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'switch' }>): void {
   const want = norm(f.expr);
   const locals = new Set<string>();
@@ -4392,15 +4455,18 @@ function doSwitch(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'switch' }>): void
     if (/\bvolatile\b/.test(emit(v.type))) volatileNames.add(v.name.name);
   }
   let seen = 0;
-  for (const b of blocks(fn)) {
+  // Keep every previously supported occurrence at its old index. Only after
+  // those explicit comparisons consider newly supported implicit-zero cases.
+  const ordered = [false, true].flatMap(truth => blocks(fn).map(b => ({ truth, b })));
+  for (const { truth, b } of ordered) {
     for (let k = 0; k < b.statements.length; k++) {
       const s = b.statements[k];
       if (s.kind !== NodeKind.IfStmt) continue;
       const x = s as IfStmt;
       if (x.init || x.isConstexpr) continue;
-      const c = unparen(x.condition);
-      if (c.kind !== NodeKind.BinaryExpr) continue;
-      const bc = c as BinaryExpr;
+      if ((unparen(x.condition).kind !== NodeKind.BinaryExpr) !== truth) continue;
+      const bc = switchComparison(x.condition, fn);
+      if (!bc) continue;
       if ((bc.operator !== '!=' && bc.operator !== '==') || text(bc.left) !== want) continue;
       if (!x.elseBranch) {
         // if (X != K1) { if (X != K2) J R } T  ->  switch (X) { case K2: { R } case K1: { T } } J
@@ -4412,6 +4478,7 @@ function doSwitch(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'switch' }>): void
         if (y.elseBranch || y.init || y.isConstexpr || yc.kind !== NodeKind.BinaryExpr || (yc as BinaryExpr).operator !== '!=' || text((yc as BinaryExpr).left) !== want) continue;
         if (++seen !== f.index) continue;
         const k1 = bc.right, k2 = (yc as BinaryExpr).right;
+        if (truth && !switchTruthCaseFits(k2)) refuse('a truth-test case must be a nonnegative int literal');
         if (!caseConstant(k1, locals) || !caseConstant(k2, locals) || sameCaseValue(k1, k2)) refuse('the cases are not two distinct constants');
         if (!inertSwitchValue(bc.left, volatileNames)) refuse(`${f.expr} has side effects or a volatile local`);
         const rest = asBlock({ kind: NodeKind.CompoundStmt, statements: st.slice(1) } as unknown as Statement);
@@ -4439,6 +4506,7 @@ function doSwitch(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'switch' }>): void
       if (p0.kind !== NodeKind.BinaryExpr || (p0 as BinaryExpr).operator !== '==' || text((p0 as BinaryExpr).left) !== want) continue;
       if (++seen !== f.index) continue;
       const k1 = bc.right, k2 = (p0 as BinaryExpr).right;
+      if (truth && !switchTruthCaseFits(k2)) refuse('a truth-test case must be a nonnegative int literal');
       if (!caseConstant(k1, locals) || !caseConstant(k2, locals) || sameCaseValue(k1, k2)) refuse('the cases are not two distinct constants');
       if (!inertSwitchValue(bc.left, volatileNames)) refuse(`${f.expr} has side effects or a volatile local`);
       if (breaksOut(y.thenBranch) || breaksOut(other)) refuse('a break in an arm would leave the switch');
