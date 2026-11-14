@@ -139,6 +139,78 @@ describe('paramCheckBlockPlugin', () => {
     assert.match(out, /D2_CHECKS_BEGIN; D2_CHECK\(dst != 0\); D2_CHECK\(src != 0\); D2_CHECK\(size != 0\); D2_CHECK\(rows != 0\); D2_CHECKS_END_VOID/);
   });
 
+  const GETFILETIME = [
+    'int SFileGetFileTime(void* hFile, void* pFileTime) {',
+    '  void* pSlot;',
+    '  if (pFileTime) { <TEST 7>',
+    '    *(unsigned int*)pFileTime = 0;',
+    '    if (!Check(hFile, &pSlot)) {',
+    '      return 0;',
+    '    }',
+    '    *(unsigned int*)pFileTime = *(unsigned int*)pSlot;',
+    '    return 1;',
+    '  }',
+    '  SErr::SErrSetLastError(0x57);',
+    '  return 0;',
+    '}',
+  ];
+
+  it('writes a check that blanks its out parameter as D2_CHECK_BLANK (SFILE_GetFileTime)', () => {
+    const { out } = run(GETFILETIME);
+    assert.strictEqual(out, flat(`int SFileGetFileTime(void* hFile, void* pFileTime) {
+      void* pSlot;
+      D2_CHECKS_BEGIN; D2_CHECK_BLANK(pFileTime, *(unsigned int*)pFileTime = 0);
+      D2_CHECKS_END(SErr::SErrSetLastError(0x57), 0);
+      if (!Check(hFile, &pSlot)) { return 0; }
+      *(unsigned int*)pFileTime = *(unsigned int*)pSlot;
+      return 1; }`));
+  });
+
+  it('takes the blank store from behind a call that does not name it (SFileGetArchiveName)', () => {
+    const { out } = run(GETFILETIME.map(l => l.replace('    *(unsigned int*)pFileTime = 0;', '    Enter(&g);\n    *(unsigned int*)pFileTime = 0;')));
+    assert.match(out, /D2_CHECKS_END\(SErr::SErrSetLastError\(0x57\), 0\); Enter\(&g\); if/);
+  });
+
+  it('leaves a blank store behind a call that names the parameter', () => {
+    const r = run(GETFILETIME.map(l => l.replace('    *(unsigned int*)pFileTime = 0;', '    Enter(pFileTime);\n    *(unsigned int*)pFileTime = 0;')));
+    assert.strictEqual(r.out, r.before);
+  });
+
+  it('writes the guard form of a blanking check the same way', () => {
+    const { out } = run([
+      'int SFileGetFileTime(void* hFile, void* pFileTime) {',
+      '  void* pSlot;',
+      '  if (!pFileTime) { <TEST 7>',
+      '    SErr::SErrSetLastError(0x57);',
+      '    return 0;',
+      '  }',
+      '  Enter(&g);',
+      '  *(unsigned int*)pFileTime = 0;',
+      '  if (!Check(hFile, &pSlot)) {',
+      '    return 0;',
+      '  }',
+      '  return 1;',
+      '}',
+    ]);
+    assert.strictEqual(out, flat(`int SFileGetFileTime(void* hFile, void* pFileTime) {
+      void* pSlot;
+      D2_CHECKS_BEGIN; D2_CHECK_BLANK(pFileTime, *(unsigned int*)pFileTime = 0);
+      D2_CHECKS_END(SErr::SErrSetLastError(0x57), 0);
+      Enter(&g);
+      if (!Check(hFile, &pSlot)) { return 0; }
+      return 1; }`));
+  });
+
+  it('leaves a guarded arm that does not open with the blank store', () => {
+    const r = run(GETFILETIME.map(l => l.replace('*(unsigned int*)pFileTime = 0;', 'g = 0;')));
+    assert.strictEqual(r.out, r.before);
+  });
+
+  it('leaves a guarded arm that can fall through to the failure', () => {
+    const r = run(GETFILETIME.map(l => l.replace('    return 1;', '    g = 1;')));
+    assert.strictEqual(r.out, r.before);
+  });
+
   it('leaves a genuine if: its test is a TEST, not a mask', () => {
     const r = run(SSTRCMP.map(l => l.replace('<NEG 13> <NEG 19>', '<TEST 13> <TEST 19>')));
     assert.strictEqual(r.out, r.before);
