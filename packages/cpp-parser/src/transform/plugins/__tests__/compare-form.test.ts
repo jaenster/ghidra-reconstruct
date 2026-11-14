@@ -587,7 +587,7 @@ describe('compare-form: steps the instructions prove in either domain', () => {
       ' if ((u < 0x80000000) != (u <= 0x7fffffff)) bad++;' +
       ' if ((u < 0xc0000006) != (u <= 0xc0000005)) bad++;' +
       ' if ((0x7ffe < u) != (u >= 0x7fff)) bad++;' +
-      ' if ((-1 < y - 0x20) != (y - 0x20 >= 0) && y > (int)0x80000020) bad++;' +
+      ' if (y > (int)0x80000020 && ((-1 < y - 0x20) != (y - 0x20 >= 0))) bad++;' +
       ' if (((u >> 0xe & 7) < (u >> 3 & 7)) != ((int32_t)(u >> 0xe & 7) < (int32_t)(u >> 3 & 7))) bad++;' +
       ' void *p = (void *)(uintptr_t)u; if ((p != 0) != ((uintptr_t)p > 0)) bad++; }' +
       ' printf("%d\\n", bad);');
