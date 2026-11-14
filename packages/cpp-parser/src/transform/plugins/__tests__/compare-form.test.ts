@@ -485,6 +485,26 @@ describe('compare-form: steps the instructions prove in either domain', () => {
     assert.doesNotMatch(plain, /int32_t\)/);
   });
 
+  it('locals that only hold zero-extended bytes compare as the signed Jcc does', () => {
+    // TXT_BuildCharTemplateLevelIndex 00664b10: MOVZX EAX,byte ptr [ESI]; CMP EAX,EDX; JL.
+    const site: Site = { text: '<', fp: ['v:nLevel', 'v:nPrevLevel'] };
+    const d = dec({ ord: 0, ...site, keep: true, signed: true, zextPair: true });
+    const body = (extra: string) => 'struct T { uint8_t level; }; void f(T *p, int n) { int nPrevLevel = 0; int i = 0;'
+      + ' do { int nLevel; nLevel = (int)p[i].level;' + extra
+      + ' if ((uint32_t)nLevel < (uint32_t)nPrevLevel) { n = 0; } nPrevLevel = nLevel; i++; } while (i < n); }';
+    const opts = { structFields: { T: { level: 'uint8_t' } } };
+    assert.match(one(body(''), site, d, opts), /if \(nLevel < nPrevLevel\)/);
+    // A store of anything not proven, an address taken or a step leaves the casts.
+    assert.match(one(body(' nPrevLevel = n;'), site, d, opts), /\(uint32_t\)nLevel < \(uint32_t\)nPrevLevel/);
+    assert.match(one(body(' g(&nLevel);'), site, d, opts), /\(uint32_t\)nLevel < \(uint32_t\)nPrevLevel/);
+    assert.match(one(body(' nLevel--;'), site, d, opts), /\(uint32_t\)nLevel < \(uint32_t\)nPrevLevel/);
+    // A parameter's value is the caller's: never proven.
+    const param: Site = { text: '<', fp: ['v:a', 'v:b'] };
+    const dp = dec({ ord: 0, ...param, keep: true, signed: true, zextPair: true });
+    assert.match(one('void f(int a, uint8_t c) { int b = (int)c; if ((uint32_t)a < (uint32_t)b) {} }', param, dp),
+      /\(uint32_t\)a < \(uint32_t\)b/);
+  });
+
   it('a pointer zero test only on an operand that names storage', () => {
     const site: Site = { text: '!=', fp: ['e', 'c:0'] };
     const d = dec({ ord: 0, ...site, op: '>', delta: 0, k: 0, unsigned: true });
