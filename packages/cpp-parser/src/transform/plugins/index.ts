@@ -250,6 +250,7 @@ export {
   type RotatedForLoopOptions,
 } from './builtins/rotated-for-loop.js';
 export { postStridedCountedLoopPlugin } from './builtins/post-strided-counted-loop.js';
+export { loopStrideHoistPlugin } from './builtins/loop-stride-hoist.js';
 
 // ============================================
 // BUILT-IN PLUGINS: REDUNDANT PAREN CLEANUP
@@ -422,6 +423,8 @@ export {
   selectArgumentPlugin,
   type SelectArgumentOptions,
 } from './builtins/select-argument.js';
+
+export { loopCompareDifferencePlugin } from './builtins/loop-compare-difference.js';
 
 export {
   inPlaceOperandPlugin,
@@ -954,6 +957,7 @@ import { memberCopyAssignPlugin } from './builtins/member-copy-assign.js';
 import { sharedTailJoinPlugin } from './builtins/shared-tail-join.js';
 import { selectArgumentPlugin } from './builtins/select-argument.js';
 import { inPlaceOperandPlugin } from './builtins/in-place-operand.js';
+import { loopCompareDifferencePlugin } from './builtins/loop-compare-difference.js';
 import { tailWalkRereadPlugin } from './builtins/tail-walk-reread.js';
 import { rotatedStepWhilePlugin } from './builtins/rotated-step-while.js';
 import { copiedTestWhilePlugin } from './builtins/copied-test-while.js';
@@ -1130,6 +1134,7 @@ export {
 export { frameGroupLocalsPlugin, frameTypeLayout, type FrameGroupLocalsOptions, type EscapeDecision, type RunTruncation, type TypeLayout as FrameTypeLayout } from './builtins/frame-group-locals.js';
 import { stridedAccessPlugin } from './builtins/strided-access.js';
 import { postStridedCountedLoopPlugin } from './builtins/post-strided-counted-loop.js';
+import { loopStrideHoistPlugin } from './builtins/loop-stride-hoist.js';
 import { reusedParamSlotPlugin } from './builtins/reused-param-slot.js';
 export { reusedParamSlotPlugin, splitReusedParameterSlots, type ReusedParamSlotOptions } from './builtins/reused-param-slot.js';
 import { splitLivesPlugin } from './builtins/split-lives.js';
@@ -1242,6 +1247,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   inlinedStrcpyPlugin,        // Matching: the byte loop VC8 expands strcpy into becomes the call (priority 989.9)
   accumulateSumPlugin,        // Matching: a sum of two single-use values accumulates into the first with += (priority 989.95)
   inPlaceOperandPlugin,       // Matching: a value worked on once before its one use is worked on in place, x OP= e (priority 989.951)
+  loopCompareDifferencePlugin, // Matching: share a comparison loop's exit subtraction with its signed result (priority 989.952)
   shortLocalWidenPlugin,      // Matching: a short local read only as an index is an int (priority 989.96)
   guardNullNestPlugin,        // Matching: a compound guard and a later null test of one return become one null-initialised test (priority 989.97)
   returnCopySplitPlugin,      // Matching: an else-if chain whose first arm falls into a constant return writes the return in that arm (priority 989.975)
@@ -1288,6 +1294,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   addressRunBoundPlugin,  // Correctness: a loop bound that is another global's address → a distance from the one being walked (priority 69)
   stridedAccessPlugin,    // Correctness: a strength-reduced byte offset / n*sizeof(T) interior constant -> T[i].f (priority 69.5)
   postStridedCountedLoopPlugin, // Fidelity: after the byte counter folds, recover a guarded counted for loop (priority 69.6)
+  loopStrideHoistPlugin,       // Fidelity: compute an invariant byte stride before initializing its do-loop counter (priority 69.7)
   seedProductFoldPlugin,      // A seed step printed as a named product (priority 79)
   prngTransformPlugin,        // Pattern detection: PRNG (priority 80)
   prngTempCollapsePlugin,     // Cleanup: collapse PRNG temp variables (priority 85)

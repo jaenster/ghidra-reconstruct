@@ -10,7 +10,9 @@
  * value-preserving by construction, or applyVc8Forms refuses it.
  *
  *   tsx candidates.ts singles <in.json> <out.json> [--types dataTypes.ndjson] [--globals globals.ndjson] [--ops a,b]
- *       in:  [{id, text}]   a function definition each
+ *       in:  [{id, text, seedForms?: [form text, ...]}]   a function definition each
+ *       seedForms supplies native hypotheses unavailable from text, such as omitted case groups;
+ *       every seed still passes the same parser/type/shape checks before it becomes a candidate.
  *       out: [{id, roundtrip, error?, candidates: [{form, text, adds}]}]
  *   tsx candidates.ts apply <in.json> <out.json>
  *       in:  [{id, text, forms: [tag form text, ...]}]   forms applied in the order the
@@ -65,6 +67,7 @@ let structs = new Map<string, { kind: string; fields?: Field[]; typedefOf?: stri
 let globals = new Map<string, string>();
 /** Typedef and enum names to the integer type the tree declares them as (castout reads a return type's width). */
 const typedefTargets: Record<string, string> = {};
+const ambiguousEnumValues = new Set<string>();
 
 /** The tables `acc` reads: the struct fields, the enumerators and the accessors (accessor-twins.ts). */
 const accTables: {
@@ -78,7 +81,7 @@ const accTables: {
   structFieldOffsets: Record<string, Record<string, number>>;
   targetLanguageId?: string;
   targetPointerSize?: number;
-} = { structFields: {}, structLayouts: {}, aggregateMembers: {}, unionNames: [], enumValues: {}, accessors: [], typedefTargets: {}, structFieldOffsets: {} };
+} = { structFields: {}, structLayouts: {}, aggregateMembers: {}, unionNames: [], enumValues: {}, accessors: [], typedefTargets, structFieldOffsets: {} };
 
 function loadTypes(path?: string) {
   if (!path) return;
@@ -92,7 +95,13 @@ function loadTypes(path?: string) {
   for (const l of readFileSync(path, 'utf8').split('\n')) {
     if (!l) continue;
     const t = JSON.parse(l);
-    if (t.kind === 'ENUM' && Array.isArray(t.values)) for (const v of t.values) accTables.enumValues[v.name] ??= v.value;
+    if (t.kind === 'ENUM' && Array.isArray(t.values)) for (const v of t.values) {
+      if (ambiguousEnumValues.has(v.name)) continue;
+      const known = accTables.enumValues[v.name];
+      if (!Number.isSafeInteger(v.value) || (known !== undefined && known !== v.value)) {
+        delete accTables.enumValues[v.name]; ambiguousEnumValues.add(v.name);
+      } else accTables.enumValues[v.name] = v.value;
+    }
     if (t.kind === 'ENUM' && !(t.name in typedefTargets)) registerEnumTypedefTargets([t], typedefTargets);
     if (t.kind === 'TYPEDEF' && t.underlyingType && !(t.name in typedefTargets)) typedefTargets[t.name] = spell(t.underlyingType);
     if (structs.has(t.name)) continue;
@@ -248,6 +257,32 @@ function sites(c: Ctx, maxAnchors: number): string[] {
     if (/^[A-Za-z_]\w*$/.test(s)) out.add(`nullfield(${pr(m.object)},${s},${m.member.name})`);
   }
   const free = (stem: string) => { for (let k = 0; ; k++) if (!vars.has(`${stem}${k}`)) return `${stem}${k}`; };
+
+  // postdec: a final scalar count in a short-circuit while condition. The form
+  // proves the tail decrement, initialized value, dead count and alias safety.
+  // Reserve unused parameters, globals and member spellings too.
+  const postUsed = new Set([...vars.keys(), ...all.flatMap(n => n.kind === NodeKind.Identifier ? [n.name]
+    : n.kind === NodeKind.MemberExpr && n.member?.name ? [n.member.name] : [])]);
+  const postCounters = new Set<string>();
+  for (const n of all) {
+    if (n.kind !== NodeKind.WhileStmt) continue;
+    let e = unparen(n.condition);
+    if (e.kind !== NodeKind.BinaryExpr || e.operator !== '&&') continue;
+    while (e.kind === NodeKind.BinaryExpr && e.operator === '&&') e = unparen(e.right);
+    let v = e.kind === NodeKind.Identifier ? e.name : undefined;
+    if (e.kind === NodeKind.BinaryExpr && e.operator === '!=') {
+      const l = unparen(e.left), r = unparen(e.right);
+      if (l.kind === NodeKind.Identifier && r.kind === NodeKind.IntegerLiteral && r.value === 0n) v = l.name;
+      if (r.kind === NodeKind.Identifier && l.kind === NodeKind.IntegerLiteral && l.value === 0n) v = r.name;
+    }
+    if (v && /^(int|signed|signed int|unsigned|unsigned int|int32_t|uint32_t)$/.test(vars.get(v) ?? '')) postCounters.add(v);
+  }
+  for (const counter of postCounters) {
+    let name = 'nRemaining', k = 2;
+    while (postUsed.has(name)) name = `nRemaining${k++}`;
+    postUsed.add(name);
+    out.add(`postdec(${counter},${name})`);
+  }
 
   // seq: adjacent stores, every other order of each run of two to four.
   const seqRuns: string[][] = [];
@@ -661,7 +696,7 @@ function sites(c: Ctx, maxAnchors: number): string[] {
 
 /** The names a form declares, for the phase control: each new local is one more front-end symbol. */
 function adds(form: Vc8Form): number {
-  return (form.op === 'cache' && form.type) || form.op === 'recordwalk' || form.op === 'split' || (form.op === 'own' && form.rename) ? 1 : 0;
+  return (form.op === 'cache' && form.type) || form.op === 'recordwalk' || form.op === 'postdec' || form.op === 'split' || (form.op === 'own' && form.rename) ? 1 : 0;
 }
 
 function tryForm(tu: TranslationUnit, text: string): { text: string; form: Vc8Form } | { why: string } {
@@ -682,8 +717,8 @@ function tryForm(tu: TranslationUnit, text: string): { text: string; form: Vc8Fo
   return { text: [...prefix, body(out)].join('\n\n'), form };
 }
 
-export function singles(items: Array<{ id: string; text: string }>, maxAnchors: number) {
-  return items.map(({ id, text }) => {
+export function singles(items: Array<{ id: string; text: string; seedForms?: string[] }>, maxAnchors: number) {
+  return items.map(({ id, text, seedForms = [] }) => {
     let tu: TranslationUnit;
     try { tu = parse(text); } catch (e) { return { id, error: `parse: ${(e as Error).message.split('\n')[0]}`, candidates: [] }; }
     const fn = fnOf(tu);
@@ -692,7 +727,7 @@ export function singles(items: Array<{ id: string; text: string }>, maxAnchors: 
     const seen = new Set<string>([key(roundtrip)]);
     const candidates: Array<{ form: string; text: string; adds: number }> = [];
     let forms: string[];
-    try { forms = [...sites(context(fn), maxAnchors)].filter(f => !onlyOps || onlyOps.has(f.replace(/\(.*$/s, ''))); } catch (e) { return { id, error: `sites: ${(e as Error).message.split('\n')[0]}`, candidates: [] }; }
+    try { forms = [...sites(context(fn), maxAnchors), ...seedForms].filter(f => !onlyOps || onlyOps.has(f.replace(/\(.*$/s, ''))); } catch (e) { return { id, error: `sites: ${(e as Error).message.split('\n')[0]}`, candidates: [] }; }
     for (const f of forms) {
       const r = tryForm(tu, f);
       if ('why' in r) continue;

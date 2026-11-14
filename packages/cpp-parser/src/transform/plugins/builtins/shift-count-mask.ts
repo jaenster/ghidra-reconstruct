@@ -41,8 +41,12 @@
  * difference's low five bits depend on only its operands' low five, and the mask keeps
  * just those five: `(T)n & 0x1f == n & 0x1f` for every n. So the cast goes where it
  * stands as the count, or as an operand of a `+`/`-` that is the count, and its operand
- * is an integer of at most 32 bits whose type is known. A count the mask drops keeps its
- * casts: there the range was proven for the cast's value, not its operand's.
+ * is an integer of at most 32 bits whose type is known. Within a sum/difference both
+ * operands must be known integers: a cast can select an overloaded operator. When
+ * stripping a cast would leave signed arithmetic, one operand becomes uint32_t so
+ * widening a byte to an unrestricted int cannot introduce overflow before the mask.
+ * A count the mask drops keeps its casts: there the range was proven for the cast's
+ * value, not its operand's.
  */
 
 import { NodeKind } from '../../../ast/kinds.js';
@@ -57,7 +61,7 @@ import { unwrapParens, type TypedefResolver } from './call-arg-cast.js';
 import { createFunctionRanges, type ValueRange } from './value-range.js';
 import { shapeOfNode } from './call-arg-cast.js';
 import { createExprShape, type ExprShape } from './expr-shape.js';
-import { localTypesOf } from './compare-form.js';
+import { compareCast, localTypesOf } from './compare-form.js';
 
 export interface ShiftCountMaskOptions extends PluginOptions {
   enumTypes?: string[];
@@ -102,6 +106,38 @@ const INT32_OR_NARROWER = new Set([
   'UINT', 'INT', 'long', 'long int', 'unsigned long', 'ulong', 'LONG', 'ULONG', 'BOOL', 'sdword',
 ]);
 
+/** Unsigned types that stay unsigned after integral promotion on the 32-bit target. */
+const UNSIGNED_WORD = new Set([
+  'unsigned', 'unsigned int', 'uint32_t', 'uint', 'dword', 'DWORD', 'UINT',
+  'unsigned long', 'ulong', 'ULONG',
+]);
+
+/**
+ * The promoted type of a count's builtin integer +/- tree. Unknown/wider operands
+ * refuse cast removal: even an integer cast on one side can select a different
+ * overload when the other side is a class. Byte/short unsigned operands promote to
+ * signed int, so checking only a spelling's signedness would miss overflow.
+ */
+function countIntegerType(e: Expression, shapeOf: ExprShape): 'signed' | 'unsigned' | null {
+  const x = unwrapParens(e);
+  if (x.kind === NodeKind.IntegerLiteral) {
+    const lit = x as IntegerLiteralExpr;
+    const suffix = (lit.suffix ?? '').toLowerCase();
+    if (suffix.includes('ll') || lit.value > 0xffffffffn) return null;
+    if (suffix.includes('u')) return 'unsigned';
+    if (lit.value <= 0x7fffffffn) return 'signed';
+    return lit.base !== 10 ? 'unsigned' : null;
+  }
+  if (x.kind === NodeKind.BinaryExpr && ['+', '-'].includes((x as BinaryExpr).operator)) {
+    const b = x as BinaryExpr;
+    const left = countIntegerType(b.left, shapeOf), right = countIntegerType(b.right, shapeOf);
+    return left && right ? (left === 'unsigned' || right === 'unsigned' ? 'unsigned' : 'signed') : null;
+  }
+  const s = shapeOf(x);
+  if (!s || s.stars !== 0 || !INT32_OR_NARROWER.has(s.base)) return null;
+  return UNSIGNED_WORD.has(s.base) ? 'unsigned' : 'signed';
+}
+
 /**
  * `c` with each narrowing integer cast that stands as the count, or as an operand of a
  * `+`/`-` that is the count, replaced by its operand; `c` itself when none goes. Only for a
@@ -122,9 +158,15 @@ function stripCountCasts(c: Expression, shapeOf: ExprShape, resolve: TypedefReso
   }
   if (depth < 4 && x.kind === NodeKind.BinaryExpr && ((x as BinaryExpr).operator === '+' || (x as BinaryExpr).operator === '-')) {
     const b = x as BinaryExpr;
-    const left = stripCountCasts(b.left, shapeOf, resolve, depth + 1);
+    if (!countIntegerType(b, shapeOf)) return c;
+    let left = stripCountCasts(b.left, shapeOf, resolve, depth + 1);
     const right = stripCountCasts(b.right, shapeOf, resolve, depth + 1);
     if (left === b.left && right === b.right) return c;
+    // The low five bits survive unsigned word arithmetic. Casting the RESULT would
+    // be too late: `n + 4` can already overflow after `(uint8_t)n` becomes `n`.
+    if (countIntegerType(left, shapeOf) !== 'unsigned' && countIntegerType(right, shapeOf) !== 'unsigned') {
+      left = compareCast(left, 4);
+    }
     return updateNode(b, { left, right } as Partial<BinaryExpr>) as Expression;
   }
   return c;
@@ -251,6 +293,6 @@ export const shiftCountMaskPlugin: TransformPlugin = createPlugin(
     priority: 621, // after the cast and compare passes: needs the final local types and loop shapes
     defaultEnabled: true,
     tags: ['matching'],
-    version: '1.0.0',
+    version: '1.0.1',
   },
 );

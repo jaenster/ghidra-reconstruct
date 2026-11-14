@@ -1,0 +1,419 @@
+{
+  "source": "f369754f8064b9d202e986b134bfe13e2b663362",
+  "generatorBase": "0b1d6155bb08c82d2a7809bea25cce28b5b0118f",
+  "options": {
+    "outputDir": "./out",
+    "format": "cpp",
+    "organization": "namespace",
+    "generateCMake": false,
+    "generateSourceMaps": false,
+    "transformPreset": "full",
+    "includeAddressComments": false,
+    "promoteStaticGlobals": false
+  },
+  "provenance": "Actual full function emitter on two live MCP models with the real resolved-type mapper and exact published decompile hashes. Optional single comparison row per function is manually attested from native instructions, not owning extraction. Other optional context is empty; not a full owning project regeneration. Native comparison byte pairs: 0043e70b and0047b3db CMP EAX,ECX=3bc1; +2 JNC=7309. Each function is151Ghidra bytes. Backend published definitions and full-emitter fixtures are distinct.",
+  "backend": [
+    {
+      "tu": "Source/D2Client/UI/Chat",
+      "name": "CHAT_CompareCaseInsensitive",
+      "address": "0047b3b0",
+      "baseline": "static int32_t __stdcall CHAT_CompareCaseInsensitive(char* szText1, char* szText2) {\n  int nUpper1;\n  int nUpper2;\n  char cCur;\n  char* pScan1 = szText1;\n  pScan1 = pScan1 + strlen(pScan1) + 1;\n  char* pScan2;\n  if ((uint32_t)((intptr_t)pScan1 - (intptr_t)(szText1 + 1)) < (uint32_t)(int)strlen(szText2)) {\n    return -1;\n  }\n  int nRemaining = (int)strlen(szText2);\n  while (true) {\n    if (!nRemaining) {\n      return 0;\n    }\n    nRemaining--;\n    nUpper1 = toupper((int)*szText1);\n    nUpper2 = toupper((int)*szText2);\n    if (nUpper1 != nUpper2) {\n      break;\n    }\n    szText1++;\n    szText2++;\n  }\n  return (uint32_t)(nUpper1 != nUpper2 && -1 < nUpper1 - nUpper2) * 2 - 1;\n}",
+      "candidate": "static int32_t __stdcall CHAT_CompareCaseInsensitive(char* szText1, char* szText2) {\n  int nUpper1;\n  int nUpper2;\n  char cCur;\n  char* pScan1 = szText1;\n  pScan1 = pScan1 + strlen(pScan1) + 1;\n  char* pScan2;\n  if ((uint32_t)((intptr_t)pScan1 - (intptr_t)(szText1 + 1)) < (uint32_t)(int)strlen(szText2)) {\n    return -1;\n  }\n  int nRemaining = (int)strlen(szText2);\n  int nComparison;\n  while (true) {\n    if (!nRemaining) {\n      return 0;\n    }\n    nRemaining--;\n    nUpper1 = toupper((int)*szText1);\n    nUpper2 = toupper((int)*szText2);\n    nComparison = nUpper1 - nUpper2;\n    if (nComparison != 0) {\n      break;\n    }\n    szText1++;\n    szText2++;\n  }\n  return (uint32_t)(nComparison > 0) * 2 - 1;\n}"
+    },
+    {
+      "tu": "Source/D2Multi/ChatDlg",
+      "name": "someStrCompare",
+      "address": "0043e6e0",
+      "baseline": "static int32_t __stdcall someStrCompare(char* szText1, char* szText2) {\n  int nUpper1;\n  int nUpper2;\n  char cCur;\n  char* pcEnd1 = szText1;\n  pcEnd1 = pcEnd1 + strlen(pcEnd1) + 1;\n  char* pcEnd2;\n  if ((uint32_t)((intptr_t)pcEnd1 - (intptr_t)(szText1 + 1)) < (uint32_t)(int)strlen(szText2)) {\n    return -1;\n  }\n  int nRemaining = (int)strlen(szText2);\n  while (true) {\n    if (!nRemaining) {\n      return 0;\n    }\n    nRemaining--;\n    nUpper1 = toupper((int)*szText1);\n    nUpper2 = toupper((int)*szText2);\n    if (nUpper1 != nUpper2) {\n      break;\n    }\n    szText1++;\n    szText2++;\n  }\n  return (uint32_t)(nUpper1 != nUpper2 && -1 < nUpper1 - nUpper2) * 2 - 1;\n}",
+      "candidate": "static int32_t __stdcall someStrCompare(char* szText1, char* szText2) {\n  int nUpper1;\n  int nUpper2;\n  char cCur;\n  char* pcEnd1 = szText1;\n  pcEnd1 = pcEnd1 + strlen(pcEnd1) + 1;\n  char* pcEnd2;\n  if ((uint32_t)((intptr_t)pcEnd1 - (intptr_t)(szText1 + 1)) < (uint32_t)(int)strlen(szText2)) {\n    return -1;\n  }\n  int nRemaining = (int)strlen(szText2);\n  int nComparison;\n  while (true) {\n    if (!nRemaining) {\n      return 0;\n    }\n    nRemaining--;\n    nUpper1 = toupper((int)*szText1);\n    nUpper2 = toupper((int)*szText2);\n    nComparison = nUpper1 - nUpper2;\n    if (nComparison != 0) {\n      break;\n    }\n    szText1++;\n    szText2++;\n  }\n  return (uint32_t)(nComparison > 0) * 2 - 1;\n}"
+    }
+  ],
+  "emitter": [
+    {
+      "address": "0043e6e0",
+      "name": "someStrCompare",
+      "hash": "4b291fdb",
+      "raw": {
+        "name": "someStrCompare",
+        "address": "0043e6e0",
+        "entryPoint": "0043e6e0",
+        "signature": "int32_t someStrCompare(char * szText1, char * szText2)",
+        "returnType": "int32_t",
+        "callingConvention": "__stdcall",
+        "size": 151,
+        "isThunk": false,
+        "isExternal": false,
+        "hasVarArgs": false,
+        "namespace": "D2Multi::ChatDlg",
+        "comment": "@function someStrCompare\n@address Game.exe.ram:0043e6e0\n@date 2026.06.06\n@params\n  szText1: Stack[0x4]:4 (char *)\n  szText2: EAX:4 (char *)\n@description Diablo 2 1.14d reverse team\nhttps://blizzhackers.dev\n\nFunction uses custom registers for function arguments!\n[char * szText1@Stack[0x4]:4]\n[char * szText2@EAX:4]",
+        "sourceFile": null,
+        "sourceLine": null,
+        "sourceInfo": null,
+        "parameters": [
+          {
+            "name": "szText1",
+            "dataType": "char *",
+            "size": 4,
+            "ordinal": 0,
+            "storage": "Stack[0x4]:4",
+            "stackOffset": 4,
+            "resolvedType": null
+          },
+          {
+            "name": "szText2",
+            "dataType": "char *",
+            "size": 4,
+            "ordinal": 1,
+            "storage": "EAX:4",
+            "stackOffset": null,
+            "resolvedType": null
+          }
+        ],
+        "localVariables": [
+          {
+            "name": "pcEnd1",
+            "dataType": "undefined4",
+            "size": 4,
+            "storage": "EAX:4",
+            "stackOffset": null,
+            "resolvedType": "char *"
+          },
+          {
+            "name": "pcEnd2",
+            "dataType": "undefined4",
+            "size": 4,
+            "storage": "ECX:4",
+            "stackOffset": null,
+            "resolvedType": "char *"
+          },
+          {
+            "name": "nRemaining",
+            "dataType": "undefined4",
+            "size": 4,
+            "storage": "EAX:4",
+            "stackOffset": null,
+            "resolvedType": "int"
+          },
+          {
+            "name": "nUpper1",
+            "dataType": "undefined4",
+            "size": 4,
+            "storage": "EAX:4",
+            "stackOffset": null,
+            "resolvedType": "int"
+          },
+          {
+            "name": "nUpper2",
+            "dataType": "undefined4",
+            "size": 4,
+            "storage": "EAX:4",
+            "stackOffset": null,
+            "resolvedType": "int"
+          },
+          {
+            "name": "cCur",
+            "dataType": "undefined1",
+            "size": 1,
+            "storage": "HASH:5f91f5e6d7:1",
+            "stackOffset": null,
+            "resolvedType": "char"
+          }
+        ],
+        "tags": [
+          {
+            "type": "llm-artifact-fix"
+          }
+        ]
+      },
+      "model": {
+        "name": "someStrCompare",
+        "address": "0043e6e0",
+        "entryPoint": "0043e6e0",
+        "signature": "int32_t someStrCompare(char * szText1, char * szText2)",
+        "returnType": "int32_t",
+        "callingConvention": "__stdcall",
+        "size": 151,
+        "isThunk": false,
+        "isExternal": false,
+        "hasVarArgs": false,
+        "namespace": "D2Multi::ChatDlg",
+        "comment": "@function someStrCompare\n@address Game.exe.ram:0043e6e0\n@date 2026.06.06\n@params\n  szText1: Stack[0x4]:4 (char *)\n  szText2: EAX:4 (char *)\n@description Diablo 2 1.14d reverse team\nhttps://blizzhackers.dev\n\nFunction uses custom registers for function arguments!\n[char * szText1@Stack[0x4]:4]\n[char * szText2@EAX:4]",
+        "sourceFile": null,
+        "sourceLine": null,
+        "sourceInfo": null,
+        "parameters": [
+          {
+            "name": "szText1",
+            "dataType": "char *",
+            "size": 4,
+            "ordinal": 0,
+            "storage": "Stack[0x4]:4",
+            "stackOffset": 4,
+            "resolvedType": null
+          },
+          {
+            "name": "szText2",
+            "dataType": "char *",
+            "size": 4,
+            "ordinal": 1,
+            "storage": "EAX:4",
+            "stackOffset": null,
+            "resolvedType": null
+          }
+        ],
+        "localVariables": [
+          {
+            "name": "pcEnd1",
+            "dataType": "char *",
+            "size": 4,
+            "storage": "EAX:4",
+            "stackOffset": null,
+            "resolvedType": "char *"
+          },
+          {
+            "name": "pcEnd2",
+            "dataType": "char *",
+            "size": 4,
+            "storage": "ECX:4",
+            "stackOffset": null,
+            "resolvedType": "char *"
+          },
+          {
+            "name": "nRemaining",
+            "dataType": "int",
+            "size": 4,
+            "storage": "EAX:4",
+            "stackOffset": null,
+            "resolvedType": "int"
+          },
+          {
+            "name": "nUpper1",
+            "dataType": "int",
+            "size": 4,
+            "storage": "EAX:4",
+            "stackOffset": null,
+            "resolvedType": "int"
+          },
+          {
+            "name": "nUpper2",
+            "dataType": "int",
+            "size": 4,
+            "storage": "EAX:4",
+            "stackOffset": null,
+            "resolvedType": "int"
+          },
+          {
+            "name": "cCur",
+            "dataType": "char",
+            "size": 1,
+            "storage": "HASH:5f91f5e6d7:1",
+            "stackOffset": null,
+            "resolvedType": "char"
+          }
+        ],
+        "tags": [
+          {
+            "type": "llm-artifact-fix"
+          }
+        ],
+        "decompiled": "\n/* @function someStrCompare\n   @address Game.exe.ram:0043e6e0\n   @date 2026.06.06\n   @params\n     szText1: Stack[0x4]:4 (char *)\n     szText2: EAX:4 (char *)\n   @description Diablo 2 1.14d reverse team\n   https://blizzhackers.dev\n   \n   Function uses custom registers for function arguments!\n   [char * szText1@Stack[0x4]:4]\n   [char * szText2@EAX:4] */\n\nint32_t D2Multi::ChatDlg::someStrCompare(char *szText1,char *szText2)\n\n{\n  char *pcEnd1;\n  int nRemaining;\n  int nUpper1;\n  int nUpper2;\n  char *pcEnd2;\n  char cCur;\n  \n  pcEnd1 = szText1;\n  do {\n    cCur = *pcEnd1;\n    pcEnd1 = pcEnd1 + 1;\n  } while (cCur != '\\0');\n  pcEnd2 = szText2;\n  do {\n    cCur = *pcEnd2;\n    pcEnd2 = pcEnd2 + 1;\n  } while (cCur != '\\0');\n  if ((uint)((int)pcEnd2 - (int)(szText2 + 1)) <= (uint)((int)pcEnd1 - (int)(szText1 + 1))) {\n    pcEnd1 = szText2;\n    do {\n      cCur = *pcEnd1;\n      pcEnd1 = pcEnd1 + 1;\n    } while (cCur != '\\0');\n    nRemaining = (int)pcEnd1 - (int)(szText2 + 1);\n    while( true ) {\n      if (nRemaining == 0) {\n        return 0;\n      }\n      nRemaining = nRemaining + -1;\n      nUpper1 = compiler::toupper((int)*szText1);\n      nUpper2 = compiler::toupper((int)*szText2);\n      if (nUpper1 != nUpper2) break;\n      szText1 = szText1 + 1;\n      szText2 = szText2 + 1;\n    }\n    return (uint)(nUpper1 != nUpper2 && -1 < nUpper1 - nUpper2) * 2 + -1;\n  }\n  return -1;\n}\n\n",
+        "compareSites": "0\t!=\t-\n1\t!=\t-\n2\t<=\tINT_LESSEQUAL\t4\t-1\t-\te\te\t0043e70b\t0043e70d\tJNC\t0043e70b\tCMP\t4\tr\tr\t-\t1\n3\t!=\t-\n4\t==\t-\n5\t!=\t-\n6\t!=\t-\n7\t<\t-"
+      },
+      "baseline": "// 1.14d: 0043e6e0\nint32_t __stdcall someStrCompare(char * szText1, char * szText2) {\n    int nUpper1;\n    int nUpper2;\n    char cCur;\n    char* pcEnd1 = szText1;\n    pcEnd1 = pcEnd1 + strlen(pcEnd1) + 1;\n    char* pcEnd2;\n    if ((uint32_t)((intptr_t)pcEnd1 - (intptr_t)(szText1 + 1)) < (uint32_t)(int)strlen(szText2)) {\n      return -1;\n    }\n\n    int nRemaining = (int)strlen(szText2);\n    while (true) {\n      if (!nRemaining) {\n        return 0;\n      }\n\n      nRemaining--;\n      nUpper1 = toupper((int)*szText1);\n      nUpper2 = toupper((int)*szText2);\n      if (nUpper1 != nUpper2) {\n        break;\n      }\n\n      szText1++;\n      szText2++;\n    }\n\n    return (uint32_t)(nUpper1 != nUpper2 && -1 < nUpper1 - nUpper2) * 2 - 1;\n}",
+      "candidate": "// 1.14d: 0043e6e0\nint32_t __stdcall someStrCompare(char * szText1, char * szText2) {\n    int nUpper1;\n    int nUpper2;\n    char cCur;\n    char* pcEnd1 = szText1;\n    pcEnd1 = pcEnd1 + strlen(pcEnd1) + 1;\n    char* pcEnd2;\n    if ((uint32_t)((intptr_t)pcEnd1 - (intptr_t)(szText1 + 1)) < (uint32_t)(int)strlen(szText2)) {\n      return -1;\n    }\n\n    int nRemaining = (int)strlen(szText2);\n    int nComparison;\n    while (true) {\n      if (!nRemaining) {\n        return 0;\n      }\n\n      nRemaining--;\n      nUpper1 = toupper((int)*szText1);\n      nUpper2 = toupper((int)*szText2);\n      nComparison = nUpper1 - nUpper2;\n      if (nComparison != 0) {\n        break;\n      }\n\n      szText1++;\n      szText2++;\n    }\n\n    return (uint32_t)(nComparison > 0) * 2 - 1;\n}"
+    },
+    {
+      "address": "0047b3b0",
+      "name": "CHAT_CompareCaseInsensitive",
+      "hash": "5b3688c5",
+      "raw": {
+        "name": "CHAT_CompareCaseInsensitive",
+        "address": "0047b3b0",
+        "entryPoint": "0047b3b0",
+        "signature": "int32_t CHAT_CompareCaseInsensitive(char * szText1, char * szText2)",
+        "returnType": "int32_t",
+        "callingConvention": "__stdcall",
+        "size": 151,
+        "isThunk": false,
+        "isExternal": false,
+        "hasVarArgs": false,
+        "namespace": "D2Client::UI::Chat",
+        "comment": "@function CHAT_CompareCaseInsensitive\n@address Game.exe.ram:0047b3b0\n@date 2026.06.06\n@params\n  szText1: Stack[0x4]:4 (char *)\n  szText2: EAX:4 (char *)\n@description Diablo 2 1.14d reverse team\nhttps://blizzhackers.dev\n\nFunction uses custom registers for function arguments!\n[char * szText1@Stack[0x4]:4]\n[char * szText2@EAX:4]",
+        "sourceFile": null,
+        "sourceLine": null,
+        "sourceInfo": null,
+        "parameters": [
+          {
+            "name": "szText1",
+            "dataType": "char *",
+            "size": 4,
+            "ordinal": 0,
+            "storage": "Stack[0x4]:4",
+            "stackOffset": 4,
+            "resolvedType": null
+          },
+          {
+            "name": "szText2",
+            "dataType": "char *",
+            "size": 4,
+            "ordinal": 1,
+            "storage": "EAX:4",
+            "stackOffset": null,
+            "resolvedType": null
+          }
+        ],
+        "localVariables": [
+          {
+            "name": "pScan1",
+            "dataType": "undefined4",
+            "size": 4,
+            "storage": "EAX:4",
+            "stackOffset": null,
+            "resolvedType": "char *"
+          },
+          {
+            "name": "pScan2",
+            "dataType": "undefined4",
+            "size": 4,
+            "storage": "ECX:4",
+            "stackOffset": null,
+            "resolvedType": "char *"
+          },
+          {
+            "name": "nRemaining",
+            "dataType": "undefined4",
+            "size": 4,
+            "storage": "EAX:4",
+            "stackOffset": null,
+            "resolvedType": "int"
+          },
+          {
+            "name": "nUpper1",
+            "dataType": "undefined4",
+            "size": 4,
+            "storage": "EAX:4",
+            "stackOffset": null,
+            "resolvedType": "int"
+          },
+          {
+            "name": "nUpper2",
+            "dataType": "undefined4",
+            "size": 4,
+            "storage": "EAX:4",
+            "stackOffset": null,
+            "resolvedType": "int"
+          },
+          {
+            "name": "cCur",
+            "dataType": "undefined1",
+            "size": 1,
+            "storage": "HASH:5fbbb9bfd2:1",
+            "stackOffset": null,
+            "resolvedType": "char"
+          }
+        ],
+        "tags": [
+          {
+            "type": "llm-artifact-fix"
+          }
+        ]
+      },
+      "model": {
+        "name": "CHAT_CompareCaseInsensitive",
+        "address": "0047b3b0",
+        "entryPoint": "0047b3b0",
+        "signature": "int32_t CHAT_CompareCaseInsensitive(char * szText1, char * szText2)",
+        "returnType": "int32_t",
+        "callingConvention": "__stdcall",
+        "size": 151,
+        "isThunk": false,
+        "isExternal": false,
+        "hasVarArgs": false,
+        "namespace": "D2Client::UI::Chat",
+        "comment": "@function CHAT_CompareCaseInsensitive\n@address Game.exe.ram:0047b3b0\n@date 2026.06.06\n@params\n  szText1: Stack[0x4]:4 (char *)\n  szText2: EAX:4 (char *)\n@description Diablo 2 1.14d reverse team\nhttps://blizzhackers.dev\n\nFunction uses custom registers for function arguments!\n[char * szText1@Stack[0x4]:4]\n[char * szText2@EAX:4]",
+        "sourceFile": null,
+        "sourceLine": null,
+        "sourceInfo": null,
+        "parameters": [
+          {
+            "name": "szText1",
+            "dataType": "char *",
+            "size": 4,
+            "ordinal": 0,
+            "storage": "Stack[0x4]:4",
+            "stackOffset": 4,
+            "resolvedType": null
+          },
+          {
+            "name": "szText2",
+            "dataType": "char *",
+            "size": 4,
+            "ordinal": 1,
+            "storage": "EAX:4",
+            "stackOffset": null,
+            "resolvedType": null
+          }
+        ],
+        "localVariables": [
+          {
+            "name": "pScan1",
+            "dataType": "char *",
+            "size": 4,
+            "storage": "EAX:4",
+            "stackOffset": null,
+            "resolvedType": "char *"
+          },
+          {
+            "name": "pScan2",
+            "dataType": "char *",
+            "size": 4,
+            "storage": "ECX:4",
+            "stackOffset": null,
+            "resolvedType": "char *"
+          },
+          {
+            "name": "nRemaining",
+            "dataType": "int",
+            "size": 4,
+            "storage": "EAX:4",
+            "stackOffset": null,
+            "resolvedType": "int"
+          },
+          {
+            "name": "nUpper1",
+            "dataType": "int",
+            "size": 4,
+            "storage": "EAX:4",
+            "stackOffset": null,
+            "resolvedType": "int"
+          },
+          {
+            "name": "nUpper2",
+            "dataType": "int",
+            "size": 4,
+            "storage": "EAX:4",
+            "stackOffset": null,
+            "resolvedType": "int"
+          },
+          {
+            "name": "cCur",
+            "dataType": "char",
+            "size": 1,
+            "storage": "HASH:5fbbb9bfd2:1",
+            "stackOffset": null,
+            "resolvedType": "char"
+          }
+        ],
+        "tags": [
+          {
+            "type": "llm-artifact-fix"
+          }
+        ],
+        "decompiled": "\n/* @function CHAT_CompareCaseInsensitive\n   @address Game.exe.ram:0047b3b0\n   @date 2026.06.06\n   @params\n     szText1: Stack[0x4]:4 (char *)\n     szText2: EAX:4 (char *)\n   @description Diablo 2 1.14d reverse team\n   https://blizzhackers.dev\n   \n   Function uses custom registers for function arguments!\n   [char * szText1@Stack[0x4]:4]\n   [char * szText2@EAX:4] */\n\nint32_t D2Client::UI::Chat::CHAT_CompareCaseInsensitive(char *szText1,char *szText2)\n\n{\n  char *pScan1;\n  int nRemaining;\n  int nUpper1;\n  int nUpper2;\n  char *pScan2;\n  char cCur;\n  \n  pScan1 = szText1;\n  do {\n    cCur = *pScan1;\n    pScan1 = pScan1 + 1;\n  } while (cCur != '\\0');\n  pScan2 = szText2;\n  do {\n    cCur = *pScan2;\n    pScan2 = pScan2 + 1;\n  } while (cCur != '\\0');\n  if ((uint)((int)pScan2 - (int)(szText2 + 1)) <= (uint)((int)pScan1 - (int)(szText1 + 1))) {\n    pScan1 = szText2;\n    do {\n      cCur = *pScan1;\n      pScan1 = pScan1 + 1;\n    } while (cCur != '\\0');\n    nRemaining = (int)pScan1 - (int)(szText2 + 1);\n    while( true ) {\n      if (nRemaining == 0) {\n        return 0;\n      }\n      nRemaining = nRemaining + -1;\n      nUpper1 = compiler::toupper((int)*szText1);\n      nUpper2 = compiler::toupper((int)*szText2);\n      if (nUpper1 != nUpper2) break;\n      szText1 = szText1 + 1;\n      szText2 = szText2 + 1;\n    }\n    return (uint)(nUpper1 != nUpper2 && -1 < nUpper1 - nUpper2) * 2 + -1;\n  }\n  return -1;\n}\n\n",
+        "compareSites": "0\t!=\t-\n1\t!=\t-\n2\t<=\tINT_LESSEQUAL\t4\t-1\t-\te\te\t0047b3db\t0047b3dd\tJNC\t0047b3db\tCMP\t4\tr\tr\t-\t1\n3\t!=\t-\n4\t==\t-\n5\t!=\t-\n6\t!=\t-\n7\t<\t-"
+      },
+      "baseline": "// 1.14d: 0047b3b0\nint32_t __stdcall CHAT_CompareCaseInsensitive(char * szText1, char * szText2) {\n    int nUpper1;\n    int nUpper2;\n    char cCur;\n    char* pScan1 = szText1;\n    pScan1 = pScan1 + strlen(pScan1) + 1;\n    char* pScan2;\n    if ((uint32_t)((intptr_t)pScan1 - (intptr_t)(szText1 + 1)) < (uint32_t)(int)strlen(szText2)) {\n      return -1;\n    }\n\n    int nRemaining = (int)strlen(szText2);\n    while (true) {\n      if (!nRemaining) {\n        return 0;\n      }\n\n      nRemaining--;\n      nUpper1 = toupper((int)*szText1);\n      nUpper2 = toupper((int)*szText2);\n      if (nUpper1 != nUpper2) {\n        break;\n      }\n\n      szText1++;\n      szText2++;\n    }\n\n    return (uint32_t)(nUpper1 != nUpper2 && -1 < nUpper1 - nUpper2) * 2 - 1;\n}",
+      "candidate": "// 1.14d: 0047b3b0\nint32_t __stdcall CHAT_CompareCaseInsensitive(char * szText1, char * szText2) {\n    int nUpper1;\n    int nUpper2;\n    char cCur;\n    char* pScan1 = szText1;\n    pScan1 = pScan1 + strlen(pScan1) + 1;\n    char* pScan2;\n    if ((uint32_t)((intptr_t)pScan1 - (intptr_t)(szText1 + 1)) < (uint32_t)(int)strlen(szText2)) {\n      return -1;\n    }\n\n    int nRemaining = (int)strlen(szText2);\n    int nComparison;\n    while (true) {\n      if (!nRemaining) {\n        return 0;\n      }\n\n      nRemaining--;\n      nUpper1 = toupper((int)*szText1);\n      nUpper2 = toupper((int)*szText2);\n      nComparison = nUpper1 - nUpper2;\n      if (nComparison != 0) {\n        break;\n      }\n\n      szText1++;\n      szText2++;\n    }\n\n    return (uint32_t)(nComparison > 0) * 2 - 1;\n}"
+    }
+  ]
+}
