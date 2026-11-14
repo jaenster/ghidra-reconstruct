@@ -45,12 +45,20 @@
  * between reaches x, and the push's value is dead (UI_SLIDER_InitContrast 0047d2f0:
  * `nContrastVal = (int32_t)pItem;` then the default `nContrastVal = ... ? 100 : 0;` that
  * SRegLoadValue may keep).
+ *
+ * A scalar member store can also kill the whole value of a plain generated union
+ * (SOUND_ApplyEAXEnvironment 00513c50). Require the next statement to write a member
+ * at offset zero whose width equals the union's, and no earlier use/escape of the
+ * local. This path accepts only complete arithmetic-member layouts, an automatic
+ * uninitialised local and one whole-local assignment, in a function without loops,
+ * labels, nested definitions or exceptional control flow. Later address uses are
+ * fine: the member store has already replaced every byte they can observe.
  */
 
 import { NodeKind } from '../../../ast/kinds.js';
 import type {
   ASTNode, AssignExpr, CallExpr, CompoundStmt, CStyleCastExpr, DeclStmt, Expression, ExprStmt,
-  FunctionDecl, Identifier, IfStmt, ParameterDecl, ParenExpr, ReturnStmt, Statement, SwitchStmt,
+  FunctionDecl, Identifier, IfStmt, MemberExpr, ParameterDecl, ParenExpr, ReturnStmt, Statement, SwitchStmt,
   UnaryExpr, VariableDecl,
 } from '../../../ast/nodes.js';
 import { findNodesByKind, traverseAST } from '../../../ast/visitor.js';
@@ -65,6 +73,12 @@ export interface DeadOutSlotStoreOptions extends PluginOptions {
   outParamWidth?: (callee: string, index: number) => number | null;
   /** Bytes a value of the spelled type occupies, or null. */
   typeSize?: (spelling: string) => number | null;
+  /** Generated aggregate declarations, including every emitted member. All are needed for a union kill. */
+  unionNames?: readonly string[];
+  aggregateSizes?: Readonly<Record<string, number>>;
+  aggregateMembers?: Readonly<Record<string, readonly string[]>>;
+  structLayouts?: Readonly<Record<string, ReadonlyArray<{ name: string; offset: number; size: number; type: string; bitSize?: number }>>>;
+  convertingAggregates?: readonly string[];
   /**
    * Locals the prologue reserved with `PUSH reg` while the register held a parameter
    * (reconstruct/extract/prologue-slots.ts): only `local = value` for one of these is the
@@ -139,12 +153,97 @@ function mentions(root: ASTNode, name: string): number {
   return n;
 }
 
+// Deliberately no typedef guesses: an unknown spelling may hide volatile, a
+// reference, or a class with an observable assignment/conversion. Width alone is
+// not enough. The sound union's actual fields are `float` and `int`.
+const ARITHMETIC = new Set([
+  'bool', 'char', 'signed char', 'unsigned char', 'short', 'short int', 'signed short',
+  'signed short int', 'unsigned short', 'unsigned short int', 'int', 'signed', 'signed int',
+  'unsigned', 'unsigned int', 'long', 'long int', 'signed long', 'signed long int',
+  'unsigned long', 'unsigned long int', 'long long', 'long long int', 'signed long long',
+  'signed long long int', 'unsigned long long', 'unsigned long long int', '__int64',
+  'unsigned __int64', 'float', 'double', 'long double',
+]);
+
+/** The names of unique PUSH copies immediately killed by a full-width union member store. */
+function unionOverwrites(fn: FunctionDecl, options: DeadOutSlotStoreOptions, pushed: ReadonlyMap<string, string>): Set<string> {
+  const result = new Set<string>();
+  if (!fn.body || !options.typeSize || !options.unionNames?.length) return result;
+  const nodes = [...traverseAST(fn.body)];
+  // No backedge may bring an address escaped AFTER the kill back to its RHS.
+  // Nor reason across nested bindings, opaque asm or alternate/exceptional entries.
+  const unsupported = new Set([
+    NodeKind.WhileStmt, NodeKind.DoWhileStmt, NodeKind.ForStmt, NodeKind.ForRangeStmt,
+    NodeKind.GotoStmt, NodeKind.LabelStmt, NodeKind.CaseStmt, NodeKind.DefaultStmt,
+    NodeKind.FunctionDecl, NodeKind.MethodDecl, NodeKind.LambdaExpr, NodeKind.ClassDecl,
+    NodeKind.StructDecl, NodeKind.UnionDecl, NodeKind.TypedefDecl, NodeKind.TypeAliasDecl,
+    NodeKind.AsmDecl, NodeKind.MacroDecl, NodeKind.TryStmt, NodeKind.SehTryStmt, NodeKind.PpConditionalStmt,
+    NodeKind.CoAwaitExpr, NodeKind.CoYieldExpr, NodeKind.CoReturnStmt,
+  ]);
+  if (nodes.some(n => unsupported.has(n.kind))) return result;
+  const declarations = nodes.filter(n => n.kind === NodeKind.VariableDecl) as VariableDecl[];
+  for (const d of fn.body.statements.filter(s => s.kind === NodeKind.DeclStmt) as DeclStmt[]) {
+    for (const v of d.declarations) {
+      if (v.kind !== NodeKind.VariableDecl) continue;
+      const local = v as VariableDecl, x = local.name.name, parameter = pushed.get(x);
+      if (!parameter || local.initializer || local.directInit || local.specifiers.length || local.attributes.length
+        || declarations.filter(v => v.name.name === x).length !== 1
+        || declarations.some(v => v.name.name === parameter)
+        || fn.parameters.some(p => p.name?.name === x)) continue;
+      const spelling = emit(local.type as never).replace(/\s+/g, ' ').trim();
+      const union = spelling.replace(/^union /, '');
+      if (!options.unionNames.includes(union) || options.convertingAggregates?.includes(union)) continue;
+      const w = options.typeSize(spelling), fields = options.structLayouts?.[union], members = options.aggregateMembers?.[union];
+      if (!w || options.aggregateSizes?.[union] !== w || !fields?.length || !members?.length
+        || new Set(members).size !== members.length || fields.length !== members.length
+        || fields.some(f => !members.includes(f.name)) || new Set(fields.map(f => f.name)).size !== fields.length
+        || fields.some(f => f.bitSize !== undefined || f.offset !== 0 || f.size <= 0 || f.size > w
+          || !ARITHMETIC.has(f.type) || options.typeSize!(f.type) !== f.size)) continue;
+      const p = fn.parameters.find(p => p.name?.name === parameter);
+      if (!p) continue;
+      const pt = emit(p.type as never).replace(/\s+/g, ' ').trim();
+      if ((!ARITHMETIC.has(pt) && !/^[\w: ]+\s*\*$/.test(pt)) || /\bvolatile\b/.test(pt)
+        || options.typeSize(pt) !== w) continue;
+      const assignments = nodes.filter(n => n.kind === NodeKind.AssignExpr
+        && unparen((n as AssignExpr).left).kind === NodeKind.Identifier
+        && (unparen((n as AssignExpr).left) as Identifier).name === x) as AssignExpr[];
+      if (assignments.length !== 1) continue;
+      const copy = assignments[0], target = unparen(copy.left);
+      const firstUse = nodes.find(n => n.kind === NodeKind.Identifier && (n as Identifier).name === x && n !== local.name);
+      if (firstUse !== target || copy.operator !== '=') continue;
+      // Only a bare parameter or a single cast to this exact plain union, never
+      // a conversion chain or a reference/class conversion with effects.
+      let value = unparen(copy.right);
+      if (value.kind === NodeKind.CStyleCastExpr) {
+        const cast = value as CStyleCastExpr;
+        if (emit(cast.type as never).replace(/\s+/g, ' ').trim() !== spelling) continue;
+        value = unparen(cast.expression);
+      }
+      if (value.kind !== NodeKind.Identifier || (value as Identifier).name !== parameter) continue;
+      for (const block of nodes.filter(n => n.kind === NodeKind.CompoundStmt) as CompoundStmt[]) {
+        const i = block.statements.findIndex(s => s.kind === NodeKind.ExprStmt && unparen((s as ExprStmt).expression) === copy);
+        const next = i >= 0 ? block.statements[i + 1] : undefined;
+        if (next?.kind !== NodeKind.ExprStmt) continue;
+        const a = unparen((next as ExprStmt).expression);
+        if (a.kind !== NodeKind.AssignExpr || (a as AssignExpr).operator !== '=') continue;
+        const lhs = unparen((a as AssignExpr).left);
+        if (lhs.kind !== NodeKind.MemberExpr) continue;
+        const member = lhs as MemberExpr, object = unparen(member.object);
+        if (member.isArrow || object.kind !== NodeKind.Identifier || (object as Identifier).name !== x
+          || member.member.kind !== NodeKind.Identifier || mentions((a as AssignExpr).right, x)) continue;
+        if (fields.some(f => f.name === (member.member as Identifier).name && f.size === w)) result.add(x);
+      }
+    }
+  }
+  return result;
+}
+
 function createDeadOutSlotStoreTransformer(options: DeadOutSlotStoreOptions): Transformer {
   const outParamWidth = options.outParamWidth;
   const typeSize = options.typeSize;
   const pushed = new Map((options.pushSlotInits ?? []).map(p => [p.local, p.value]));
   if (!outParamWidth || !typeSize || pushed.size === 0) return createTransformer({});
-  return createTransformer({
+  const transform = (unionKills: ReadonlySet<string>) => createTransformer({
     visitFunctionDecl(fn: FunctionDecl): ASTNode | undefined {
       if (!fn.body) return undefined;
       const params = new Set(fn.parameters.map(p => (p as ParameterDecl).name?.name).filter((n): n is string => !!n));
@@ -254,7 +353,8 @@ function createDeadOutSlotStoreTransformer(options: DeadOutSlotStoreOptions): Tr
             // Only the push's own store: the register's parameter into the pushed slot.
             const value = uncast((a as AssignExpr).right);
             if (value.kind !== NodeKind.Identifier || pushed.get(x) !== (value as Identifier).name) continue;
-            const callee = overwrittenByNext(st[i + 1], x, w) ?? (onlyOutArgs.has(x) ? 'out-argument' : null);
+            const callee = (unionKills.has(x) ? 'union-member-overwrite' : null)
+              ?? overwrittenByNext(st[i + 1], x, w) ?? (onlyOutArgs.has(x) ? 'out-argument' : null);
             if (!callee) continue;
             out ??= [...st];
             out[i] = null as unknown as Statement;
@@ -289,6 +389,13 @@ function createDeadOutSlotStoreTransformer(options: DeadOutSlotStoreOptions): Tr
       return changed ? updateNode(fn, { body } as Partial<FunctionDecl>) : undefined;
     },
   });
+  return root => {
+    // The native slots belong to the single enclosing function. Never reuse
+    // them for another definition (including a nested function) in the same AST.
+    const functions = findNodesByKind(root, NodeKind.FunctionDecl) as FunctionDecl[];
+    const unionKills = functions.length === 1 ? unionOverwrites(functions[0], options, pushed) : new Set<string>();
+    return transform(unionKills)(root);
+  };
 }
 
 export const deadOutSlotStorePlugin: TransformPlugin = {
