@@ -112,6 +112,7 @@ import { buildTemplateRegistry, classScopeOf, memberDefinitionScope, templateDat
 import { EXTERN_ENTRY_SUFFIX, fileStaticKey, readForeignSourcesAt, selectFileStaticFunctions, type ForeignSource } from './file-static-functions.js';
 import { inlineHostHeaderPath, inlineHostKey, isInlineHost, refusedInlineHosts } from './inline-hosts.js';
 import { accessorTwins } from './accessor-twins.js';
+import { getterTwins, getterTwinDefinition, pointee } from './getter-twins.js';
 import { planInlinedCalls, planGuardedCalls, type InlinedCallPlan, type GuardedCallPlan } from './inlined-calls.js';
 import { nullGetterDefaults } from './null-getters.js';
 import { placeTemplateMembers } from './templates/placement.js';
@@ -4460,6 +4461,11 @@ function generateFilesForFunctions(
   // every candidate, each tagged with the qualified name a reference to it is
   // spelled with, so an ambiguous name can be resolved from its qualifier.
   const funcNameCandidates = new Map<string, { qualified: string; header: string }[]>();
+  // Getters the callers expanded in place: each twin is defined in its getter's unit's
+  // inline header, which a file naming the twin includes (getter-twins.ts).
+  const getterTwinDefs = getterTwins(functions);
+  const getterTwinByAddress = new Map(getterTwinDefs.map(t => [t.address, t]));
+  const getterTwinHeader = new Map<string, string>();
   const platformHeaders = new Set<string>(); // headers that contain ONLY platform-guarded functions
   for (const [unitName, unitFunctions] of organized) {
     const headerPath = unitHeaderPaths.get(unitName)!;
@@ -4473,6 +4479,8 @@ function generateFilesForFunctions(
         continue;
       }
       funcNameToHeaderPath.set(func.name, headerPath);
+      const twin = getterTwinByAddress.get(func.address);
+      if (twin) getterTwinHeader.set(twin.name, inlineHostHeaderPath(headerPath));
 
       const qualified = func.namespace
         ? normalizeQualifiedReference(`${func.namespace}::${func.name}`)
@@ -4747,6 +4755,7 @@ function generateFilesForFunctions(
   context.funcPtrArgCasts = genMark('setup/funcptr-tables', () => buildFuncPtrArgCastTables(functions, analyzedGlobals, dataTypes.filter(dt => dt.kind === 'FUNCTION_DEFINITION') as import('../types.js').ExtractedFunctionDefinition[], dataTypes, strings ?? [], platformDeclaredModelFunctions));
   // The header inlines that read one field, whose inline twins `acc` vc8form tags call.
   context.accessorTwins = accessorTwins(functions, context.funcPtrArgCasts);
+  context.getterTwins = getterTwinDefs.filter(t => getterTwinHeader.has(t.name));
   // Data initializers are emitted from strings, not an AST — the globals emitter
   // needs the same prototype tables to decide whether a function address stored
   // in a slot needs the cast C++ has never let it do implicitly.
@@ -4891,7 +4900,9 @@ function generateFilesForFunctions(
     // order, so all shards agree on the partition without talking to each other.
     // The functions defined in the unit's inline header rather than its .cpp.
     const inlineHosts = templateImplPath ? [] : unitFunctions.filter(isInlineHost);
-    const inlineHeaderPath = inlineHosts.length > 0 ? inlineHostHeaderPath(headerPath) : undefined;
+    // The twins of the unit's getters are defined in its inline header too.
+    const unitTwins = templateImplPath ? [] : (context.getterTwins ?? []).filter(t => unitFunctions.some(f => f.address === t.address));
+    const inlineHeaderPath = inlineHosts.length > 0 || unitTwins.length > 0 ? inlineHostHeaderPath(headerPath) : undefined;
     if (!shardOwnsNext(unitCost(unitFunctions))) {
       if (!templateImplPath) shardPlaceholder(files, headerPath, 'header');
       if (inlineHeaderPath) shardPlaceholder(files, inlineHeaderPath, 'header');
@@ -5096,10 +5107,35 @@ function generateFilesForFunctions(
     if (inlineHeaderPath && reusedImpl === undefined) {
       context.fileLocalGlobals = undefined;
       context._preambles = new Set();
-      inlineHeaderContent = genMark('units/impl', () => generateImplementation(
-        unitName, inlineHosts, classInfo, headerPath, options, context, implIncludes, crtHeaders,
-        undefined, structUnionEnumNames, true,
-      ));
+      inlineHeaderContent = inlineHosts.length > 0
+        ? genMark('units/impl', () => generateImplementation(
+          unitName, inlineHosts, classInfo, headerPath, options, context, implIncludes, crtHeaders,
+          undefined, structUnionEnumNames, true,
+        ))
+        // No header inline: the file holds only twins, and includes what they name - the
+        // getter's unit header, the callee's header and the owners of the types they read.
+        : (() => {
+          const own = new Set<string>([headerPath]);
+          for (const tw of unitTwins) {
+            const spelled = normalizeQualifiedReference(tw.calleeSpelled);
+            for (const c of funcNameCandidates.get(tw.callee) ?? []) if (c.qualified === spelled) own.add(c.header);
+            const types = [tw.func.returnType, tw.calleeReturn, ...(tw.func.parameters ?? []).map(p => p.dataType)];
+            for (const ty of types) {
+              const owner = typeOwnerMap.get(pointee(ty) ?? '');
+              if (owner) own.add(owner);
+            }
+          }
+          const platform = implIncludes.find(h => /(^|\/)d2_platform\.h$/.test(h));
+          if (platform) own.add(platform);
+          return ['// Auto-generated by ghidra-mcp — DO NOT EDIT', '', '#pragma once', '',
+            ...[...own].map(h => `#include "${h.replace(/\\/g, '/')}"`), ''].join('\n');
+        })();
+      if (unitTwins.length > 0) {
+        // In the namespace the getter is declared in, so the twin reads its names as the getter does.
+        const ns = unitTwins[0].call.slice(0, Math.max(0, unitTwins[0].call.lastIndexOf('::')));
+        const defs = unitTwins.map(getterTwinDefinition).join('\n\n');
+        inlineHeaderContent = `${inlineHeaderContent.replace(/\s*$/, '')}\n\n${ns ? `namespace ${ns} {\n\n${defs}\n\n} // namespace ${ns}` : defs}\n`;
+      }
       // A preamble macro (D2_ASSERT, D2_ALLOC_AT) is `#ifndef`-guarded: defined here, it
       // is the definition every includer that comes later uses, not its own.
       if (context._preambles.size > 0) {
@@ -5170,6 +5206,9 @@ function generateFilesForFunctions(
           newIncludes.push(path);
         }
       };
+
+      // A getter's twin is defined in its unit's inline header (getter-twins.ts).
+      for (const [twin, header] of getterTwinHeader) if (refs.identifiers.has(twin)) addInclude(header);
 
       // Scan for function references — call sites, func-ptr literals, and the
       // address-taken names inside data initializers (the co-located block above
@@ -5324,7 +5363,8 @@ function generateFilesForFunctions(
     if (reusedImpl === undefined) {
       implContent = includeDependencies(implContent, [headerPath]);
       if (inlineHeaderPath && inlineHeaderContent !== undefined) {
-        inlineHeaderContent = includeDependencies(inlineHeaderContent, [headerPath, inlineHeaderPath]);
+        // A header of twins alone already includes exactly what its twins name.
+        if (inlineHosts.length > 0) inlineHeaderContent = includeDependencies(inlineHeaderContent, [headerPath, inlineHeaderPath]);
       }
     }
     recordConstructorLookups(null);

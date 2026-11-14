@@ -45,6 +45,7 @@ import { immediateConstantFacts, referencedDataAddresses, dataAtAddress, type Im
 import { compareFormSpec, type CompareFormSpec } from './compare-form-spec.js';
 import { repStringOps } from './rep-string-spec.js';
 import { vc8FormSpec, vc8formHashRecord, type Vc8FormSpec } from './vc8form-spec.js';
+import type { GetterTwinDef } from './getter-twins.js';
 import type { RepStringOp, Expression, NullGetterTable, ASTNode, SelectArgumentOptions, Vc8Accessor } from '@ghidra-mcp/cpp-parser';
 import { ROOT_CLASS_SCOPE, namespaceResolution, renderNamespace, type ResolvedNamespace } from './namespace-resolution.js';
 import { cleanFunctionComment, declaredParameters, externEntryDeclaration, guardedFuncDefTypedef, emittedFunctionName, returnSigType, sigType } from './header.js';
@@ -650,6 +651,8 @@ export interface ImplGenContext {
    * applied forms call: written once per file, ahead of the first function calling each.
    */
   accessorTwins?: Vc8Accessor[];
+  /** Getters the callers expanded in place, with the forced-inline twins sites call (getter-twins.ts). */
+  getterTwins?: GetterTwinDef[];
   _fnPrefix?: string[];
   /**
    * Internal: the namespace block the current impl file's bodies are emitted
@@ -4180,6 +4183,15 @@ function transformDecompiledCode(
         enclosingSegments: enclosing?.ghidraNamespaceSegments ?? enclosing?.namespaceSegments,
         onSite: (e: { line: number; temps: number }) =>
           console.warn(`[nest] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.temps} temporar${e.temps === 1 ? 'y' : 'ies'} into the call on line ${e.line}`),
+      };
+    }
+
+    // A getter the callers expanded in place calls its forced-inline twin (getter-twin.ts).
+    if (context?.getterTwins && context.getterTwins.length > 0) {
+      perPluginOptions['getter-twin'] = {
+        twins: context.getterTwins,
+        onSite: (e: { call: string; held: string | null }) =>
+          console.warn(`[getter-twin] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.call}${e.held ? ` (held in ${e.held})` : ''}`),
       };
     }
 

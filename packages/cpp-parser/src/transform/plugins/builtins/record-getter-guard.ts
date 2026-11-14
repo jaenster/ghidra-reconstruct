@@ -18,8 +18,11 @@
  *     D2ItemTypesTxt *pItemTypesTxt = n >= 0 && n < T->nSize ? T->pTxt + n : nullptr;
  *     if (pItemTypesTxt) { .. pItemTypesTxt->f .. }
  *
- * and the same under `!` with the reads after the guard. With the reads left as indexes
- * VC8 keeps its old code, so a guard none of whose reads can move is left as printed.
+ * and the same under `!` with the reads after the guard. A guard whose record the
+ * function never reads gets its local too: the original tests the pointer the add left
+ * in a register, and with the sum printed inside the condition VC8 colours the table and
+ * the index differently (Skills_CltDoFunc_Sor_SimpleMakeMissile 004e3a30, a null test
+ * only). Reads it may not route still leave the guard as printed.
  *
  * The getter can also be one run of a longer chain: conditions before it, conditions
  * after it that read the record, an else-if arm, the index loaded by the chain itself as
@@ -151,6 +154,14 @@ export function hasJumpTarget(stmts: Statement[]): boolean {
     return false;
   };
   return stmts.some(walk);
+}
+
+/** `return;` or `return e;` with `e` pure, alone or alone in a block: safe to state twice. */
+function bareReturn(s: Statement): boolean {
+  while (s.kind === NodeKind.CompoundStmt && (s as CompoundStmt).statements.length === 1) s = (s as CompoundStmt).statements[0];
+  if (s.kind !== NodeKind.ReturnStmt) return false;
+  const v = (s as ReturnStmt).value;
+  return !v || pure(v);
 }
 
 /** Whether a statement list cannot fall off its end into what follows. */
@@ -371,7 +382,7 @@ function substitute(n: ASTNode, g: Guard, name: string): number {
   return count;
 }
 
-function countReads(n: ASTNode, g: Guard): number {
+export function countReads(n: ASTNode, g: Guard): number {
   let c = 0;
   for (const m of traverseAST(n)) if (isSum(m, g) || isIndex(m, g)) c++;
   return c;
@@ -547,9 +558,9 @@ function rewriteFunction(fn: FunctionDecl, opts: RecordGetterGuardOptions): Func
   let changed = 0;
   /**
    * One `if` of a block, `top` when it is the block's statement and not an else-if arm.
-   * Returns the declaration to place before the block's statement, or null.
+   * Returns the statements to place before the block's statement, or null.
    */
-  const tryIf = (ifs: IfStmt, top: boolean, block: CompoundStmt, b: number): DeclStmt | null => {
+  const tryIf = (ifs: IfStmt, top: boolean, block: CompoundStmt, b: number): Statement[] | null => {
     if (ifs.init) return null;
     let cond = unwrap(ifs.condition);
     const negated = cond.kind === NodeKind.UnaryExpr && (cond as UnaryExpr).operator === '!';
@@ -599,22 +610,38 @@ function rewriteFunction(fn: FunctionDecl, opts: RecordGetterGuardOptions): Func
       }
       return n;
     };
-    if (routeReads(reads, g, '', true) + postReads(true, '') === 0) return null;
+    // No read to route: take the getter only when the function reads the record nowhere
+    // else (a null test alone); reads it may not route leave the guard as printed.
+    if (routeReads(reads, g, '', true) + postReads(true, '') === 0
+      && countReads(body, g) !== countReads(ifs.condition, g)) return null;
     const name = fresh(recordName(g.last));
     const routed = routeReads(reads, g, name, false) + postReads(false, name);
+    // A `!`-guard that leaves, with conditions before the getter and none after it, whose
+    // record nothing reads: the original tested those conditions first, on their own, and
+    // then the getter's pointer (Skills_CltDoFunc_Ass_AuraLevel_CastAttackTarget 004f2720:
+    // `!(pUnit && i >= 0 && i < n && base + i)`). Same value: `!(A && p)` leaves exactly
+    // when `!A` does or, A holding, `!p` does; the branch reads no `p`.
+    const splitPre = routed === 0 && negated && !ifs.elseBranch && top && run.pre.length > 0
+      && run.post.length === 0 && !run.seed && bareReturn(ifs.thenBranch);
     const sum = Expr.binary(cloneNode(g.base), '+', cloneNode(g.index));
     const test = g.bounds.map(x => cloneNode(x)).reduce((l, r) => Expr.binary(l, '&&', r));
     const value = Expr.conditional(test, sum, Expr.nullptr());
     const id = Expr.identifier(name);
     const type = typeOfShape(shape, shadowed);
-    let out: DeclStmt;
-    if (plain) {
-      out = Stmt.declStmt([Decl.variable(name, type, value)]);
+    let out: Statement[];
+    if (plain || splitPre) {
+      out = [Stmt.declStmt([Decl.variable(name, type, value)])];
       (ifs as { condition: Expression }).condition = negated || failure ? Expr.not(id) : id;
+      if (splitPre) {
+        const pre = run.pre.map(x => cloneNode(x)).reduce((l, r) => Expr.binary(l, '&&', r));
+        const guard = Stmt.if_(Expr.not(Expr.paren(pre)), cloneNode(ifs.thenBranch));
+        guard.location = ifs.location;
+        out.unshift(guard);
+      }
     } else {
       // The record is set where the getter ran: `pre && (p = getter) && post`, its
       // declaration before the statement. `p` is read only where the getter has run.
-      out = Stmt.declStmt([Decl.variable(name, type)]);
+      out = [Stmt.declStmt([Decl.variable(name, type)])];
       let at: Expression = Expr.assign(Expr.identifier(name), value);
       if (run.seed) {
         at = Expr.binary(cloneNode(run.seed), ',' as BinaryOperator, at);
@@ -637,10 +664,10 @@ function rewriteFunction(fn: FunctionDecl, opts: RecordGetterGuardOptions): Func
       const s = block.statements[b];
       for (const k of getChildren(s)) visitAll(k);
       if (s.kind !== NodeKind.IfStmt) continue;
-      const decls: DeclStmt[] = [];
+      const decls: Statement[] = [];
       for (let c: IfStmt | null = s as IfStmt, top = true; c; top = false) {
         const d = tryIf(c, top, block, b);
-        if (d) decls.push(d);
+        if (d) decls.push(...d);
         c = c.elseBranch && c.elseBranch.kind === NodeKind.IfStmt ? c.elseBranch as IfStmt : null;
       }
       if (decls.length === 0) continue;

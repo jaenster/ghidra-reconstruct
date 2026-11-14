@@ -542,6 +542,12 @@ export {
 } from './builtins/record-getter-split.js';
 
 export {
+  getterTwinPlugin,
+  type GetterTwin,
+  type GetterTwinOptions,
+} from './builtins/getter-twin.js';
+
+export {
   recordNullFoldPlugin,
   type RecordNullFoldOptions,
 } from './builtins/record-null-fold.js';
@@ -982,6 +988,7 @@ import { linkNextSelectPlugin } from './builtins/link-next-select.js';
 import { heldAddressMemberPlugin } from './builtins/held-address-member.js';
 import { recordGetterGuardPlugin } from './builtins/record-getter-guard.js';
 import { recordGetterSplitPlugin } from './builtins/record-getter-split.js';
+import { getterTwinPlugin } from './builtins/getter-twin.js';
 import { recordNullFoldPlugin } from './builtins/record-null-fold.js';
 import { armConstantCallPlugin } from './builtins/arm-constant-call.js';
 import { fieldPointerFoldPlugin } from './builtins/field-pointer-fold.js';
@@ -1233,6 +1240,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   recordGetterGuardPlugin,    // Matching: an inlined record getter's guard gets its pointer local, read through (priority 60.5)
   recordGetterSplitPlugin,    // Matching: a record getter's split range tests and null test become one conditional pointer again (priority 60.55)
   recordNullFoldPlugin,       // Matching: a null guard before a record lookup through the pointer goes into its condition (priority 60.56)
+  getterTwinPlugin,           // Matching: a getter the callers expanded in place calls its forced-inline twin (priority 60.58)
   fieldPointerFoldPlugin,     // Matching: a field-pointer temporary goes; the field updated in place or the record held (priority 62.5)
   newResultTempPlugin,        // Matching: an allocation constructed in place gets a temporary; the result assigned after (priority 62.6)
   loopCopySinkPlugin,         // Matching: a loop-carried copy placed mid-body moves to the end of the body (priority 62.7)

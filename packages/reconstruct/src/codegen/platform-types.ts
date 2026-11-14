@@ -1658,6 +1658,17 @@ export function generatePlatformHeader(
     lines.push('');
   }
 
+  // A function the original's callers expanded in place and the rebuild writes as a call
+  // (getter-twins.ts): forced, because VC8 at /Ob1 may keep a plain inline as a call.
+  lines.push('#ifndef D2_FORCEINLINE');
+  lines.push('#if defined(_MSC_VER)');
+  lines.push('#define D2_FORCEINLINE __forceinline');
+  lines.push('#else');
+  lines.push('#define D2_FORCEINLINE inline __attribute__((always_inline))');
+  lines.push('#endif');
+  lines.push('#endif');
+  lines.push('');
+
   lines.push(...SHIFT_COUNT_SUPPORT_LINES);
   lines.push('');
   lines.push(...UNINIT_SUPPORT_LINES);

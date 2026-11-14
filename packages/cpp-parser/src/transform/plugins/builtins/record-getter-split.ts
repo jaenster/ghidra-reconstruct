@@ -36,7 +36,8 @@
  * both, and nothing can run the store again.
  *
  * bare (SOUND_GetIdFromUnit 004c1d60): guards, then `if (!(base + i)) return R;` on the
- * table member itself with no local, the record read as `base[i]` after it. With the
+ * table member itself with no local, the record read as `base[i]` after it, or not read at
+ * all (Skills_CltDoFunc_Ass_AuraLevel_CastAttackTarget 004f2720 only null-tests it). With the
  * declarations for its type it becomes `T *p = c ? base + i : nullptr; if (!p) return R;`
  * and the reads after go through `p` up to what may change `base`, `i` or the record.
  *
@@ -61,7 +62,7 @@ import { effectsOf } from './access-order-evidence.js';
 import type { BranchLayoutEvidence } from './branch-layout/evidence.js';
 import type { TypedefResolver } from './call-arg-cast.js';
 import { createExprShape } from './expr-shape.js';
-import { memberChain, routeReads, typeOfShape, recordName, hasJumpTarget, type Guard } from './record-getter-guard.js';
+import { memberChain, routeReads, countReads, typeOfShape, recordName, hasJumpTarget, type Guard } from './record-getter-guard.js';
 
 export interface RecordGetterSplitOptions extends PluginOptions {
   branchLayout?: BranchLayoutEvidence | null;
@@ -580,7 +581,8 @@ function rewriteFunction(fn: FunctionDecl, opts: RecordGetterSplitOptions): Func
     if (!oneIf && !gate.sharedExit(rets, tests, leaves + 1, true)) return null;
     if (!gate.copyAfterTests(rets, tests)) return null;
     const g: Guard = { base, index: idx as Identifier, bounds: [], root: chain.root, last: chain.last };
-    if (routeReads(after, g, '', true) === 0) return null;
+    // Reads it may not route leave the test as printed; none at all is a null test alone.
+    if (routeReads(after, g, '', true) === 0 && after.some(x => countReads(x, g) > 0)) return null;
     const name = fresh(recordName(chain.last));
     routeReads(after, g, name, false);
     const test = guards.flatMap(x => negatedConjuncts(x.cond)).reduce((l, r) => Expr.binary(l, '&&', r));
