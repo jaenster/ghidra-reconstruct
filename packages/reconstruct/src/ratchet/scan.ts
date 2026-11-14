@@ -126,10 +126,43 @@ export function matchParen(toks: Tok[], open: number): number {
   return -1;
 }
 
-/** The declarator (name before the parameter list) of a signature token range. */
+/**
+ * Index one past an attribute group starting at token `i` - `__attribute__((..))`,
+ * `__declspec(..)`, `alignas(..)` or `[[..]]` - or `i` when none starts there.
+ */
+export function skipAttribute(toks: Tok[], i: number): number {
+  const t = toks[i];
+  if (t?.kind === IDENT && ATTRIBUTE_WORDS.has(t.text) && toks[i + 1]?.kind === TokenKind.LeftParen) {
+    const close = matchParen(toks, i + 1);
+    return close < 0 ? i : close + 1;
+  }
+  if (t?.kind === TokenKind.LeftAttrBracket) {
+    for (let k = i + 1; k < toks.length; k++) if (toks[k].kind === TokenKind.RightAttrBracket) return k + 1;
+  }
+  return i;
+}
+
+/** The tokens of `[from, to)` without their attribute groups. */
+function withoutAttributes(toks: Tok[], from: number, to: number): Tok[] {
+  const out: Tok[] = [];
+  for (let i = from; i < to;) {
+    const n = skipAttribute(toks, i);
+    if (n > i) { i = n; continue; }
+    out.push(toks[i++]);
+  }
+  return out;
+}
+
+/**
+ * The declarator (name before the parameter list) of a signature token range. Attribute
+ * groups (`__attribute__((noinline)) inline void f(..)`) are not the declarator: their
+ * parentheses are skipped.
+ */
 export function signatureDeclarator(toks: Tok[], from: number, to: number): { name: string[]; paren: number } | undefined {
   let depth = 0;
   for (let i = from; i < to; i++) {
+    const skip = skipAttribute(toks, i);
+    if (skip > i) { i = skip - 1; continue; }
     const k = toks[i].kind;
     if (k === TokenKind.Less) depth++;
     else if (k === TokenKind.Greater) depth--;
@@ -310,9 +343,34 @@ export function signatureParts(toks: Tok[], from: number, to: number): { params:
   // The return type: the tokens before the declarator's qualified name.
   let nameStart = d.paren - 1;
   while (toks[nameStart - 1]?.kind === TokenKind.ColonColon || toks[nameStart - 1]?.kind === TokenKind.Tilde) nameStart -= toks[nameStart - 1].kind === TokenKind.Tilde ? 1 : 2;
-  const ret = typeRefFromTokens(toks, from, nameStart);
-  const retText = typeSpelling(toks.slice(from, nameStart).filter(t => !SIGNATURE_WORDS.has(t.text)));
+  const retToks = withoutAttributes(toks, from, nameStart);
+  const ret = typeRefFromTokens(retToks);
+  const retText = typeSpelling(retToks.filter(t => !SIGNATURE_WORDS.has(t.text)));
   return { params, types, ret, retText };
+}
+
+/**
+ * Parameter type spellings an older scanner read off an attribute group's parentheses
+ * (`__attribute__((noinline)) inline void f(int)` stored as `( noinline )`): no parameter
+ * type spelling starts with a parenthesis.
+ */
+export function misparsedTypes(types: readonly string[] | undefined): boolean {
+  return !!types && types.some(t => t.startsWith('('));
+}
+
+/** The signature of a definition's text (`R f(..) {..}`): what signatureParts reads. */
+export function definitionSignature(text: string): ReturnType<typeof signatureParts> {
+  const toks = lexTokens(text);
+  if (!toks) return undefined;
+  let paren = 0;
+  for (let j = 0; j < toks.length; j++) {
+    const k = toks[j].kind;
+    if (k === TokenKind.LeftParen) paren++;
+    else if (k === TokenKind.RightParen) paren--;
+    else if (paren === 0 && k === TokenKind.LeftBrace) return signatureParts(toks, 0, j);
+    else if (paren === 0 && (k === TokenKind.Semicolon || k === TokenKind.EOF)) return undefined;
+  }
+  return undefined;
 }
 
 export interface HeaderDecl { address: string; scope: string[]; name: string[]; params: string[]; types: string[]; ret?: TypeRef; retText: string }

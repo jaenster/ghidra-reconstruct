@@ -14,7 +14,7 @@ import { rewriteBody } from './rewrite.js';
 import type { RatchetRecord, RecordKind, StoredBody } from './store.js';
 import type { SymbolIndex } from './symbol-index.js';
 import { TokenKind } from '@ghidra-mcp/cpp-parser';
-import { lexTokens, type FunctionExtent } from './scan.js';
+import { definitionSignature, lexTokens, misparsedTypes, type FunctionExtent } from './scan.js';
 
 export interface Located {
   file: string;
@@ -159,6 +159,17 @@ function paramsNow(stored: StoredBody, freshParams: string[], index: SymbolIndex
   return matchParams(paramIds(stored.params, stored.paramStorage), paramIds(freshParams, storage));
 }
 
+/**
+ * The stored signature's types. A record captured while the scanner read an attribute
+ * group's parentheses as the parameter list (`__attribute__((noinline)) inline ..`) has
+ * them wrong; its stored text has them right, so they are read again from it.
+ */
+export function storedSignature(stored: StoredBody): { paramTypes?: string[]; ret?: string } {
+  if (!misparsedTypes(stored.paramTypes)) return { paramTypes: stored.paramTypes, ret: stored.ret };
+  const sig = definitionSignature(stored.text);
+  return sig && !misparsedTypes(sig.types) ? { paramTypes: sig.types, ret: sig.retText } : {};
+}
+
 /** Bindings with every parameter moved to where it is now. */
 function remapParams(bindings: Array<Binding | undefined>, map: number[]): Array<Binding | undefined> {
   return bindings.map(b => (b && b.k === 'param' ? { k: 'param', i: map[b.i] } : b));
@@ -247,9 +258,10 @@ export function applyRecords(index: SymbolIndex, records: RatchetRecord[], opts:
       const pm = paramsNow(m.stored, params, index);
       if ('error' in pm) { errors.push({ m, errors: [pm.error] }); continue; }
       const retyped: string[] = [];
-      if (m.stored.ret !== undefined && now?.retText !== undefined && now.retText !== m.stored.ret) retyped.push(`returns ${now.retText}, was ${m.stored.ret}`);
-      if (m.stored.paramTypes && now?.paramTypes && m.stored.paramTypes.length === now.paramTypes.length) {
-        m.stored.paramTypes.forEach((t, k) => {
+      const sig = storedSignature(m.stored);
+      if (sig.ret !== undefined && now?.retText !== undefined && now.retText !== sig.ret) retyped.push(`returns ${now.retText}, was ${sig.ret}`);
+      if (sig.paramTypes && now?.paramTypes && sig.paramTypes.length === now.paramTypes.length) {
+        sig.paramTypes.forEach((t, k) => {
           const j = pm.map[k];
           if (t !== now.paramTypes![j]) retyped.push(`parameter ${k} retyped: ${t} -> ${now.paramTypes![j]}`);
         });
