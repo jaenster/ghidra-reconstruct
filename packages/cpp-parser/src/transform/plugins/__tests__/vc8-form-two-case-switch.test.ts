@@ -4,6 +4,7 @@ import { parse } from '../../../parser/index.js';
 import { emit } from '../../../emit/index.js';
 import type { AnyNode, TranslationUnit } from '../../../ast/nodes.js';
 import { applyVc8Forms, parseVc8Form, type Vc8FormSite } from '../builtins/vc8-form.js';
+import { compileAndRun, hasNativeGpp } from '../../../testing/native-cpp.js';
 
 const flat = (s: string) => s.replace(/\s+/g, ' ').trim();
 
@@ -17,6 +18,119 @@ function run(source: string, tag: string): { out: string; site: Vc8FormSite } {
 }
 
 describe('vc8-form two-case switch', () => {
+  it('keeps explicit-comparison occurrence indexes ahead of implicit zero cases', () => {
+    const src = 'int f(int x) { if (x) { if (x != 2) return -1; return 20; } if (x == 3) return 30; else if (x == 4) return 40; return 10; }';
+    const { out, site } = run(src, 'switch(x)');
+    assert.equal(site.applied, true, site.why);
+    assert.match(out, /if \(x\)/);
+    assert.match(out, /case 4:/);
+    assert.match(out, /case 3:/);
+    assert.doesNotMatch(out, /case 2:/);
+  });
+
+  it('refuses implicit-zero cases whose labels can narrow under promotions', () => {
+    for (const value of ['-1', '0xffffffffu', '4294967296LL', 'UNKNOWN_STATUS']) {
+      const src = `int f(unsigned x) { if (x) { if (x != ${value}) return -1; return 20; } return 10; }`;
+      const { out, site } = run(src, 'switch(x)');
+      assert.equal(site.applied, false, value);
+      assert.equal(out, flat(emit(parse(src) as AnyNode)));
+    }
+  });
+
+  it('keeps an unsigned negative-case comparison compilable after refusal', { skip: !hasNativeGpp() }, () => {
+    const source = 'int f(unsigned x) { if (x) { if (x != -1) return -1; return 20; } return 10; }';
+    const { out, site } = run(source, 'switch(x)');
+    assert.equal(site.applied, false);
+    assert.equal(compileAndRun(out, 'if(f(0)!=10 || f(1)!=-1 || f(2)!=-1 || f(~0u)!=20) return 1; printf("ok\\n");', { optimize: true }).trim(), 'ok');
+  });
+
+  it('preserves dispatch results and ordered call effects in optimized native code', { skip: !hasNativeGpp() }, () => {
+    const source = `int f(char* p, unsigned mode) {
+      if (*(int*)p) {
+        if (*(int*)p != 2) return tick(11, mode);
+        if (mode & 1) return tick(22, mode);
+        return tick(33, mode);
+      }
+      if (mode & 2) return tick(44, mode);
+      return tick(55, mode);
+    }`;
+    const { out, site } = run(source, 'switch(*(int*)p)');
+    assert.equal(site.applied, true, site.why);
+    const state = 'unsigned calls; unsigned trace[4]; int tick(unsigned n, unsigned mode) { trace[calls++] = n; return (int)(n * 16 + mode); }';
+    const prelude = `namespace ref { ${state} ${source} } namespace candidate { ${state} ${out} }`;
+    const body = `unsigned cases = 0;
+      for (unsigned i = 0; i < 65536; ++i) for (unsigned mode = 0; mode < 4; ++mode) {
+        unsigned word = mode == 0 ? i : mode == 1 ? 0xffffffffu-i : mode == 2 ? i*0x1040301u : i^0x80000000u;
+        int a = (int)word, b = a; ref::calls = candidate::calls = 0;
+        if (ref::f((char*)&a,mode) != candidate::f((char*)&b,mode)) return 1;
+        if (a != b || ref::calls != candidate::calls) return 2;
+        for (unsigned n = 0; n < ref::calls; ++n) if (ref::trace[n] != candidate::trace[n]) return 3;
+        ++cases;
+      }
+      printf("%u\\n", cases);`;
+    assert.equal(compileAndRun(prelude, body, { optimize: true }).trim(), '262144');
+  });
+
+  it('retains overloaded conversions and their effects after refusing a truth test', { skip: !hasNativeGpp() }, () => {
+    const source = 'int f(Proxy p) { if (*(int*)p) { if (*(int*)p != 2) return -1; return 20; } return 10; }';
+    const { out, site } = run(source, 'switch(*(int*)p)');
+    assert.equal(site.applied, false);
+    const prelude = `unsigned casts;
+      struct Proxy { int* value; operator int*() const { ++casts; return value; } };
+      namespace ref { ${source} } namespace candidate { ${out} }`;
+    const body = `for (int v = -1; v <= 3; ++v) {
+        Proxy p = { &v }; casts = 0; int a = ref::f(p); unsigned n = casts;
+        casts = 0; int b = candidate::f(p); if (a != b || casts != n) return 1;
+        if (casts != (v == 0 ? 1u : 2u)) return 2;
+      } printf("ok\\n");`;
+    assert.equal(compileAndRun(prelude, body, { optimize: true }).trim(), 'ok');
+  });
+
+  it('recognizes the integer truth test without depending on a later nonzero tag', () => {
+    const src = 'int f(char* p) { if (*(int*)p) { if (*(int*)p != 2) return -1; return 20; } return 10; }';
+    const { out, site } = run(src, 'switch(*(int*)p)');
+    assert.equal(site.applied, true, site.why);
+    assert.match(out, /switch \(\*\(int\*\)p\)/);
+    assert.match(out, /case 2: \{ return 20; \}/);
+    assert.match(out, /case 0: \{ return 10; \}/);
+    assert.doesNotThrow(() => parse(out));
+  });
+
+  it('accepts builtin integer bindings and a negated zero case', () => {
+    for (const type of ['int', 'unsigned int', 'short', 'unsigned long', 'bool']) {
+      const src = `int f(${type} x) { if (x) { if (x != 2) return -1; return 20; } return 10; }`;
+      const { out, site } = run(src, 'switch(x)');
+      assert.equal(site.applied, true, `${type}: ${site.why}`);
+      assert.match(out, /case 0:/);
+    }
+    const { out, site } = run('int f(int x) { if (!x) return 10; else if (x == 2) return 20; return -1; }', 'switch(x)');
+    assert.equal(site.applied, true, site.why);
+    assert.match(out, /case 0: \{ return 10; \}/);
+    assert.match(out, /case 2: \{ return 20; \}/);
+  });
+
+  it('does not infer builtin truth semantics from aliases, classes or volatile reads', () => {
+    const sources = [
+      'int f(Unknown x) { if (x) { if (x != 2) return -1; return 20; } return 10; }',
+      'int f(float x) { if (x) { if (x != 2) return -1; return 20; } return 10; }',
+      'int f(volatile int x) { if (x) { if (x != 2) return -1; return 20; } return 10; }',
+      'int f(int& x) { if (x) { if (x != 2) return -1; return 20; } return 10; }',
+      'int f(int x) { { int x = 0; } if (x) { if (x != 2) return -1; return 20; } return 10; }',
+    ];
+    for (const src of sources) {
+      const { out, site } = run(src, 'switch(x)');
+      assert.equal(site.applied, false, src);
+      assert.equal(out, flat(emit(parse(src) as AnyNode)));
+    }
+    for (const declaration of ['Unknown p', 'volatile char* p', 'char* volatile p', 'char*& p']) {
+      const src = `int f(${declaration}) { if (*(int*)p) { if (*(int*)p != 2) return -1; return 20; } return 10; }`;
+      const { site } = run(src, 'switch(*(int*)p)');
+      assert.equal(site.applied, false, declaration);
+    }
+    const src = 'int f(char* p) { if (*(volatile int*)p) { if (*(volatile int*)p != 2) return -1; return 20; } return 10; }';
+    assert.equal(run(src, 'switch(*(volatile int*)p)').site.applied, false);
+  });
+
   it('parses only a target and optional positive index', () => {
     assert.deepEqual(parseVc8Form('switch(u->kind)'), { op: 'switch', expr: 'u->kind', index: 1 });
     assert.deepEqual(parseVc8Form('switch(u->kind,2)'), { op: 'switch', expr: 'u->kind', index: 2 });
