@@ -819,7 +819,7 @@ export { repStringFormPlugin, createRepStringFormTransformer, type RepStringOp, 
 export { compareSignednessPlugin } from './builtins/compare-signedness.js';
 export { narrowLocalWidenPlugin } from './builtins/narrow-local-widen.js';
 export { callSiteOverrideCastPlugin, type CallSiteOverride } from './builtins/call-site-override-cast.js';
-export { ARTIFACT_SUPPORT_LINES, SHIFT_COUNT_SUPPORT_LINES } from './builtins/artifact-support.js';
+export { ARTIFACT_SUPPORT_LINES, SHIFT_COUNT_SUPPORT_LINES, UNINIT_SUPPORT_LINES } from './builtins/artifact-support.js';
 
 export { arrayCastAssignPlugin } from './builtins/array-cast-assign.js';
 

@@ -96,3 +96,21 @@ export const SHIFT_COUNT_SUPPORT_LINES: readonly string[] = [
   '#  define D2_SHIFT_COUNT(n) ((n) & 0x1f)',
   '#endif',
 ];
+
+/**
+ * D2_UNINIT, the store vc8-form's `own(V,T,live)` writes where it drops an initializer that
+ * can be read. The original leaves V uninitialised there, and a VC8 compile matched its bytes
+ * only that way, so MSVC gets nothing; GCC would read an indeterminate value (undefined
+ * behaviour it may optimise on), so it gets the value the original's register or slot holds
+ * at that point: the initializer Ghidra printed.
+ */
+export const UNINIT_SUPPORT_LINES: readonly string[] = [
+  '// `T v; D2_UNINIT(v, x);`: the original reads v before storing it on some path. VC8 must',
+  '// leave it uninitialised to compile the original\'s bytes; other compilers store x, the',
+  '// value the original holds there, so the read is defined.',
+  '#ifdef _MSC_VER',
+  '#  define D2_UNINIT(v, x) ((void)0)',
+  '#else',
+  '#  define D2_UNINIT(v, x) ((v) = (x))',
+  '#endif',
+];

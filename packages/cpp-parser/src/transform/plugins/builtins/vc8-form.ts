@@ -63,7 +63,9 @@
  *   own(V,T[,N],live)    the same, dropping an initializer that IS read: only where a VC8
  *                        compile matched the original's bytes with it dropped, so the
  *                        original left V uninitialised there too (the permuter writes
- *                        `live` on a MATCH only).
+ *                        `live` on a MATCH only). Where a path can read it, the
+ *                        initializer stays for other compilers as `D2_UNINIT(V, init);`
+ *                        after the declaration, which is nothing under MSVC.
  *   guards(K[,i])        the i-th early return guarded by `!(c1 && ... && cn)` (or
  *                        `!c1 || ... || !cn`) becomes two: c1..cK, then the rest.
  *   merge-guards([i])    the i-th pair of adjacent early returns of one value becomes one
@@ -1498,6 +1500,8 @@ function doOwn(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'own' }>): void {
     const k = b.statements.findIndex(s => declOf(s)?.name.name === f.name);
     if (k < 0) continue;
     const d = declOf(b.statements[k])!;
+    // `live`: the initializer a path reads, which VC8 must not see and GCC must.
+    let liveInit: Expression | undefined;
     if (d.initializer) {
       const init = unparen(d.initializer as Expression);
       const simple = (e: Expression): boolean => { e = unparen(e); return isId(e) || e.kind === NodeKind.IntegerLiteral || e.kind === NodeKind.NullptrLiteral || (e.kind === NodeKind.CStyleCastExpr && simple((e as CStyleCastExpr).expression)); };
@@ -1506,7 +1510,9 @@ function doOwn(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'own' }>): void {
       // the program computes, whatever the tag claims.
       const width = selectTables?.typeSize?.(text(d.type));
       const out = selectTables?.outParamWidth && width ? { outWidth: selectTables.outParamWidth, width } : undefined;
-      if (!f.live && !initializerIsDead(fn.body!, b, k, f.name, out)) refuse(`${f.name}'s initializer is read`);
+      const dead = initializerIsDead(fn.body!, b, k, f.name, out);
+      if (!f.live && !dead) refuse(`${f.name}'s initializer is read`);
+      if (f.live && !dead) liveInit = init;
     }
     d.initializer = null;
     d.type = parseType(f.type);
@@ -1519,8 +1525,14 @@ function doOwn(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'own' }>): void {
         d.initializer = st.right;
         b.statements.splice(next, 1, b.statements[k]);
         b.statements.splice(k, 1);
+        liveInit = undefined;
       }
     }
+    // The original reads V uninitialised on some path. VC8 compiles that faithfully; to GCC it
+    // is undefined behaviour, so the store D2_UNINIT gives every compiler but MSVC holds what
+    // the original holds there (UI_SLIDER_InitAutomapMode 0047d3b0: ECX, still pItem, when
+    // SRegLoadValue finds no value; SUNITNPC_GetActCappedLevel 00576890: nLevel).
+    if (liveInit) b.statements.splice(k + 1, 0, ...parseStmts(`D2_UNINIT(${f.name}, ${text(liveInit)});`));
     break;
   }
   if (!found) refuse(`no declaration of ${f.name}`);
