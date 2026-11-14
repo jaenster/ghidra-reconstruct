@@ -1,0 +1,195 @@
+{
+  "source": "76a44ca4ef86ab389533cbc708ec6fba93b14a37",
+  "generatorBase": "c2a508a7374e7868c69fbd06efd341e14ef50a52",
+  "function": {
+    "name": "NET_SID_CLIENT_Incoming_AuthAccountUpgradeProof",
+    "address": "005219b0",
+    "entryPoint": "005219b0",
+    "signature": "BOOL NET_SID_CLIENT_Incoming_AuthAccountUpgradeProof(char * pPacketData, size_t nPacketSize)",
+    "returnType": "BOOL",
+    "callingConvention": "__fastcall",
+    "size": 241,
+    "isThunk": false,
+    "isExternal": false,
+    "hasVarArgs": false,
+    "namespace": "Bnclient::_net_sid",
+    "comment": "@function NET_SID_CLIENT_Incoming_AuthAccountUpgradeProof\n@address Game.exe.ram:005219b0\n@date 2026.02.12\n@calling __fastcall\n@description SID_AUTH_ACCOUNTUPGRADEPROOF (0x58) packet handler - Account upgrade proof result\nReceives server verification result after client submits upgrade proof with old password hash:\n- Status code (4 bytes): Upgrade verification (0=success, 2=invalid old password)\n\nOn status 0, account successfully migrated from old broken SHA to new SRP system.\nIf upgrade initiated during logon (flag2 set), immediately sends logon packet with new credentials.\nIf upgrade during password change (flag2 clear), sets change complete flag for UI.\nOn status 2, old password verification failed. Clears password memory and sets appropriate error codes.",
+    "sourceFile": null,
+    "sourceLine": null,
+    "sourceInfo": null,
+    "parameters": [
+      {
+        "name": "pPacketData",
+        "dataType": "char *",
+        "size": 4,
+        "ordinal": 0,
+        "storage": "ECX:4",
+        "stackOffset": null,
+        "resolvedType": null
+      },
+      {
+        "name": "nPacketSize",
+        "dataType": "size_t",
+        "size": 4,
+        "ordinal": 1,
+        "storage": "EDX:4",
+        "stackOffset": null,
+        "resolvedType": null
+      }
+    ],
+    "localVariables": [
+      {
+        "name": "bIsLogonFlow",
+        "dataType": "BOOL",
+        "size": 4,
+        "storage": "EAX:4",
+        "stackOffset": null,
+        "resolvedType": "BOOL"
+      },
+      {
+        "name": "extraout_AL",
+        "dataType": "undefined1",
+        "size": 1,
+        "storage": "AL:1",
+        "stackOffset": null,
+        "resolvedType": null
+      }
+    ],
+    "tags": [
+      {
+        "type": "llm-typed"
+      }
+    ],
+    "decompiled": "\n/* @function NET_SID_CLIENT_Incoming_AuthAccountUpgradeProof\n   @address Game.exe.ram:005219b0\n   @date 2026.02.12\n   @calling __fastcall\n   @description SID_AUTH_ACCOUNTUPGRADEPROOF (0x58) packet handler - Account upgrade proof result\n   Receives server verification result after client submits upgrade proof with old password hash:\n   - Status code (4 bytes): Upgrade verification (0=success, 2=invalid old password)\n   \n   On status 0, account successfully migrated from old broken SHA to new SRP system.\n   If upgrade initiated during logon (flag2 set), immediately sends logon packet with new\n   credentials.\n   If upgrade during password change (flag2 clear), sets change complete flag for UI.\n   On status 2, old password verification failed. Clears password memory and sets appropriate error\n   codes. */\n\nBOOL __fastcall\nBnclient::_net_sid::NET_SID_CLIENT_Incoming_AuthAccountUpgradeProof\n          (char *pPacketData,size_t nPacketSize)\n\n{\n  BOOL bIsLogonFlow;\n  int32_t iVar1;\n  \n  if (nPacketSize < 4) {\n    Bnclient::Debug::DEBUG_Trace(\"INVALID: AuthAccountUpgradeProof\");\n    return 0;\n  }\n  if (*(int *)pPacketData == 0) {\n    bIsLogonFlow = Bnclient::_net_sid::NET_SID_CLIENT_GetSIDFlag2();\n    if (bIsLogonFlow != 0) {\n      Bnclient::Debug::DEBUG_Trace(\"Upgrade Proof success, logging in\");\n      iVar1 = Bnclient::_net_sid::NET_SID_CLIENT_Resend_0x53_AuthAccountLogon();\n      return iVar1;\n    }\n    Bnclient::Debug::DEBUG_Trace(\"Upgrade Proof success, password changed\");\n    Bnclient::_net_sid::NET_SID_ClearSrpPassword();\n    g_nSIDResponseCount1 = 0;\n    g_SIDPacketResponseFlags[0x55] = 1;\n    return 1;\n  }\n  if (*(int *)pPacketData != 2) {\n    Bnclient::Debug::DEBUG_Trace(\"Upgrade Proof failed: Unknown Result\");\n    Bnclient::BnMessQueue::BNMESSQUEUE_SetStateIfZero(0x12);\n    return 0;\n  }\n  bIsLogonFlow = Bnclient::_net_sid::NET_SID_CLIENT_GetSIDFlag2();\n  if (bIsLogonFlow != 0) {\n    Bnclient::Debug::DEBUG_Trace(\"Upgrade Proof Failed: Invalid password during logon\");\n    Bnclient::_net_sid::NET_SID_ClearSrpPassword();\n    g_nRealmLogonResult = 2;\n    Bnclient::BnMessQueue::BNMESSQUEUE_SetStateIfZero(0xe);\n    return 1;\n  }\n  Bnclient::Debug::DEBUG_Trace(\"Upgrade Proof Failed: Invalid password during change\");\n  Bnclient::_net_sid::NET_SID_ClearSrpPassword();\n  g_nSIDResponseCount1 = 2;\n  g_SIDPacketResponseFlags[0x55] = 1;\n  Bnclient::BnMessQueue::BNMESSQUEUE_SetStateIfZero(0xe);\n  return 1;\n}\n\n",
+    "branchLayout": {
+      "lineCount": 62,
+      "ifs": [
+        [
+          25,
+          3
+        ],
+        [
+          29,
+          26
+        ],
+        [
+          42,
+          35
+        ],
+        [
+          31,
+          177
+        ],
+        [
+          48,
+          70
+        ]
+      ],
+      "lines": [
+        [
+          26,
+          [
+            10
+          ]
+        ],
+        [
+          30,
+          [
+            170
+          ]
+        ],
+        [
+          32,
+          [
+            184
+          ]
+        ],
+        [
+          36,
+          [
+            202
+          ]
+        ],
+        [
+          43,
+          [
+            42
+          ]
+        ],
+        [
+          47,
+          [
+            63
+          ]
+        ],
+        [
+          49,
+          [
+            77
+          ]
+        ],
+        [
+          55,
+          [
+            121
+          ]
+        ]
+      ]
+    }
+  },
+  "tables": {
+    "functionReturnTypes": {
+      "DEBUG_Trace": "void",
+      "Bnclient::Debug::DEBUG_Trace": "void",
+      "BNMESSQUEUE_SetStateIfZero": "undefined4",
+      "Bnclient::BnMessQueue::BNMESSQUEUE_SetStateIfZero": "undefined4",
+      "NET_SID_CLIENT_GetSIDFlag2": "BOOL",
+      "Bnclient::_net_sid::NET_SID_CLIENT_GetSIDFlag2": "BOOL",
+      "NET_SID_ClearSrpPassword": "void",
+      "Bnclient::_net_sid::NET_SID_ClearSrpPassword": "void",
+      "NET_SID_CLIENT_Resend_0x53_AuthAccountLogon": "int32_t",
+      "Bnclient::_net_sid::NET_SID_CLIENT_Resend_0x53_AuthAccountLogon": "int32_t"
+    },
+    "functionParamTypes": {
+      "DEBUG_Trace": [
+        "char *"
+      ],
+      "Bnclient::Debug::DEBUG_Trace": [
+        "char *"
+      ],
+      "BNMESSQUEUE_SetStateIfZero": [
+        "int32_t"
+      ],
+      "Bnclient::BnMessQueue::BNMESSQUEUE_SetStateIfZero": [
+        "int32_t"
+      ],
+      "NET_SID_CLIENT_GetSIDFlag2": [],
+      "Bnclient::_net_sid::NET_SID_CLIENT_GetSIDFlag2": [],
+      "NET_SID_ClearSrpPassword": [],
+      "Bnclient::_net_sid::NET_SID_ClearSrpPassword": [],
+      "NET_SID_CLIENT_Resend_0x53_AuthAccountLogon": [],
+      "Bnclient::_net_sid::NET_SID_CLIENT_Resend_0x53_AuthAccountLogon": []
+    },
+    "varArgFunctions": [
+      "DEBUG_Trace",
+      "Bnclient::Debug::DEBUG_Trace"
+    ]
+  },
+  "namespaceCollisionTypeNames": [
+    "BnMessQueue"
+  ],
+  "options": {
+    "outputDir": "./out",
+    "format": "cpp",
+    "organization": "namespace",
+    "generateCMake": false,
+    "generateSourceMaps": false,
+    "transformPreset": "full",
+    "includeAddressComments": false,
+    "promoteStaticGlobals": false
+  },
+  "tag": "switch(*(int*)pPacketData);ev=b92a7b660b;bh=241-3e99caa6;dh=e0070caf",
+  "untaggedBody": "// SID_AUTH_ACCOUNTUPGRADEPROOF (0x58) packet handler - Account upgrade proof result\n// Receives server verification result after client submits upgrade proof with old password hash:\n// - Status code (4 bytes): Upgrade verification (0=success, 2=invalid old password)\n// On status 0, account successfully migrated from old broken SHA to new SRP system.\n// If upgrade initiated during logon (flag2 set), immediately sends logon packet with new credentials.\n// If upgrade during password change (flag2 clear), sets change complete flag for UI.\n// On status 2, old password verification failed. Clears password memory and sets appropriate error codes.\n// 1.14d: 005219b0\nBOOL __fastcall NET_SID_CLIENT_Incoming_AuthAccountUpgradeProof(char * pPacketData, size_t nPacketSize) {\n    BOOL bIsLogonFlow;\n    if (nPacketSize < 4) {\n      Bnclient::Debug::DEBUG_Trace(\"INVALID: AuthAccountUpgradeProof\");\n      return 0;\n    }\n    if (*(int*)pPacketData) {\n      if (*(int*)pPacketData != 2) {\n        Bnclient::Debug::DEBUG_Trace(\"Upgrade Proof failed: Unknown Result\");\n        Bnclient::BNMESSQUEUE_SetStateIfZero(0x12);\n        return 0;\n      }\n\n      bIsLogonFlow = Bnclient::_net_sid::NET_SID_CLIENT_GetSIDFlag2();\n      if (bIsLogonFlow) {\n        Bnclient::Debug::DEBUG_Trace(\"Upgrade Proof Failed: Invalid password during logon\");\n        Bnclient::_net_sid::NET_SID_ClearSrpPassword();\n        g_nRealmLogonResult = 2;\n        Bnclient::BNMESSQUEUE_SetStateIfZero(0xe);\n        return 1;\n      }\n\n      Bnclient::Debug::DEBUG_Trace(\"Upgrade Proof Failed: Invalid password during change\");\n      Bnclient::_net_sid::NET_SID_ClearSrpPassword();\n      g_nSIDResponseCount1 = 2;\n      g_SIDPacketResponseFlags[0x55] = 1;\n      Bnclient::BNMESSQUEUE_SetStateIfZero(0xe);\n      return 1;\n    }\n\n    int32_t iVar1;\n    bIsLogonFlow = Bnclient::_net_sid::NET_SID_CLIENT_GetSIDFlag2();\n    if (bIsLogonFlow) {\n      Bnclient::Debug::DEBUG_Trace(\"Upgrade Proof success, logging in\");\n      iVar1 = Bnclient::_net_sid::NET_SID_CLIENT_Resend_0x53_AuthAccountLogon();\n      return iVar1;\n    }\n\n    Bnclient::Debug::DEBUG_Trace(\"Upgrade Proof success, password changed\");\n    Bnclient::_net_sid::NET_SID_ClearSrpPassword();\n    g_nSIDResponseCount1 = 0;\n    g_SIDPacketResponseFlags[0x55] = 1;\n    return 1;\n}",
+  "taggedBody": "// SID_AUTH_ACCOUNTUPGRADEPROOF (0x58) packet handler - Account upgrade proof result\n// Receives server verification result after client submits upgrade proof with old password hash:\n// - Status code (4 bytes): Upgrade verification (0=success, 2=invalid old password)\n// On status 0, account successfully migrated from old broken SHA to new SRP system.\n// If upgrade initiated during logon (flag2 set), immediately sends logon packet with new credentials.\n// If upgrade during password change (flag2 clear), sets change complete flag for UI.\n// On status 2, old password verification failed. Clears password memory and sets appropriate error codes.\n// 1.14d: 005219b0\nBOOL __fastcall NET_SID_CLIENT_Incoming_AuthAccountUpgradeProof(char * pPacketData, size_t nPacketSize) {\n    BOOL bIsLogonFlow;\n    if (nPacketSize < 4) {\n      Bnclient::Debug::DEBUG_Trace(\"INVALID: AuthAccountUpgradeProof\");\n      return 0;\n    }\n\n    switch (*(int*)pPacketData) {\n      case 2:\n        {\n          bIsLogonFlow = Bnclient::_net_sid::NET_SID_CLIENT_GetSIDFlag2();\n          if (bIsLogonFlow) {\n            Bnclient::Debug::DEBUG_Trace(\"Upgrade Proof Failed: Invalid password during logon\");\n            Bnclient::_net_sid::NET_SID_ClearSrpPassword();\n            g_nRealmLogonResult = 2;\n            Bnclient::BNMESSQUEUE_SetStateIfZero(0xe);\n            return 1;\n          }\n\n          Bnclient::Debug::DEBUG_Trace(\"Upgrade Proof Failed: Invalid password during change\");\n          Bnclient::_net_sid::NET_SID_ClearSrpPassword();\n          g_nSIDResponseCount1 = 2;\n          g_SIDPacketResponseFlags[0x55] = 1;\n          Bnclient::BNMESSQUEUE_SetStateIfZero(0xe);\n          return 1;\n        }\n      case 0:\n        {\n          int32_t iVar1;\n          bIsLogonFlow = Bnclient::_net_sid::NET_SID_CLIENT_GetSIDFlag2();\n          if (bIsLogonFlow) {\n            Bnclient::Debug::DEBUG_Trace(\"Upgrade Proof success, logging in\");\n            iVar1 = Bnclient::_net_sid::NET_SID_CLIENT_Resend_0x53_AuthAccountLogon();\n            return iVar1;\n          }\n\n          Bnclient::Debug::DEBUG_Trace(\"Upgrade Proof success, password changed\");\n          Bnclient::_net_sid::NET_SID_ClearSrpPassword();\n          g_nSIDResponseCount1 = 0;\n          g_SIDPacketResponseFlags[0x55] = 1;\n          return 1;\n        }\n    }\n\n    Bnclient::Debug::DEBUG_Trace(\"Upgrade Proof failed: Unknown Result\");\n    Bnclient::BNMESSQUEUE_SetStateIfZero(0x12);\n    return 0;\n}",
+  "scope": "Live hash-matched model, resolved locals, five live callee signatures including tail jump, real BnMessQueue collision, and manually native-attested five branch sites/eight statement witnesses. Real measured seals. Current source76 complete108-row control calibrated; candidate gains only005219b0 toMATCH1.0000. Not owning extraction or whole-program preservation."
+}
