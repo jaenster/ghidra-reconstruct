@@ -34,15 +34,16 @@
  */
 
 import { NodeKind } from '../../../ast/kinds.js';
+import { emit } from '../../../emit/index.js';
 import type {
-  ASTNode, AssignExpr, BinaryExpr, CallExpr, CompoundStmt, CStyleCastExpr, DeclStmt, Expression, ExprStmt,
+  ASTNode, AnyNode, AssignExpr, BinaryExpr, TypeNode, CallExpr, CompoundStmt, CStyleCastExpr, DeclStmt, Expression, ExprStmt,
   FunctionDecl, Identifier, IntegerLiteralExpr, ParenExpr, Statement, UnaryExpr, VariableDecl,
 } from '../../../ast/nodes.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
 import type { Transformer } from '../../transformer.js';
-import { Expr } from '../../../ast/factory.js';
+import { Decl, Expr, Stmt, Type } from '../../../ast/factory.js';
 import { cloneNode } from '../../transformer.js';
-import { buildFunctionFlow, type FunctionFlow } from '../../cfg/dataflow.js';
+import { ENTRY_DEF, buildFunctionFlow, type FunctionFlow } from '../../cfg/dataflow.js';
 import type { IfStmt, ReturnStmt } from '../../../ast/nodes.js';
 import { createStrlenProof, type StrlenProofOptions } from './strlen-difference-proof.js';
 
@@ -50,6 +51,8 @@ export interface StrlenDifferenceOptions extends PluginOptions, StrlenProofOptio
   /** The function's compare-sites row (extract/compare-sites.ts). */
   compareSites?: string;
   onSite?: (e: { pointer: string; string: string; form: string }) => void;
+  /** Rewrite a scan whose length is read in later statements into a held `nStrLen` (default on). */
+  held?: boolean;
 }
 
 function unwrapParens(e: Expression): Expression {
@@ -220,6 +223,141 @@ function rewriteBlock(blk: CompoundStmt, opts: StrlenDifferenceOptions, flow: Fu
   }
 }
 
+/** The identifier whose value fixes the string's address: s itself, or the object of `o.arr` / `o->arr`. */
+function rootOf(s: Expression): string | null {
+  const u = unwrapParens(s);
+  if (u.kind === NodeKind.Identifier) return (u as Identifier).name;
+  if (u.kind === NodeKind.MemberExpr) return ident((u as unknown as { object: Expression }).object);
+  return null;
+}
+
+/** Every AST node under the given expressions, the expressions included. */
+function nodesUnder(exprs: Expression[]): Set<ASTNode> {
+  const out = new Set<ASTNode>();
+  for (const e of exprs) { out.add(e); walk(e, (n) => { out.add(n); }); }
+  return out;
+}
+
+/**
+ * The scan whose end is read in several statements: `p = s; p = p + strlen(p) + 1;` and
+ * later reads of p that are all the length of s (`(T)p - (T)(s + 1)`, `p - (s + 1)`,
+ * `(T)p - (T)s`, `p ==/!= s + 1`). VC8 compiled the source's `n = strlen(s)`: the length
+ * is computed once, where the scan stands, and held. Rewritten so:
+ *
+ *   p = s;                                  nStrLen = (int)strlen(s);
+ *   p = p + strlen(p) + 1;                  ...
+ *   ... (int)p - (int)(s + 1) ...           ... (int)nStrLen ...
+ *
+ * Value-preserving: each read differs p's value from s's address, and both are the values
+ * they had at the scan - only the scan's definition of p reaches each read, and the
+ * definitions of s's root that reach each read are the ones that reached the scan; the
+ * length is taken at the scan's own point, so a later change to the string's bytes cannot
+ * matter. p and s's root are nonescaped locals or parameters.
+ */
+function rewriteHeld(blk: CompoundStmt, fnBody: CompoundStmt, opts: StrlenDifferenceOptions, flow: FunctionFlow,
+  proof: ReturnType<typeof createStrlenProof>, locals: Set<string>, fresh: () => string, plain: Map<string, boolean>): boolean {
+  for (let i = 0; i + 2 < blk.statements.length; i++) {
+    const init = initOf(blk.statements[i]);
+    if (!init || flow.isEscaped(init.p) || !isAdvance(blk.statements[i + 1], init.p)) continue;
+    const { p, s } = init;
+    const string = proof.baseKey(s);
+    const root = rootOf(s);
+    if (!string || !root || p === string || p === root || !proof.pointer(p) || !locals.has(root) || flow.isEscaped(root)) continue;
+    if (plain.get(p) !== true || plain.get(root) === undefined || (root === string && plain.get(root) !== true)) continue;
+    const nInit = flow.nodeOf(blk.statements[i]), nAdv = flow.nodeOf(blk.statements[i + 1]);
+    if (nInit === undefined || nAdv === undefined) continue;
+    const fromInit = flow.usesOf(nInit, p);
+    if (fromInit.length !== 1 || fromInit[0] !== nAdv) continue;
+    const uses = flow.usesOf(nAdv, p);
+    if (uses.length === 0 || uses.includes(nAdv)) continue;
+    const rootAtScan = [...flow.reaching(nAdv, root)].sort().join(',');
+    if (!uses.every(u => { const r = flow.reaching(u, p); return r.size === 1 && r.has(nAdv); })) continue;
+    // s itself may be named at a read only while its root still holds the scan's value
+    const rootOk = (u: number) => [...flow.reaching(u, root)].sort().join(',') === rootAtScan;
+    const exprs: Expression[] = [];
+    for (const u of uses) exprs.push(...flow.ownExprs(u));
+    const inUse = nodesUnder(exprs);
+    let reads = 0;
+    for (const e of exprs) reads += countIdent(e, p) + (e.kind === NodeKind.Identifier && (e as Identifier).name === p ? 1 : 0);
+    const n = { name: '' };
+    const lenRef = () => Expr.identifier(n.name);
+    const withOne = comparesWithOne(opts.compareSites, p);
+    const sites: { parent: Record<string | number, unknown>; key: string | number; make: () => Expression }[] = [];
+    const isSPlain = (e: Expression) => proof.baseKey(e) === string;
+    // `L` whose one reaching definition is `L = s + 1`, made while s's root held its scan value
+    const plusOneAt = (e: Expression, u: number): boolean => {
+      if (isSPlusOne(e, string, proof)) return rootOk(u);
+      const l = ident(e);
+      if (!l || l === root || l === p || !locals.has(l) || flow.isEscaped(l) || plain.get(l) === undefined) return false;
+      const r = flow.reaching(u, l);
+      if (r.size !== 1) return false;
+      const d = [...r][0];
+      if (d === ENTRY_DEF) return false;
+      const def = flow.definition(d, l);
+      return !!def && def.killing && !!def.rhs && isSPlusOne(def.rhs, string, proof)
+        && [...flow.reaching(d, root)].sort().join(',') === rootAtScan;
+    };
+    const useOf = new Map<ASTNode, number>();
+    for (const u of uses) for (const e of flow.ownExprs(u)) for (const x of nodesUnder([e])) useOf.set(x, u);
+    const intCast = (e: Expression): boolean => e.kind === NodeKind.CStyleCastExpr && !emit((e as CStyleCastExpr).type as unknown as AnyNode).includes('*');
+    walk(fnBody, (x, parent, key) => {
+      if (!inUse.has(x)) return;
+      // (T)(p + (K - (T')L)): an integer of the length plus K - 1
+      if (x.kind === NodeKind.CStyleCastExpr && intCast(x as Expression)) {
+        const c = x as CStyleCastExpr;
+        const sum = unwrapParens(c.expression);
+        if (sum.kind !== NodeKind.BinaryExpr || (sum as BinaryExpr).operator !== '+' || ident((sum as BinaryExpr).left) !== p) return;
+        const k = unwrapParens((sum as BinaryExpr).right);
+        if (k.kind !== NodeKind.BinaryExpr || (k as BinaryExpr).operator !== '-') return;
+        const lit = unwrapParens((k as BinaryExpr).left), sub = unwrapParens((k as BinaryExpr).right);
+        if (lit.kind !== NodeKind.IntegerLiteral || !intCast(sub) || !plusOneAt((sub as CStyleCastExpr).expression, useOf.get(x)!)) return;
+        const kv = (lit as IntegerLiteralExpr).value;
+        sites.push({ parent: c as unknown as Record<string, unknown>, key: 'expression',
+          make: () => Expr.paren(kv === 0n ? lenRef() : Expr.binary(lenRef(), '+', Expr.intLiteral(kv))) as Expression });
+        return;
+      }
+      if (x.kind !== NodeKind.BinaryExpr) return;
+      const b = x as BinaryExpr;
+      const trivia = { leadingTrivia: x.leadingTrivia ?? [], trailingTrivia: x.trailingTrivia ?? [] };
+      const u = useOf.get(x)!;
+      if ((b.operator === '!=' || b.operator === '==') && ident(b.left) === p && plusOneAt(b.right, u)) {
+        const ne = b.operator === '!=';
+        const op = withOne ? (ne ? '>=' : '<') : (ne ? '!=' : '==');
+        sites.push({ parent, key, make: () => ({ ...Expr.binary(lenRef(), op as never, Expr.intLiteral(withOne ? 1 : 0)), ...trivia }) });
+        return;
+      }
+      if (b.operator !== '-') return;
+      if (ident(b.left) === p && plusOneAt(b.right, u)) {
+        sites.push({ parent, key, make: () => ({ ...Expr.paren(lenRef()), ...trivia }) as Expression });
+        return;
+      }
+      const cast = proof.differenceCast(b.left, b.right);
+      if (!cast || ident((unwrapParens(b.left) as CStyleCastExpr).expression) !== p) return;
+      const r = (unwrapParens(b.right) as CStyleCastExpr).expression;
+      if (plusOneAt(r, u)) {
+        sites.push({ parent, key, make: () => ({ ...Expr.cast(cloneNode(cast), lenRef()), ...trivia }) as Expression });
+      } else if (isSPlain(r) && rootOk(u)) {
+        sites.push({ parent, key, make: () => ({ ...Expr.paren(Expr.binary(Expr.cast(cloneNode(cast), lenRef()), '+', Expr.intLiteral(1))), ...trivia }) as Expression });
+      }
+    });
+    if (sites.length === 0 || sites.length !== reads) continue;
+    n.name = fresh();
+    locals.add(n.name);
+    for (const st of sites) st.parent[st.key] = st.make();
+    const set = Stmt.expr(Expr.assign(Expr.identifier(n.name), Expr.cast(Type.int(), strlenOf(s))));
+    const decl = Stmt.declStmt([Decl.variable(n.name, Type.int())]);
+    if (init.decl) {
+      init.decl.initializer = null;
+      blk.statements.splice(i + 1, 1, decl, set);
+    } else {
+      blk.statements.splice(i, 2, decl, set);
+    }
+    for (const _ of sites) opts.onSite?.({ pointer: p, string, form: 'held' });
+    return true;
+  }
+  return false;
+}
+
 export const strlenDifferencePlugin: TransformPlugin = {
   id: 'strlen-difference',
   name: 'Strlen Difference',
@@ -240,6 +378,22 @@ export const strlenDifferencePlugin: TransformPlugin = {
         const locals = new Set<string>();
         for (const prm of fn.parameters) { const n = (prm as unknown as { name?: Identifier | null }).name; if (n) locals.add(n.name); }
         walk(fn.body, (n) => { if (n.kind === NodeKind.VariableDecl) locals.add((n as VariableDecl).name.name); });
+        const named = new Set<string>(locals);
+        walk(fn.body, (n) => { if (n.kind === NodeKind.Identifier) named.add((n as Identifier).name); });
+        // names declared once in the function, without volatile: true when spelled a plain `char *`
+        const plain = new Map<string, boolean>();
+        const seen = new Map<string, number>();
+        const note = (name: string, type: TypeNode) => {
+          seen.set(name, (seen.get(name) ?? 0) + 1);
+          const text = emit(type as unknown as AnyNode);
+          plain.set(name, /^(const\s+)?char\s*\*$/.test(text.trim()));
+          if (/\bvolatile\b/.test(text)) plain.delete(name);
+        };
+        for (const prm of fn.parameters) { const n = (prm as unknown as { name?: Identifier | null }).name; if (n) note(n.name, prm.type); }
+        walk(fn.body, (n) => { if (n.kind === NodeKind.VariableDecl) note((n as VariableDecl).name.name, (n as VariableDecl).type); });
+        for (const [k, c] of seen) if (c !== 1) plain.delete(k);
+        let serial = 0;
+        const fresh = () => { for (;;) { const c = serial++ ? `nStrLen${serial}` : 'nStrLen'; if (!named.has(c)) { named.add(c); return c; } } };
         const body = (fn.body as CompoundStmt).statements;
         for (let round = 0; round < 64; round++) {
           const flow = buildFunctionFlow(body, locals);
@@ -249,6 +403,9 @@ export const strlenDifferencePlugin: TransformPlugin = {
           const count = { n: 0 };
           const o2 = { ...opts, onSite: (e: { pointer: string; string: string; form: string }) => { count.n++; opts.onSite?.(e); } };
           for (const blk of blocks) { rewriteBlock(blk, o2, flow, proof); if (count.n) { fired = count.n; break; } }
+          if (!fired && opts.held !== false) {
+            for (const blk of blocks) { if (rewriteHeld(blk, fn.body as CompoundStmt, o2, flow, proof, locals, fresh, plain)) { fired = 1; break; } }
+          }
           if (!fired) break;
         }
       }

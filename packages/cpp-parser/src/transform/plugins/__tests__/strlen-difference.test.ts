@@ -12,6 +12,7 @@ const flat = (s: string) => s.replace(/\s+/g, ' ').trim();
 function run(code: string, rows: string[] = [], options: StrlenDifferenceOptions = {}): { out: string; sites: string[] } {
   const sites: string[] = [];
   const t = strlenDifferencePlugin.createTransformer({
+    held: false,
     ...options,
     compareSites: rows.join('\n'),
     onSite: (e: { pointer: string; form: string }) => sites.push(`${e.pointer}:${e.form}`),
@@ -203,4 +204,43 @@ describe('strlen-difference with a reused pointer', () => {
     const { sites } = run(P + ' int f(char *a, int k) { char *p; p = a; p = p + strlen(p) + 1; if (p != a + 1) { Show(1); } return (int)p; }');
     assert.deepStrictEqual(sites, []);
   });
+
+  it('holds the length read in later statements (STRING_GetStringLength 0044a170)', () => {
+    const code = P + ' void Halt(); char *strcpy(char *, const char *); char *f(char *szText, char **pp, char *pEnd, char *szDest) {'
+      + ' char *pBase = szText + 1; char *pScan = szText; pScan = pScan + strlen(pScan) + 1;'
+      + ' *pp += (int)(pScan - pBase + 1); if (*pp >= pEnd) { Halt(); } strcpy(szDest, szText);'
+      + ' return szDest + (int)((intptr_t)pScan - (intptr_t)(szText + 1) + 1); }';
+    const { out, sites } = run('typedef int intptr_t; ' + code, [], { held: true });
+    assert.deepStrictEqual(sites, ['pScan:held', 'pScan:held']);
+    assert.ok(out.includes('int nStrLen; nStrLen = (int)strlen(szText);'), out);
+    assert.ok(out.includes('return szDest + (int)((intptr_t)nStrLen + 1);'), out);
+    assert.ok(out.includes('*pp += (int)(nStrLen + 1);'), out);
+  });
+
+  it('keeps the scan when the string pointer moves before a read', () => {
+    const code = 'typedef int intptr_t; ' + P + ' int f(char *s, char *t) { char *p = s; p = p + strlen(p) + 1; Fill(s); s = t; return (intptr_t)p - (intptr_t)(s + 1); }';
+    const { sites } = run(code, [], { held: true });
+    assert.deepStrictEqual(sites, []);
+    assert.deepStrictEqual(run(code.replace('char *s, char *t', 'char *volatile s, char *t').replace(' s = t;', ''), [], { held: true }).sites, []);
+    assert.deepStrictEqual(run(code.replace('char *p = s;', 'int p; { char *p; } char *p = s;').replace(' s = t;', ''), [], { held: true }).sites, []);
+  });
+
+  it('holds the length for a later compare and a size', () => {
+    const code = 'typedef int intptr_t; ' + P + ' int f(char *s) { char *p = s; p = p + strlen(p) + 1; Fill(s); if ((unsigned)((intptr_t)p - (intptr_t)(s + 1)) < 15) { Show((intptr_t)p - (intptr_t)s); } return 0; }';
+    const { out, sites } = run(code, [], { held: true });
+    assert.deepStrictEqual(sites, ['p:held', 'p:held']);
+    assert.ok(out.includes('if ((unsigned int)(intptr_t)nStrLen < 15) { Show((intptr_t)nStrLen + 1); }'), out);
+  });
+
+  it('holds the length through an alias of s + 1 the copy loop outlives (Ghidra form)', () => {
+    const code = 'typedef int intptr_t; ' + P + ' char *f(char *szText, char **pp, char *szDest) { char *pBase = szText + 1; char *pScan = szText; pScan = pScan + strlen(pScan) + 1;'
+      + ' *pp = *pp + (int)(pScan + (1 - (int)pBase)); int d = (int)szDest - (int)szText; char c; do { c = *szText; szText[d] = c; szText = szText + 1; } while (c != 0);'
+      + ' return szDest + (int)(pScan + (1 - (int)pBase)); }';
+    const { out, sites } = run(code, [], { held: true });
+    assert.deepStrictEqual(sites, ['pScan:held', 'pScan:held']);
+    assert.ok(out.includes('return szDest + (int)(nStrLen + 1);'), out);
+    // s named directly after the loop moved it: not the scan's string any more
+    assert.deepStrictEqual(run(code.replace('return szDest + (int)(pScan + (1 - (int)pBase));', 'return szDest + ((intptr_t)pScan - (intptr_t)(szText + 1));'), [], { held: true }).sites, []);
+  });
 });
+
