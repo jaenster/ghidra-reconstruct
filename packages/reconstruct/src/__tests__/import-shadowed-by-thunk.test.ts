@@ -55,10 +55,17 @@ const tickCount: AnalyzedDataSymbol = {
 const context = (): ImplGenContext => ({
   analyzedGlobals: [tickCount],
   knownNamespaces: new Set(['Fog', 'Fog::SMem']),
+  // As index.ts builds them: the header map keyed by the bare name, the namespace in the
+  // candidates' qualified spellings.
   functionNameToHeader: new Map([
-    ['Fog::SMem::GetTickCount', 'Fog/SMem.h'],
-    ['Fog::SMem::SMemResetHeapStats', 'Fog/SMem.h'],
-    ['Fog::SMem::SMemViaThunk', 'Fog/SMem.h'],
+    ['GetTickCount', 'Fog/SMem.h'],
+    ['SMemResetHeapStats', 'Fog/SMem.h'],
+    ['SMemViaThunk', 'Fog/SMem.h'],
+  ]),
+  functionNameCandidates: new Map([
+    ['GetTickCount', [{ qualified: 'Fog::SMem::GetTickCount', header: 'Fog/SMem.h' }]],
+    ['SMemResetHeapStats', [{ qualified: 'Fog::SMem::SMemResetHeapStats', header: 'Fog/SMem.h' }]],
+    ['SMemViaThunk', [{ qualified: 'Fog::SMem::SMemViaThunk', header: 'Fog/SMem.h' }]],
   ]),
 });
 
@@ -69,6 +76,17 @@ describe('import call beside a same-named namespace thunk', () => {
   it('root-qualifies the bare import call', () => {
     const impl = gen(RESET);
     assert.ok(/(?<![\w:])::GetTickCount\(\)/.test(impl), `expected ::GetTickCount() - got:\n${impl}`);
+  });
+
+  it('leaves a bare import call bare where no namesake hides it', () => {
+    const other: ExtractedFunction = {
+      ...RESET, name: 'TickElsewhere', address: '0x00402000', namespace: 'D2Client::GAME',
+      decompiled: ['void D2Client::GAME::TickElsewhere(void)', '{', '  g_SMemLastTickCount = GetTickCount();', '  return;', '}'].join('\n'),
+    };
+    const impl = generateImplementation('D2Client/GAME', [other], undefined, 'D2Client/GAME.h', options,
+      { ...context(), knownNamespaces: new Set(['Fog', 'Fog::SMem', 'D2Client', 'D2Client::GAME']) }, undefined, new Set<string>());
+    assert.ok(!/::GetTickCount\(\)/.test(impl), `expected a bare GetTickCount() - got:\n${impl}`);
+    assert.ok(/GetTickCount\(\)/.test(impl), impl);
   });
 
   it('leaves the thunk call bound to the thunk', () => {

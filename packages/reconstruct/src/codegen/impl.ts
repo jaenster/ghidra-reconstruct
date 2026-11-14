@@ -2619,6 +2619,12 @@ interface RootScopeSymbolTables {
    * root-scope one and has to say `::name`.
    */
   functionShadowedGlobals: string[];
+  /**
+   * Header-declared (root-scope) functions a namespaced project function of the same name
+   * hides, with the namespaces that declare one: a bare call inside such a namespace (or
+   * one nested in it) binds to the namespaced function and has to say `::name`.
+   */
+  importShadows: Map<string, string[]>;
 }
 const rootScopeSymbolCache = new WeakMap<AnalyzedDataSymbol[], RootScopeSymbolTables>();
 
@@ -2650,18 +2656,25 @@ function collectRootScopeSymbols(context?: ImplGenContext): RootScopeSymbolTable
   // reverse case is the bare spelling, which still means the global.
   const functionShadowedGlobals = new Set<string>();
   if (context?.functionNameToHeader) {
-    // A root-scope FUNCTION is shadowed the same way. Ghidra names a JMP thunk after the
-    // import it forwards to and files it in its module's namespace: Fog::SMem::GetTickCount
-    // (004112b0) beside Win32 GetTickCount. A direct import call is printed bare, a call to
-    // the thunk qualified, and inside `namespace Fog::SMem` the bare spelling bound to the
-    // thunk (SMemResetHeapStats, 00411280, called through the thunk instead of the IAT).
-    // Only header-declared functions qualify: they are at root scope in every build, where a
-    // project function without a Ghidra namespace may still be filed under its directory's.
-    const rootFunctions = platformDeclaredFunctionNames();
     for (const fn of context.functionNameToHeader.keys()) {
       const bare = fn.includes('::') ? fn.slice(fn.lastIndexOf('::') + 2) : fn;
       if (rootScopeSymbols.delete(bare)) functionShadowedGlobals.add(bare);
-      else if (fn !== bare && rootFunctions.has(bare)) functionShadowedGlobals.add(bare);
+    }
+  }
+  // A root-scope FUNCTION is shadowed the same way, but only inside the namespaces that
+  // declare its namesake (shadowedInNamespace). The header map is keyed by the bare name;
+  // the namespaces are in the candidates' qualified spellings (index.ts). Only
+  // header-declared functions qualify: they are at root scope in every build, where a
+  // project function without a Ghidra namespace may still be filed under its directory's.
+  const importShadows = new Map<string, string[]>();
+  if (context?.functionNameToHeader) {
+    const rootFunctions = platformDeclaredFunctionNames();
+    for (const [bare, candidates] of context.functionNameCandidates ?? []) {
+      if (!rootFunctions.has(bare) || functionShadowedGlobals.has(bare)) continue;
+      const spaces = candidates
+        .filter(c => c.qualified.endsWith(`::${bare}`))
+        .map(c => c.qualified.slice(0, -(bare.length + 2)));
+      if (spaces.length > 0) importShadows.set(bare, [...new Set(spaces)]);
     }
   }
 
@@ -2669,9 +2682,38 @@ function collectRootScopeSymbols(context?: ImplGenContext): RootScopeSymbolTable
     rootScopeSymbols: [...rootScopeSymbols],
     scopedSymbols: [...scopedSymbols],
     functionShadowedGlobals: [...functionShadowedGlobals],
+    importShadows,
   };
   rootScopeSymbolCache.set(globals, tables);
   return tables;
+}
+
+/**
+ * The names a bare reference must spell `::name` inside `enclosing`: every shadowed root
+ * data symbol, and each header-declared function that a function in `enclosing` or in a
+ * namespace around it also names. Ghidra prints a direct import call bare and a call to the
+ * namespaced function qualified (Fog::SMem::GetTickCount, the JMP thunk at 004112b0, beside
+ * Win32 GetTickCount): inside `namespace Fog::SMem` the bare spelling bound to the thunk, so
+ * SMemResetHeapStats (00411280) called through it instead of the IAT. Memoised per namespace
+ * so the plugin's transformer cache, keyed on the options object, still hits.
+ */
+const shadowedInNamespaceCache = new WeakMap<RootScopeSymbolTables, Map<string, { functionShadowedGlobals: string[] }>>();
+function shadowedInNamespace(tables: RootScopeSymbolTables, enclosing: string | undefined): { functionShadowedGlobals: string[] } {
+  let perNamespace = shadowedInNamespaceCache.get(tables);
+  if (!perNamespace) shadowedInNamespaceCache.set(tables, perNamespace = new Map());
+  const key = enclosing ?? '';
+  let entry = perNamespace.get(key);
+  if (!entry) {
+    const names = [...tables.functionShadowedGlobals];
+    if (enclosing) {
+      for (const [bare, spaces] of tables.importShadows) {
+        if (spaces.some(ns => enclosing === ns || enclosing.startsWith(`${ns}::`))) names.push(bare);
+      }
+    }
+    entry = { functionShadowedGlobals: names };
+    perNamespace.set(key, entry);
+  }
+  return entry;
 }
 
 /**
@@ -3120,10 +3162,9 @@ function transformDecompiledCode(
     const rootScope = collectRootScopeSymbols(context);
     if (rootScope) {
       perPluginOptions['root-scope-qualify'] = rootScope;
-      if (rootScope.functionShadowedGlobals.length > 0) {
-        perPluginOptions['function-shadowed-global'] = {
-          functionShadowedGlobals: rootScope.functionShadowedGlobals,
-        };
+      const shadowed = shadowedInNamespace(rootScope, context?._enclosingNamespace);
+      if (shadowed.functionShadowedGlobals.length > 0) {
+        perPluginOptions['function-shadowed-global'] = shadowed;
       }
     }
 
