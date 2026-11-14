@@ -424,6 +424,8 @@ export {
   type SelectArgumentOptions,
 } from './builtins/select-argument.js';
 
+export { loopCompareDifferencePlugin } from './builtins/loop-compare-difference.js';
+
 export {
   inPlaceOperandPlugin,
   type InPlaceOperandOptions,
@@ -955,6 +957,7 @@ import { memberCopyAssignPlugin } from './builtins/member-copy-assign.js';
 import { sharedTailJoinPlugin } from './builtins/shared-tail-join.js';
 import { selectArgumentPlugin } from './builtins/select-argument.js';
 import { inPlaceOperandPlugin } from './builtins/in-place-operand.js';
+import { loopCompareDifferencePlugin } from './builtins/loop-compare-difference.js';
 import { tailWalkRereadPlugin } from './builtins/tail-walk-reread.js';
 import { rotatedStepWhilePlugin } from './builtins/rotated-step-while.js';
 import { copiedTestWhilePlugin } from './builtins/copied-test-while.js';
@@ -1244,6 +1247,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   inlinedStrcpyPlugin,        // Matching: the byte loop VC8 expands strcpy into becomes the call (priority 989.9)
   accumulateSumPlugin,        // Matching: a sum of two single-use values accumulates into the first with += (priority 989.95)
   inPlaceOperandPlugin,       // Matching: a value worked on once before its one use is worked on in place, x OP= e (priority 989.951)
+  loopCompareDifferencePlugin, // Matching: share a comparison loop's exit subtraction with its signed result (priority 989.952)
   shortLocalWidenPlugin,      // Matching: a short local read only as an index is an int (priority 989.96)
   guardNullNestPlugin,        // Matching: a compound guard and a later null test of one return become one null-initialised test (priority 989.97)
   returnCopySplitPlugin,      // Matching: an else-if chain whose first arm falls into a constant return writes the return in that arm (priority 989.975)
