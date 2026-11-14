@@ -294,6 +294,87 @@ describe('record-getter-guard', () => {
     assert.deepStrictEqual(r.sites, []);
   });
 
+  // The state-list loop of SUNITMSG (SUnitMsg.cpp): the failure, then an else-if arm
+  // that reads the record.
+  it('routes the reads of the else branch of a failure-stated guard', () => {
+    const r = run([
+      'int f(int n) {',
+      `  if (${FAIL}) {`,
+      '    return -1;',
+      '  } else if (sgptDataTable->pTxtItemTypes[n].beltable & 1) {',
+      '    return 0;',
+      '  } else {',
+      '    return sgptDataTable->pTxtItemTypes[n].throwable;',
+      '  }',
+      '}',
+    ]);
+    assert.deepStrictEqual(r.sites, ['pItemTypesTxt:2!']);
+    assert.ok(r.out.includes('if (!pItemTypesTxt) { return -1; } else if (pItemTypesTxt->beltable & 1) { return 0; } else { return pItemTypesTxt->throwable; }'), r.out);
+  });
+
+  it('routes the else branch of a `!` guard in an else-if arm, not what follows', () => {
+    const r = run([
+      'int f(int *p, int n) {',
+      '  if (p) {',
+      '    return 1;',
+      `  } else if (!(${GUARD})) {`,
+      '    return 0;',
+      '  } else {',
+      '    Use(sgptDataTable->pTxtItemTypes[n].throwable);',
+      '  }',
+      '  return sgptDataTable->pTxtItemTypes[n].beltable;',
+      '}',
+    ]);
+    assert.deepStrictEqual(r.sites, ['pItemTypesTxt:1!']);
+    assert.ok(r.out.includes('Use(pItemTypesTxt->throwable);'), r.out);
+    assert.ok(r.out.includes('return sgptDataTable->pTxtItemTypes[n].beltable;'), r.out);
+  });
+
+  it('leaves the else branch of a `!` guard that holds a label', () => {
+    const r = run([
+      'int f(int n) {',
+      '  if (n > 7) goto L;',
+      `  if (!(${GUARD})) {`,
+      '    return 0;',
+      '  } else {',
+      '  L:',
+      '    return sgptDataTable->pTxtItemTypes[n].throwable;',
+      '  }',
+      '}',
+    ]);
+    assert.deepStrictEqual(r.sites, []);
+  });
+
+  it('computes what a failure-stated guard with an else computed', { skip: !hasNativeGpp() }, () => {
+    const body = [
+      'int f(int *p, int n) {',
+      `  if (!p || ${FAIL}) {`,
+      '    return -1;',
+      '  } else if (sgptDataTable->pTxtItemTypes[n].beltable == 0) {',
+      '    return Use(n);',
+      '  } else {',
+      '    return sgptDataTable->pTxtItemTypes[n].throwable * 10 + n;',
+      '  }',
+      '}',
+    ];
+    const r = run(body);
+    // The else-if's own branches call: only its condition routes.
+    assert.deepStrictEqual(r.sites, ['pItemTypesTxt:1!']);
+    const prelude = (fn: string) => [PRELUDE, 'DataTable *sgptDataTable;', 'int Use(int v) { return v; }', fn].join('\n');
+    const main = [
+      'static ItemTypesTxt rows[3] = {{{0},1,0},{{0},2,1},{{0},3,1}};',
+      'static DataTable t = {0, rows, 3};',
+      'sgptDataTable = &t;',
+      'int x = 1;',
+      'printf("%d ", f(0, 1));',
+      'for (int n = -2; n <= 4; n++) printf("%d ", f(&x, n));',
+    ].join('\n');
+    const before = compileAndRun(prelude(body.join('\n')), main);
+    const after = compileAndRun(prelude(r.out), main);
+    assert.ok(before.length > 0);
+    assert.strictEqual(after, before);
+  });
+
   it('leaves a chain whose body holds a label', () => {
     const r = run([
       'int f(int *p, int n) {',
@@ -371,6 +452,153 @@ describe('record-getter-guard', () => {
       'static DataTable t = {0, rows, 3};',
       'sgptDataTable = &t;',
       'for (int n = -1; n <= 3; n++) printf("%d ", f(n));',
+    ].join('\n');
+    const before = compileAndRun(prelude(body.join('\n')), main);
+    const after = compileAndRun(prelude(r.out), main);
+    assert.ok(before.length > 0);
+    assert.strictEqual(after, before);
+  });
+  // SKILLS_CltProcessActiveSkill 004c7890: the only read is a switch's discriminant, and the
+  // switch's cases call. The discriminant is evaluated before any case runs.
+  it('routes the read in a switch head whose cases call', () => {
+    const r = run([
+      'int f(int n) {',
+      `  if (!(${GUARD})) {`,
+      '    return 0;',
+      '  }',
+      '  switch (sgptDataTable->pTxtItemTypes[n].throwable) {',
+      '    case 1: return Use(n);',
+      '  }',
+      '  return 1;',
+      '}',
+    ]);
+    assert.deepStrictEqual(r.sites, ['pItemTypesTxt:1!']);
+    assert.ok(r.out.includes('switch (pItemTypesTxt->throwable) { case 1: return Use(n); }'), r.out);
+  });
+
+  it('leaves a switch head that calls', () => {
+    const r = run([
+      'int f(int n) {',
+      `  if (!(${GUARD})) {`,
+      '    return 0;',
+      '  }',
+      '  switch (Use(sgptDataTable->pTxtItemTypes[n].throwable)) {',
+      '    case 1: return Use(n);',
+      '  }',
+      '  return 1;',
+      '}',
+    ]);
+    assert.deepStrictEqual(r.sites, []);
+  });
+
+  // UNITMODE_CanInterruptSkill 00480ba0: a byte flag read as `(uint8_t*)&T->pTxt[n] + 7`.
+  // `&base[n]` takes the address of the record, not of the index.
+  it('takes an index whose record has its address taken', () => {
+    const r = run([
+      'typedef unsigned char uint8_t;',
+      'int f(int n) {',
+      `  if (${GUARD} && *((uint8_t*)&sgptDataTable->pTxtItemTypes[n] + 0x11) & 4) {`,
+      '    return 1;',
+      '  }',
+      '  return 0;',
+      '}',
+    ]);
+    assert.deepStrictEqual(r.sites, ['pItemTypesTxt:1']);
+    assert.ok(r.out.includes('&& *((uint8_t*)pItemTypesTxt + 0x11) & 4)'), r.out);
+  });
+
+  it('leaves an index whose own address is taken', () => {
+    const r = run([
+      'int f(int n) {',
+      '  Peek(&n);',
+      `  if (${GUARD}) {`,
+      '    return sgptDataTable->pTxtItemTypes[n].throwable;',
+      '  }',
+      '  return 0;',
+      '}',
+    ]);
+    assert.deepStrictEqual(r.sites, []);
+  });
+
+  // Skills_SrvDoFunc_106_FireMissileRingOnTarget 005cd870: the decompiler prints the
+  // `!`-guard as the getter's failure, each range test inverted.
+  const FAIL = '(int)n < 0 || (int)n >= sgptDataTable->nTxtItemTypesSize || !(sgptDataTable->pTxtItemTypes + n)';
+  it('takes the getter stated as its failure', () => {
+    const r = run([
+      'int f(int n) {',
+      `  if (${FAIL}) {`,
+      '    return -1;',
+      '  }',
+      '  return sgptDataTable->pTxtItemTypes[n].throwable;',
+      '}',
+    ]);
+    assert.deepStrictEqual(r.sites, ['pItemTypesTxt:1!']);
+    assert.ok(r.out.includes('ItemTypesTxt* pItemTypesTxt = (int)n >= 0 && (int)n < sgptDataTable->nTxtItemTypesSize ? sgptDataTable->pTxtItemTypes + n : nullptr; if (!pItemTypesTxt) { return -1; } return pItemTypesTxt->throwable;'), r.out);
+  });
+
+  // MONSTER_MissileSplitOnHit-style: a test before the getter and a read after it.
+  it('takes a failure with disjuncts before and after it', () => {
+    const r = run([
+      'int f(int *p, int n) {',
+      `  if (!p || ${FAIL} || sgptDataTable->pTxtItemTypes[n].beltable <= 1) {`,
+      '    return -1;',
+      '  }',
+      '  return sgptDataTable->pTxtItemTypes[n].throwable;',
+      '}',
+    ]);
+    assert.deepStrictEqual(r.sites, ['pItemTypesTxt:2!']);
+    assert.ok(r.out.includes('ItemTypesTxt* pItemTypesTxt; if (!p || !(pItemTypesTxt = (int)n >= 0 && (int)n < sgptDataTable->nTxtItemTypesSize ? sgptDataTable->pTxtItemTypes + n : nullptr) || pItemTypesTxt->beltable <= 1) { return -1; } return pItemTypesTxt->throwable;'), r.out);
+  });
+
+  it('leaves a failure whose branch falls through', () => {
+    const r = run([
+      'int f(int n) {',
+      '  int a = 0;',
+      `  if (${FAIL}) {`,
+      '    a = 1;',
+      '  }',
+      '  return a + sgptDataTable->pTxtItemTypes[n].throwable;',
+      '}',
+    ]);
+    assert.deepStrictEqual(r.sites, []);
+  });
+
+  it('flips only a comparison of the index', () => {
+    const r = run([
+      'int f(int n, int m) {',
+      `  if (m * n < 0 || n >= sgptDataTable->nTxtItemTypesSize || !(sgptDataTable->pTxtItemTypes + n)) {`,
+      '    return -1;',
+      '  }',
+      '  return sgptDataTable->pTxtItemTypes[n].throwable;',
+      '}',
+    ]);
+    // `m * n < 0` is a test of its own: it stays a disjunct before the getter's run.
+    assert.deepStrictEqual(r.sites, ['pItemTypesTxt:1!']);
+    assert.ok(r.out.includes('if (m * n < 0 || !(pItemTypesTxt = n < sgptDataTable->nTxtItemTypesSize ? sgptDataTable->pTxtItemTypes + n : nullptr))'), r.out);
+  });
+
+  it('computes what a failure-stated guard computed', { skip: !hasNativeGpp() }, () => {
+    const body = [
+      'int f(int *p, int n) {',
+      `  if (!p || ${FAIL} || sgptDataTable->pTxtItemTypes[n].beltable == 0) {`,
+      '    return -1;',
+      '  }',
+      '  switch (sgptDataTable->pTxtItemTypes[n].throwable) {',
+      '    case 2: return Use(20 + n);',
+      '  }',
+      '  return sgptDataTable->pTxtItemTypes[n].throwable * 10 + n;',
+      '}',
+    ];
+    const r = run(body);
+    assert.deepStrictEqual(r.sites, ['pItemTypesTxt:2!']);
+    const prelude = (fn: string) => [PRELUDE, 'DataTable *sgptDataTable;', 'int Use(int v) { return v; }', fn].join('\n');
+    const main = [
+      'static ItemTypesTxt rows[3] = {{{0},1,0},{{0},2,1},{{0},3,1}};',
+      'static DataTable t = {0, rows, 3};',
+      'sgptDataTable = &t;',
+      'int x = 1;',
+      'printf("%d ", f(0, 1));',
+      'for (int n = -2; n <= 4; n++) printf("%d ", f(&x, n));',
     ].join('\n');
     const before = compileAndRun(prelude(body.join('\n')), main);
     const after = compileAndRun(prelude(r.out), main);

@@ -572,10 +572,22 @@ export {
 } from './builtins/loop-copy-sink.js';
 
 export {
+  derefWalkLoopPlugin,
+  createDerefWalkLoopTransformer,
+  type DerefWalkLoopOptions,
+} from './builtins/deref-walk-loop.js';
+
+export {
   copyCoalescePlugin,
   createCopyCoalesceTransformer,
   type CopyCoalesceOptions,
 } from './builtins/copy-coalesce.js';
+
+export {
+  shiftDefPlugin,
+  createShiftDefTransformer,
+  type ShiftDefOptions,
+} from './builtins/shift-def.js';
 
 export {
   paramSlotLocalPlugin,
@@ -752,6 +764,11 @@ export {
 } from './builtins/seed-roll-step.js';
 
 export {
+  seedRollLimitedPlugin,
+  type SeedRollLimitedOptions,
+} from './builtins/seed-roll-limited.js';
+
+export {
   seedProductFoldPlugin,
   foldSeedProducts,
 } from './builtins/seed-product-fold.js';
@@ -789,6 +806,7 @@ export { unsignedRangeComparePlugin } from './builtins/unsigned-range-compare.js
 export { rangeTestFormPlugin } from './builtins/range-test-form.js';
 export { zextSitePlugin, createZextSiteTransformer, type ZextOperatorSite, type ZextSiteOptions } from './builtins/zext-site.js';
 export { signedDivideSitePlugin, createSignedDivideSiteTransformer, type SignedDivideOperatorSite, type SignedDivideSiteOptions } from './builtins/signed-divide-site.js';
+export { truncatingRoundSitePlugin, createTruncatingRoundSiteTransformer, type TruncatingRoundSiteOptions } from './builtins/truncating-round-site.js';
 export { zeroExtendSitePlugin, zeroExtendCastPlugin, createZeroExtendSiteTransformer, createZeroExtendCastTransformer, type ZeroExtendMaskSite, type ZeroExtendSiteOptions, type ZeroExtendCastOptions } from './builtins/zero-extend-cast.js';
 export { shiftCountMaskPlugin, createShiftCountMaskTransformer, type ShiftCountMaskOptions } from './builtins/shift-count-mask.js';
 export { createFunctionRanges, type ValueRange, type FunctionRanges } from './builtins/value-range.js';
@@ -877,6 +895,7 @@ import { prngTransformPlugin } from './builtins/prng-transform.js';
 import { seedProductFoldPlugin } from './builtins/seed-product-fold.js';
 import { prngTempCollapsePlugin } from './builtins/prng-temp-collapse.js';
 import { seedRollStepPlugin } from './builtins/seed-roll-step.js';
+import { seedRollLimitedPlugin } from './builtins/seed-roll-limited.js';
 import { bitfieldAccessPlugin } from './builtins/bitfield-access.js';
 import { scalarPieceArithmeticPlugin } from './builtins/scalar-piece-arithmetic.js';
 export { scalarPieceArithmeticPlugin } from './builtins/scalar-piece-arithmetic.js';
@@ -898,6 +917,7 @@ import { shiftCountMaskPlugin } from './builtins/shift-count-mask.js';
 import { zeroExtendSitePlugin, zeroExtendCastPlugin } from './builtins/zero-extend-cast.js';
 import { zextSitePlugin } from './builtins/zext-site.js';
 import { signedDivideSitePlugin } from './builtins/signed-divide-site.js';
+import { truncatingRoundSitePlugin } from './builtins/truncating-round-site.js';
 import { compareFormPlugin } from './builtins/compare-form.js';
 import { repStringFormPlugin } from './builtins/rep-string-form.js';
 import { compareSignednessPlugin } from './builtins/compare-signedness.js';
@@ -958,6 +978,8 @@ import { armConstantCallPlugin } from './builtins/arm-constant-call.js';
 import { fieldPointerFoldPlugin } from './builtins/field-pointer-fold.js';
 import { newResultTempPlugin } from './builtins/new-result-temp.js';
 import { loopCopySinkPlugin } from './builtins/loop-copy-sink.js';
+import { derefWalkLoopPlugin } from './builtins/deref-walk-loop.js';
+import { shiftDefPlugin } from './builtins/shift-def.js';
 import { paramSlotLocalPlugin } from './builtins/param-slot-local.js';
 import { joinStoreTempPlugin } from './builtins/join-store-temp.js';
 import { stormNextLinkPlugin } from './builtins/storm-next-link.js';
@@ -999,6 +1021,8 @@ export { labelMacroCollisionPlugin } from './builtins/label-macro-collision.js';
 import { gotoLabelCanonicalPlugin, gotoLabelRestorePlugin } from './builtins/label-canonical.js';
 import { labelUnreferencedDropPlugin } from './builtins/label-unreferenced-drop.js';
 import { deadOutSlotStorePlugin } from './builtins/dead-out-slot-store.js';
+import { loopPhiElementCopyPlugin } from './builtins/loop-phi-element-copy.js';
+export { loopPhiElementCopyPlugin, createLoopPhiElementCopyTransformer, type LoopPhiElementCopyOptions } from './builtins/loop-phi-element-copy.js';
 import { sunkStoreHoistPlugin } from './builtins/sunk-store-hoist.js';
 export { sunkStoreHoistPlugin, hoistSunkStores, findSunkStores, functionEnv, createSunkStoreHoistTransformer, type SunkStore, type SunkStoreEnv, type SunkStoreHoistOptions } from './builtins/sunk-store-hoist.js';
 import { adjShiftedPointerPlugin } from './builtins/adj-shifted-pointer.js';
@@ -1141,6 +1165,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   typeNormalizePlugin,         // Cleanup: uint → uint32_t, undefined4 → auto/uint32_t (priority 15)
   pointerCastNormalizePlugin, // Cleanup: (int)&expr → (intptr_t)&expr, (uint32_t)&expr → (uintptr_t)&expr (priority 16)
   pseudoOpLowerPlugin,        // Cleanup: SUB/CONCAT/ZEXT/SEXT/CARRY/SBORROW → exact C++ (priority 20)
+  loopPhiElementCopyPlugin,   // Correctness: a loop-carried value merged into a local array element, stored by no instruction -> a local (priority 4.5)
   sunkStoreHoistPlugin,       // Correctness: a stack element store sunk past a read through its address -> back before the read (priority 21)
   fourccLiteralPlugin,        // Cleanup: (char[4])L'\x...' → "abcd" (priority 25)
   methodCallRewritePlugin,    // C++ method call rewrite (priority 25, disabled by default)
@@ -1157,6 +1182,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   zeroExtendSitePlugin,       // Matching: tag each byte/word mask a MOVZX computed (priority 3)
   zextSitePlugin,             // Correctness: tag each operation whose result the decompiler zero-extended (priority 3)
   signedDivideSitePlugin,     // Matching: tag each division of a cast dividend the original computes with IDIV (priority 3)
+  truncatingRoundSitePlugin,  // Correctness: native-proven x87 truncation under an integer cast (priority 3)
   zeroExtendCastPlugin,       // Matching: a tagged x & 0xffff -> (uint16_t)x where value and type are kept (priority 622)
   compareFormPlugin,          // Fidelity: a comparison in the form its CMP/TEST and Jcc show (priority 3)
   repStringFormPlugin,        // Fidelity: a REP STOS fill as an index loop, a REP MOVS copy as memcpy, from the instruction (priority 4)
@@ -1199,6 +1225,8 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   fieldPointerFoldPlugin,     // Matching: a field-pointer temporary goes; the field updated in place or the record held (priority 62.5)
   newResultTempPlugin,        // Matching: an allocation constructed in place gets a temporary; the result assigned after (priority 62.6)
   loopCopySinkPlugin,         // Matching: a loop-carried copy placed mid-body moves to the end of the body (priority 62.7)
+  derefWalkLoopPlugin,        // Matching: a tail-link walk tests *pp, not a copy reloaded each round (priority 62.77)
+  shiftDefPlugin,             // Matching: a call result every read shifts by one constant is shifted once, where it is stored (priority 62.8)
   paramSlotLocalPlugin,       // Matching: a local packed into a loaded parameter's slot gets its own variable back (priority 940)
   joinStoreTempPlugin,        // Matching: a member every arm stores into is stored once after the join, through a temporary (priority 970)
   pointeeClearMemsetPlugin,   // Matching: zero stores to every member of *P the original makes from one register become the memset (priority 975)
@@ -1264,6 +1292,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   prngTransformPlugin,        // Pattern detection: PRNG (priority 80)
   prngTempCollapsePlugin,     // Cleanup: collapse PRNG temp variables (priority 85)
   seedRollStepPlugin,         // Matching: a seed step written back into its seed is the roll call (priority 619.5)
+  seedRollLimitedPlugin,      // Matching: a draw below a limit, if/else on a power of two, is the limited roll (priority 619.6)
   voidReturnCleanupPlugin,    // Cleanup: trailing return; in void functions (priority 90)
   undefinedGotoLabelPlugin,   // Control-flow: define dropped Ghidra goto targets (priority 95)
   underscoreStorageAliasPlugin, // Declaration: bind `_<global>` to the global and `_<crt>(` to the CRT name (priority 599)

@@ -176,6 +176,58 @@ describe('split-lives', () => {
     assert.strictEqual(flat(run(src, { ...both, outParamWidth: () => null })), flat(run(src, {})));
   });
 
+  const AIPARAM = { D2AiParamStrc: { nDistanceToTarget: 'int', bEngagedInCombat: 'int' } };
+  it('AITHINK_Fn1_TownRogue @005e7d60: the store an out-parameter call is handed moves with its value', () => {
+    const src = `void f(D2UnitStrc *pUnit, D2AiParamStrc *pAiParam) {
+      int nDistToTarget;
+      nDistToTarget = pAiParam->bEngagedInCombat;
+      pAiParam = (D2AiParamStrc *)pAiParam->nDistanceToTarget;
+      pTarget = Find(pUnit, (uint32_t *)&pAiParam, (bool *)&nDistToTarget);
+      if (pTarget != 0 && (int)pAiParam < 0x19) {
+        Change(pUnit, pTarget);
+      }
+    }`;
+    const both = { ...O, argReach: () => ({ lo: 0, hi: 4 }) as never, outParamWidth: () => 4, structFields: AIPARAM };
+    const out = run(src, both);
+    // The local the call fills starts with the field the original stores into the slot.
+    has(out, 'int nAiParam;');
+    has(out, 'nAiParam = pAiParam->nDistanceToTarget;');
+    has(out, 'Find(pUnit, (uint32_t *)&nAiParam, (bool *)&nDistToTarget);');
+    has(out, 'nAiParam < 0x19');
+    assert.ok(!/pAiParam = /.test(flat(out)), out);
+    // A callee that may keep the address: the variable stays one.
+    assert.strictEqual(flat(run(src, { ...both, argReach: () => null })), flat(run(src, {})));
+  });
+
+  it('a store a read also sees stays its own life beside the out-parameter call\'s', () => {
+    const src = `void f(D2UnitStrc *pUnit, D2AiParamStrc *pAiParam) {
+      pAiParam = (D2AiParamStrc *)pAiParam->nDistanceToTarget;
+      g((int)pAiParam);
+      pTarget = Find(pUnit, (uint32_t *)&pAiParam);
+      h((int)pAiParam);
+    }`;
+    const both = { ...O, argReach: () => ({ lo: 0, hi: 4 }) as never, outParamWidth: () => 4, structFields: AIPARAM };
+    const out = run(src, both);
+    // The stored value is read by g: its own life, not the call's in-value.
+    has(out, 'nAiParam2 = pAiParam->nDistanceToTarget; g(nAiParam2);');
+    has(out, 'Find(pUnit, (uint32_t *)&nAiParam); h(nAiParam);');
+  });
+
+  it('AI_Fn1_EvilHole @005fb410: a store of the parameter\'s own type does not pull the out-parameter life back', () => {
+    const src = `void f(D2UnitStrc *pUnit, D2AiParamStrc *pAiParam) {
+      D2AiParamStrc *pDVar1;
+      pDVar1 = (D2AiParamStrc *)pAiParam->nDistanceToTarget;
+      g(pAiParam->pMonStats);
+      pAiParam = pDVar1;
+      Find(pUnit, (uint32_t *)&pAiParam);
+      h((int)pAiParam);
+    }`;
+    const both = { ...O, argReach: () => ({ lo: 0, hi: 4 }) as never, outParamWidth: () => 4, structFields: AIPARAM };
+    const out = run(src, both);
+    has(out, 'Find(pUnit, (uint32_t *)&nAiParam);');
+    has(out, 'h(nAiParam);');
+  });
+
   it('AUTOMAP_DrawXMarker: an index added to a table\'s address is not an address itself', () => {
     const src = `void f(int nX) {
       uint nOffset;

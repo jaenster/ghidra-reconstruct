@@ -1630,6 +1630,14 @@ export function generatePlatformHeader(
     lines.push('    pSeed->nSeedLow = (uint32_t)lNext;');
     lines.push('    return (uint32_t)lNext;');
     lines.push('}');
+    // A draw below a limit, as the game inlines it: zero for a limit that is not positive,
+    // else a mask for a power of two and a remainder for anything else. The limit is an int:
+    // as uint32_t VC8 compiles the body differently (DAMAGE_RollMinMaxDamageRange 0057d760).
+    lines.push('template <class TSeed> static D2_SEED_ROLL_INLINE uint32_t D2_SeedRollLimited(TSeed* pSeed, int nMax) {');
+    lines.push('    if (nMax <= 0) return 0;');
+    lines.push('    if ((nMax - 1) & nMax) return D2_SeedRoll(pSeed) % (uint32_t)nMax;');
+    lines.push('    return D2_SeedRoll(pSeed) & (uint32_t)(nMax - 1);');
+    lines.push('}');
     lines.push('');
   }
 

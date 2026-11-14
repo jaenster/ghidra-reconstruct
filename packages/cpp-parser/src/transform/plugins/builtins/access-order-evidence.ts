@@ -2,7 +2,8 @@
  * The original's memory accesses per line of the parsed text, as the reconstruct side
  * extracts them (reconstruct extract/access-order.ts) and keys them by line of the
  * wrapper the body is parsed in (codegen/access-order-spec.ts). Read by
- * `base-register-load`, `store-order`, `array-fill-collapse` and `scalar-piece-arithmetic`.
+ * `base-register-load`, `store-order`, `array-fill-collapse`, `scalar-piece-arithmetic` and
+ * `loop-phi-element-copy`.
  */
 
 import { NodeKind } from '../../../ast/kinds.js';

@@ -2812,13 +2812,20 @@ export class CppEmitter {
   }
 
   private emitAssignExpr(node: AssignExpr): void {
-    this.emitNode(node.left);
+    const precedence = OPERATOR_PRECEDENCE[node.operator] ?? 17;
+    // An assignment's left grammar is a logical-or-expression. A conditional
+    // or another assignment on the left needs parentheses even though `?:`
+    // has nominally higher precedence: `(c ? a : b) = v` and `c ? a : b = v`
+    // select different assignment targets.
+    this.emitExprWithPrecedence(node.left, OPERATOR_PRECEDENCE['||']);
     if (this.style.spaceAroundOperators) {
       this.write(' ' + node.operator + ' ');
     } else {
       this.write(node.operator);
     }
-    this.emitNode(node.right);
+    // Assignment associates right-to-left; a comma expression on the right
+    // still needs grouping or it escapes this assignment.
+    this.emitExprWithPrecedence(node.right, precedence);
   }
 
   private emitCommaExpr(node: CommaExpr): void {

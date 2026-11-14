@@ -54,8 +54,8 @@
  *     (UNITSND_GetSkillCastSound's `int` into SOUND_PlaySound's `eD2Sounds`);
  *   - the original shows the nested evaluation: before each inner CALL, the pushes of its
  *     own arguments and of the outer arguments right of it (up to the previous inner
- *     call's argument, which must hold at least one stack slot: otherwise both forms
- *     push alike); each inner CALL straight after the previous one; the outer CALL
+ *     call's argument; right of the first inner call at least one stack slot, otherwise
+ *     both forms push alike); each inner CALL straight after the previous one; the outer CALL
  *     straight after the last, with exactly the pushes of the arguments up to it.
  *
  * A temporary whose one read is in a later temporary's call goes in with it, as a chain
@@ -87,7 +87,7 @@
 
 import { NodeKind } from '../../../ast/kinds.js';
 import type {
-  ASTNode, AssignExpr, BinaryExpr, CallExpr, CompoundStmt, DeclStmt, Expression, ExprStmt, FunctionDecl,
+  ASTNode, AssignExpr, BinaryExpr, CallExpr, SubscriptExpr, CompoundStmt, DeclStmt, Expression, ExprStmt, FunctionDecl,
   Identifier, IfStmt, MemberExpr, ParenExpr, ReturnStmt, Statement, UnaryExpr, VariableDecl, CStyleCastExpr, ParameterDecl,
 } from '../../../ast/nodes.js';
 import { traverseAST, getChildren } from '../../../ast/visitor.js';
@@ -572,21 +572,40 @@ function wordArithmetic(e: Expression, ctx: Ctx): { shape: TypeShape; global: bo
     if (lit.suffix || lit.value >= 0x80000000n) return null;
     return { shape: { base: 'int', stars: 0, isConst: false }, global: false };
   }
-  if (u.kind === NodeKind.Identifier) {
-    const name = (u as Identifier).name;
-    const l = ctx.locals.get(name);
+  // `G + -100`: a negated constant below 2^31 is an int as well.
+  if (u.kind === NodeKind.UnaryExpr && (u as UnaryExpr).operator === '-'
+    && unwrap((u as UnaryExpr).operand).kind === NodeKind.IntegerLiteral) {
+    return wordArithmetic((u as UnaryExpr).operand, ctx);
+  }
+  if (u.kind === NodeKind.Identifier || u.kind === NodeKind.QualifiedId) {
+    // A global may be spelled with its namespace (`D2Client::UI::Inv::gnPanelOffsetX`).
+    const name = nameOf(u);
+    if (!name) return null;
+    const l = u.kind === NodeKind.Identifier ? ctx.locals.get(name) : undefined;
     let sh: TypeShape | null;
     let global = false;
     if (l) {
       if (l.addressed || l.array) return null;
       sh = declShape(l, ctx);
     } else {
-      const g = ctx.opts.globalTypes?.[name];
+      const g = globalSpelling(name, ctx);
       sh = g ? shapeOfSpelling(g, ctx.resolve) : null;
       global = true;
     }
     if (!sh || sh.stars !== 0 || !WORD_INTEGERS.has(sh.base)) return null;
     return { shape: { base: sh.base.startsWith('unsigned') ? 'unsigned int' : 'int', stars: 0, isConst: false }, global };
+  }
+  // `NPCButtonArray[i + n * 4]`: an element of a global array of 32-bit integers, at an
+  // index of names and constants (INV_DrawNpcButtonTooltip 004886c0). A global read.
+  if (u.kind === NodeKind.SubscriptExpr) {
+    const base = unwrap((u as SubscriptExpr).array);
+    const baseName = nameOf(base);
+    if (!baseName || (base.kind === NodeKind.Identifier && ctx.locals.has(baseName))) return null;
+    const g = globalSpelling(baseName, ctx);
+    if (!g || !/\]\s*$/.test(g)) return null;
+    const sh = shapeOfSpelling(g, ctx.resolve);
+    if (!sh || sh.stars !== 1 || !WORD_INTEGERS.has(sh.base) || !plainIndex((u as SubscriptExpr).index, ctx)) return null;
+    return { shape: { base: sh.base.startsWith('unsigned') ? 'unsigned int' : 'int', stars: 0, isConst: false }, global: true };
   }
   if (u.kind === NodeKind.BinaryExpr && WORD_ARITH.has((u as BinaryExpr).operator)) {
     const a = wordArithmetic((u as BinaryExpr).left, ctx);
@@ -596,6 +615,23 @@ function wordArithmetic(e: Expression, ctx: Ctx): { shape: TypeShape; global: bo
     return { shape: { base: uns ? 'unsigned int' : 'int', stars: 0, isConst: false }, global: a.global || b.global };
   }
   return null;
+}
+
+/** An array index of integer names (locals whose address is never taken, globals) and constants under `+ - * <<`. */
+function plainIndex(e: Expression, ctx: Ctx): boolean {
+  const u = unwrap(e);
+  if (u.kind === NodeKind.IntegerLiteral) return true;
+  if (u.kind === NodeKind.Identifier || u.kind === NodeKind.QualifiedId) {
+    const name = nameOf(u);
+    if (!name) return false;
+    const l = u.kind === NodeKind.Identifier ? ctx.locals.get(name) : undefined;
+    if (l) return !l.addressed && !l.array;
+    return !!globalSpelling(name, ctx);
+  }
+  if (u.kind === NodeKind.BinaryExpr && ['+', '-', '*', '<<'].includes((u as BinaryExpr).operator)) {
+    return plainIndex((u as BinaryExpr).left, ctx) && plainIndex((u as BinaryExpr).right, ctx);
+  }
+  return false;
 }
 
 /** Value range of the integers narrower than 32 bits. */
@@ -1089,7 +1125,11 @@ function evidenceShows(calls: Temp[], call: CallExpr, outer: CallSiteFact, ctx: 
     const f = factFor(c.stmt, calleeName(c.call!.callee)!, ctx);
     if (!f || !f.slots || f.slots.length !== c.call!.arguments.length) return false;
     const between = argSlots(outer, c.arg + 1, j === 0 ? n - 1 : calls[j - 1].arg);
-    if (between === 0) return false;
+    // The first inner call tells the forms apart: printed, its CALL comes before every
+    // push. A later one may have no push of its own before it (a register argument beside
+    // the previous call's, MAINMENU_OnPressSubmitEmailAddress 00437620); its place right
+    // after the previous CALL is then what the facts show.
+    if (between === 0 && j === 0) return false;
     if (f.pushes !== between + argSlots(f, 0, f.slots.length - 1)) return false;
     if (j > 0 && f.prev !== facts[j - 1].at) return false;
     facts.push(f);

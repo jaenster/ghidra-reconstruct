@@ -51,15 +51,29 @@
  *   own(V,T[,N])         V's initializer is a dead copy Ghidra merged into it: V is
  *                        declared as a T of its own (named N), without it; a cast of V or
  *                        &V to T or T* goes, and the declaration moves onto V's first
- *                        store when that is a plain store in the same block.
+ *                        store when that is a plain store in the same block. Refused when
+ *                        the initializer can be read: a path reaches a read of V, or a
+ *                        call handed &V that is not known to store all of V first.
+ *   own(V,T[,N],live)    the same, dropping an initializer that IS read: only where a VC8
+ *                        compile matched the original's bytes with it dropped, so the
+ *                        original left V uninitialised there too (the permuter writes
+ *                        `live` on a MATCH only).
  *   guards(K[,i])        the i-th early return guarded by `!(c1 && ... && cn)` (or
  *                        `!c1 || ... || !cn`) becomes two: c1..cK, then the rest.
  *   merge-guards([i])    the i-th pair of adjacent early returns of one value becomes one
  *                        guard of both conditions.
  *   retval(V,K)          `V = K;` that ends an arm falling through to `return V;` becomes
  *                        `return K;`.
+ *   branchret(V)         an integer V loaded from a typed field, conditionally
+ *                        incremented and returned, becomes two direct branch returns.
+ *                        Field/local types agree, storage-width conversion stays, and
+ *                        the guard is a nonvolatile integer field test.
  *   width(V,T)           local V is declared T; a cast of V to T, a cast to V's old type
  *                        stored into V, and a cast of V to T's width in a truth test go.
+ *   nullfault32()        the sole `*(volatile uint8_t*)0 = 0;` in a void, no-argument
+ *                        function (optionally followed by a bare return) becomes a
+ *                        volatile dword null fault through a local.
+ *                        This is a VC8 x86 source spelling; null dereference remains UB.
  *   boolflag(V)          the bool local V, stored only `true`/`false` and read only as a
  *                        condition (an if/loop/`?:` test, an operand of `!`, `&&`, `||`), is
  *                        declared BOOL and stores 1/0: the original's flag lives in a 32-bit
@@ -177,6 +191,17 @@
  *
  * Call and string-instruction forms (`[,i]` picks the i-th site, default: the only one):
  *
+ *   recordwalk(P[,i])    a typed record pointer advanced at the end of a for loop
+ *                        through an interior byte-field address plus a size is carried
+ *                        as a byte cursor, with P rebound at each body entry. The
+ *                        existing interior-address member store supplies the cursor;
+ *                        its address and the late size expression stay in place.
+ *                        Requires a known struct layout, a determinate incoming P,
+ *                        no pointer-variable escape or reference binding, no read of
+ *                        its advanced value outside the body, and no alternate entry,
+ *                        loop-control use, nested loop or extra pointer write.
+ *                        No hardcoded record stride; unnamed bytes must be members
+ *                        actually declared by the header emitter.
  *   nestcall(V[,i])      the store `V = F(...);` (or `T V = F(...);`) whose next statement
  *                        reads V once - as a whole call argument, or as the object of `->`
  *                        or `.` - is written with the call in that place, the store gone (a
@@ -281,6 +306,11 @@
  *                        outside any loop, the address of a local named nowhere before that
  *                        store - a loop copying within one buffer (Fog's D2Net 0040b0c0
  *                        smears zeros forward) is no memcpy.
+ *   nullfield(E,T,F)     `if (C) return &E->F; return (R*)K;` becomes a
+ *                        single integer/offsetof return. Requires a pure C, a plain
+ *                        E of type T*, an exact field offset and result type from the
+ *                        program's type tables, and the literal fallback equal to the
+ *                        field offset. Refuses any other body shape.
  *   dec(V,K)             before the first condition that reads `V - K`, write `V -= K;`
  *                        and use V at every subsequent `V - K` read. V must be one
  *                        unaliased 32-bit integer local, have at least two such reads,
@@ -310,6 +340,32 @@
  *                        `test r, r` (DRLGLOGIC_PopulateGridCoordIndices 0066c580, a flags
  *                        word). Per function: where the original's JS/JNS reuses the flags
  *                        of an arithmetic instruction instead, the mask costs a `test`.
+ *   zinit(N)             the local N declared `T N = {0};` is declared bare and cleared with
+ *                        `memset(&N, 0, sizeof(N));`. `{0}` stores each member and VC8 drops a
+ *                        member's zero store that a later store overwrites; the memset keeps
+ *                        every store, from one zeroed register (CLIENT_SendMonsterAttackMessage
+ *                        0046cab0, NET_GetLocalIPAddressString 0052afe0).
+ *   znew(P[,N])          after the one allocation stored to P, the first run of stores through
+ *                        P loses its zero stores (each the first store to its place in the run)
+ *                        to a `memset(P, 0, sizeof(*P));` (or N bytes) ahead of the run: the
+ *                        original cleared the new object, then filled it, and VC8 kept the
+ *                        zeroed register for the rest (SUNITEVENT_Alloc 005c0ad0, AllocTimer
+ *                        0054f520). Refused when a call or a store of P stands between the
+ *                        allocation and the run (a null test that leaves is admitted), or the
+ *                        run holds no zero store.
+ *   swclamp(V)           `if (V < 0 || V >= E) { V = K; }` directly before `switch (V)` is
+ *                        written `switch (F_ClampIndex(V))`, an inline helper with two returns
+ *                        defined once in the unit ahead of the function (Vc8FormSite.prefix):
+ *                        VC8 biases the jump table with `sub` only for an inline call's result
+ *                        (SPAWN_IsExcludedMonsterClass 0054e3a0). Refused when V is read after
+ *                        the check, or E reads V, calls or stores.
+ *   retbase(P,N)         the function's chain of guards `if (C) { return P + K; }` (or `return
+ *                        P;`), at least two, followed by a tail that ends in `exit`, is written
+ *                        as one if/else chain storing each K (0 for P alone) to a new local N,
+ *                        the tail as the last else, and `return N + P;`: the original loads
+ *                        the base, zero too, and adds the parameter in each arm
+ *                        (CHATDLG_GetLadderFilterForTab 0043f150). P must be a parameter
+ *                        never stored and whose address is not taken.
  *   switch(X[,i])        the i-th `if (X != K1) { if (X == K2 [&& R]) B2 } else B1` (or
  *                        `if (X == K1) B1 else if (X == K2 [&& R]) B2`), K1 and K2 two
  *                        constants, is written `switch (X) { case K2: { [if (R)] B2 }
@@ -324,8 +380,8 @@
 
 import { NodeKind, isExpression, isType } from '../../../ast/kinds.js';
 import type {
-  ASTNode, AssignExpr, BinaryExpr, CallExpr, CompoundStmt, ConditionalExpr, CStyleCastExpr, DeclStmt, Expression,
-  ExprStmt, ForStmt, FunctionDecl, Identifier, IfStmt, IntegerLiteralExpr, MemberExpr, ParenExpr, ReturnStmt, Statement, SubscriptExpr, TranslationUnit,
+  ASTNode, AssignExpr, BinaryExpr, CallExpr, CompoundStmt, ConditionalExpr, CStyleCastExpr, DeclStmt, Expression, SwitchStmt,
+  ExprStmt, ForStmt, FunctionDecl, Identifier, IfStmt, IntegerLiteralExpr, MemberExpr, ParenExpr, PostfixExpr, ReturnStmt, Statement, SubscriptExpr, TranslationUnit,
   TypeNode, UnaryExpr, VariableDecl,
 } from '../../../ast/nodes.js';
 import { parse } from '../../../parser/index.js';
@@ -334,20 +390,27 @@ import { cloneNode } from '../../transformer.js';
 import { buildFunctionFlow } from '../../cfg/index.js';
 import { selectPairedArguments, SelectRefused, type SelectArgumentOptions } from './select-argument.js';
 import { createExprShape } from './expr-shape.js';
+import { shapeOfNode, shapeOfSpelling, sameShape } from './call-arg-cast.js';
+import { isPure } from './pseudo-op-lower.js';
 import { localTypesOf } from './compare-form.js';
 import { calleeName, scopedLookup } from './call-arg-cast.js';
 import { coalesceLocal } from './copy-coalesce.js';
+import { initializerIsDead } from './store-liveness.js';
+import { recordWalk, type RecordWalkTables } from './record-walk.js';
 
 export type Vc8Form =
+  | { op: 'nullfault32' }
   | { op: 'seq'; targets: string[]; index?: number }
   | { op: 'fold'; name: string }
   | { op: 'join'; into: string; from: string }
   | { op: 'coalesce'; name: string; from?: string }
+  | { op: 'recordwalk'; name: string; index: number }
   | { op: 'cache'; expr: string; name: string; type?: string; anchor?: string; count?: number }
-  | { op: 'own'; name: string; type: string; rename?: string }
+  | { op: 'own'; name: string; type: string; rename?: string; live?: boolean }
   | { op: 'guards'; split: number; index: number }
   | { op: 'merge-guards'; index: number }
   | { op: 'retval'; name: string; value: string }
+  | { op: 'branchret'; name: string }
   | { op: 'width'; name: string; type: string }
   | { op: 'boolflag'; name: string }
   | { op: 'retwiden'; name: string }
@@ -385,11 +448,16 @@ export type Vc8Form =
   | { op: 'onecall'; cond: string; name: string; index: number }
   | { op: 'roundup'; name: string; param?: string }
   | { op: 'swmerge'; name: string; index: number }
+  | { op: 'nullfield'; expr: string; struct: string; field: string }
   | { op: 'opas'; updates: Array<{ name: string; operator: '+' | '-' | '>>'; constant: string }> }
   | { op: 'dec'; name: string; amount: number }
   | { op: 'range'; cond: string; index: number }
   | { op: 'castout'; expr: string; index: number }
-  | { op: 'signbit'; cond: string; index: number };
+  | { op: 'signbit'; cond: string; index: number }
+  | { op: 'zinit'; name: string }
+  | { op: 'znew'; name: string; size?: string }
+  | { op: 'swclamp'; name: string }
+  | { op: 'retbase'; param: string; name: string };
 
 /**
  * A header inline that reads one field of a struct through a pointer, or returns a
@@ -410,7 +478,19 @@ export interface Vc8Accessor {
 }
 
 /** The tables vc8-form reads: select-argument's, and the accessors `acc` writes. */
-export type Vc8FormTables = SelectArgumentOptions & { accessors?: Vc8Accessor[] };
+export type Vc8FormTables = SelectArgumentOptions & RecordWalkTables & {
+  accessors?: Vc8Accessor[];
+  /**
+   * Bytes a callee stores through argument `index` (a non-null `&local`) on every path
+   * before reading it, or null: `own` drops an initializer only a call like that sees.
+   */
+  outParamWidth?: (callee: string, index: number) => number | null;
+  /** Bytes a value of the spelled type occupies, or null. */
+  typeSize?: (spelling: string) => number | null;
+  structFieldOffsets?: Record<string, Record<string, number>>;
+  targetLanguageId?: string;
+  targetPointerSize?: number;
+};
 
 export interface Vc8FormSite {
   form: Vc8Form;
@@ -429,9 +509,9 @@ export interface Vc8FormOptions {
   selectTables?: Vc8FormTables;
 }
 
-const OPS = new Set(['seq', 'fold', 'join', 'coalesce', 'cache', 'own', 'guards', 'merge-guards', 'retval', 'width', 'boolflag', 'retwiden', 'arms',
+const OPS = new Set(['nullfault32', 'seq', 'fold', 'join', 'coalesce', 'recordwalk', 'cache', 'own', 'guards', 'merge-guards', 'retval', 'branchret', 'width', 'boolflag', 'retwiden', 'arms',
   'nest', 'merge-tail', 'tailguard', 'tailcopy', 'continue', 'dup', 'tarms', 'zero', 'nonzero', 'bool', 'cmp', 'swap', 'ifsel', 'clamp', 'split', 'select', 'decl', 'unselect', 'tsel', 'hoist',
-  'nestcall', 'fill', 'elems', 'copy', 'shift', 'ptrwalk', 'rowptr', 'acc', 'retvar', 'onecall', 'roundup', 'swmerge', 'switch', 'dec', 'opas', 'range', 'castout', 'signbit']);
+  'nestcall', 'fill', 'elems', 'copy', 'shift', 'ptrwalk', 'rowptr', 'acc', 'retvar', 'onecall', 'roundup', 'swmerge', 'switch', 'dec', 'opas', 'range', 'castout', 'signbit', 'nullfield', 'zinit', 'znew', 'swclamp', 'retbase']);
 
 /** Split at commas outside brackets and parentheses. For cache, the third argument is a
  * type, so commas inside its template arguments also belong to that argument. */
@@ -457,12 +537,13 @@ function splitArgs(s: string, cacheType = false): string[] {
  * wrong argument count.
  */
 export function parseVc8Form(text: string): Vc8Form | undefined {
-  const m = /^\s*([a-z-]+)\s*\(([\s\S]*)\)\s*$/.exec(text);
+  const m = /^\s*([a-z][a-z0-9-]*)\s*\(([\s\S]*)\)\s*$/.exec(text);
   if (!m || !OPS.has(m[1])) return undefined;
   const args = splitArgs(m[2], m[1] === 'cache');
   const anchor = args.length > 0 && args[args.length - 1].startsWith('@') ? args.pop()!.slice(1) : undefined;
   const int = (s: string | undefined, d: number) => (s === undefined || s === '' ? d : /^\d+$/.test(s) ? Number(s) : NaN);
   switch (m[1]) {
+    case 'nullfault32': return args.length === 0 && !anchor ? { op: 'nullfault32' } : undefined;
     case 'seq': {
       // `seq(a,b,@N)`: the N-th run, when several store these.
       const n = anchor === undefined ? 0 : /^\d+$/.test(anchor) ? Number(anchor) : NaN;
@@ -471,6 +552,9 @@ export function parseVc8Form(text: string): Vc8Form | undefined {
     case 'fold': return args.length === 1 && !anchor ? { op: 'fold', name: args[0] } : undefined;
     case 'coalesce': return (args.length === 1 || args.length === 2) && !anchor && args.every(a => /^[A-Za-z_]\w*$/.test(a))
       ? { op: 'coalesce', name: args[0], ...(args[1] ? { from: args[1] } : {}) } : undefined;
+    case 'nullfield':
+      return !anchor && args.length === 3 && args[0] !== '' && /^[A-Za-z_]\w*$/.test(args[1]) && /^[A-Za-z_]\w*$/.test(args[2])
+        ? { op: 'nullfield', expr: args[0], struct: args[1], field: args[2] } : undefined;
     case 'join': return args.length === 2 && !anchor && args.every(a => /^[A-Za-z_]\w*$/.test(a)) && args[0] !== args[1]
       ? { op: 'join', into: args[0], from: args[1] } : undefined;
     case 'cache':
@@ -481,9 +565,14 @@ export function parseVc8Form(text: string): Vc8Form | undefined {
         return { op: 'cache', expr: args[0], name: args[1], type: args[2], anchor: args[3].slice(1), count: int(args[4], NaN) };
       }
       return undefined;
-    case 'own':
-      if (anchor || args.length < 2 || args.length > 3) return undefined;
-      return { op: 'own', name: args[0], type: args[1], rename: args[2] };
+    case 'own': {
+      // `own(V,T[,N],live)`: the initializer is read, and a compile matched the original
+      // with it dropped all the same.
+      const live = args.length > 2 && args[args.length - 1] === 'live';
+      const rest = live ? args.slice(0, -1) : args;
+      if (anchor || rest.length < 2 || rest.length > 3) return undefined;
+      return { op: 'own', name: rest[0], type: rest[1], rename: rest[2], ...(live ? { live: true } : {}) };
+    }
     case 'guards': {
       const k = int(args[0], NaN), i = int(args[1], 1);
       return !anchor && args.length <= 2 && k >= 1 && i >= 1 ? { op: 'guards', split: k, index: i } : undefined;
@@ -493,6 +582,7 @@ export function parseVc8Form(text: string): Vc8Form | undefined {
       return !anchor && args.length <= 1 && i >= 1 ? { op: 'merge-guards', index: i } : undefined;
     }
     case 'retval': return args.length === 2 && !anchor ? { op: 'retval', name: args[0], value: args[1] } : undefined;
+    case 'branchret': return args.length === 1 && !anchor && /^[A-Za-z_]\w*$/.test(args[0]) ? { op: 'branchret', name: args[0] } : undefined;
     case 'width': return args.length === 2 && !anchor ? { op: 'width', name: args[0], type: args[1] } : undefined;
     case 'boolflag': case 'retwiden':
       return args.length === 1 && !anchor && /^[A-Za-z_]\w*$/.test(args[0]) ? { op: m[1], name: args[0] } as Vc8Form : undefined;
@@ -516,7 +606,7 @@ export function parseVc8Form(text: string): Vc8Form | undefined {
       // `rowptr(X[I],N,T)`, `rowptr(X[I],N,T,@A)`.
       if (args.length !== 3 || !/\]$/.test(args[0]) || !/^[A-Za-z_]\w*$/.test(args[1]) || args[2] === '') return undefined;
       return { op: 'rowptr', expr: args[0], name: args[1], type: args[2], ...(anchor ? { anchor } : {}) };
-    case 'nestcall': case 'fill': case 'elems': case 'copy': {
+    case 'nestcall': case 'fill': case 'elems': case 'copy': case 'recordwalk': {
       const i = int(args[1], 0);
       if (anchor || args.length < 1 || args.length > 2 || !(i >= 0) || !/^[A-Za-z_]\w*$/.test(args[0])) return undefined;
       return { op: m[1], name: args[0], index: i } as Vc8Form;
@@ -536,6 +626,13 @@ export function parseVc8Form(text: string): Vc8Form | undefined {
       if (anchor || args.length < 1 || args.length > 2 || !(i >= 1) || !/^[A-Za-z_]\w*$/.test(args[0])) return undefined;
       return { op: 'swmerge', name: args[0], index: i };
     }
+    case 'zinit': case 'swclamp':
+      return !anchor && args.length === 1 && /^[A-Za-z_]\w*$/.test(args[0]) ? { op: m[1], name: args[0] } as Vc8Form : undefined;
+    case 'znew':
+      if (anchor || args.length < 1 || args.length > 2 || !/^[A-Za-z_]\w*$/.test(args[0]) || (args.length === 2 && !/^(?:0x[0-9a-fA-F]+|[1-9]\d*)$/.test(args[1]))) return undefined;
+      return { op: 'znew', name: args[0], ...(args.length === 2 ? { size: args[1] } : {}) };
+    case 'retbase':
+      return !anchor && args.length === 2 && args.every(a => /^[A-Za-z_]\w*$/.test(a)) && args[0] !== args[1] ? { op: 'retbase', param: args[0], name: args[1] } : undefined;
     case 'roundup': {
       const id = /^[A-Za-z_]\w*$/;
       if (anchor || args.length < 1 || args.length > 2 || !id.test(args[0]) || (args.length === 2 && !id.test(args[1]))) return undefined;
@@ -824,6 +921,28 @@ const refuse = (why: string): never => { throw new Refuse(why); };
 
 // ---------------------------------------------------------------------------------------
 // The forms
+
+/** Exact CrashGame fault spelling. This is a VC8 x86 codegen choice, not a portable
+ * C++ equivalence: dereferencing null remains undefined behavior. */
+function doNullfault32(fn: FunctionDecl): void {
+  if (text(fn.returnType) !== 'void' || fn.parameters.length !== 0 || fn.isVariadic) refuse('not a void no-argument function');
+  const statements = fn.body!.statements;
+  const trailingReturn = statements.length === 2 && statements[1].kind === NodeKind.ReturnStmt
+    && !(statements[1] as ReturnStmt).value;
+  if (!(statements.length === 1 || trailingReturn) || statements[0].kind !== NodeKind.ExprStmt)
+    refuse('not a sole fault store');
+  const assignment = unparen((statements[0] as ExprStmt).expression);
+  if (assignment.kind !== NodeKind.AssignExpr || (assignment as AssignExpr).operator !== '=') refuse('not a plain fault store');
+  const a = assignment as AssignExpr;
+  if (text(a.right) !== '0') refuse('the stored value is not zero');
+  const lhs = unparen(a.left);
+  if (lhs.kind !== NodeKind.UnaryExpr || (lhs as UnaryExpr).operator !== '*') refuse('not a dereference');
+  const pointer = unparen((lhs as UnaryExpr).operand);
+  if (pointer.kind !== NodeKind.CStyleCastExpr || text((pointer as CStyleCastExpr).type) !== 'volatileuint8_t*')
+    refuse('not a volatile byte pointer');
+  if (!['0', '0x0'].includes(text((pointer as CStyleCastExpr).expression))) refuse('not a null address');
+  fn.body!.statements = parseStmts('volatile uint32_t* pNull = 0; *pNull = (uint32_t)(uintptr_t)pNull;');
+}
 
 /** What a statement stores to for seq: a plain or compound store, ++/--, or an initialized declaration. */
 function seqLhs(s: Statement): Expression | undefined {
@@ -1123,6 +1242,11 @@ function doCoalesce(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'coalesce' }>): 
   fn.body = (r as FunctionDecl).body;
 }
 
+function doRecordwalk(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'recordwalk' }>): void {
+  const why = recordWalk(fn, f.name, f.index, selectTables);
+  if (why) refuse(why);
+}
+
 function doJoin(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'join' }>): void {
   const body = fn.body as CompoundStmt;
   const target = body.statements
@@ -1351,6 +1475,11 @@ function doOwn(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'own' }>): void {
       const init = unparen(d.initializer as Expression);
       const simple = (e: Expression): boolean => { e = unparen(e); return isId(e) || e.kind === NodeKind.IntegerLiteral || e.kind === NodeKind.NullptrLiteral || (e.kind === NodeKind.CStyleCastExpr && simple((e as CStyleCastExpr).expression)); };
       if (!simple(init)) refuse(`${f.name}'s initializer has effects`);
+      // The form says the value is a dead copy; dropping one something reads changes what
+      // the program computes, whatever the tag claims.
+      const width = selectTables?.typeSize?.(text(d.type));
+      const out = selectTables?.outParamWidth && width ? { outWidth: selectTables.outParamWidth, width } : undefined;
+      if (!f.live && !initializerIsDead(fn.body!, b, k, f.name, out)) refuse(`${f.name}'s initializer is read`);
     }
     d.initializer = null;
     d.type = parseType(f.type);
@@ -1463,6 +1592,100 @@ function doRetval(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'retval' }>): void
     }
   }
   refuse(`no ${f.name} = ${f.value} falling through to return ${f.name}`);
+}
+
+/** Re-form a typed load, conditional local increment, and return as branch returns. */
+function doBranchret(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'branchret' }>): void {
+  const st = fn.body?.statements;
+  if (!st || (st.length !== 3 && st.length !== 4) || !intType(text(fn.returnType), false))
+    refuse('not an integral load, conditional increment, and return');
+  const d = declOf(st[0]);
+  if (!d || d.name.name !== f.name || fn.parameters.some(p => p.name?.name === f.name)
+      || d.specifiers.length || d.attributes.length || d.directInit || d.copyListInit || d.bitWidth
+      || !d.initializer || d.initializer.kind === NodeKind.InitListExpr)
+    refuse(`${f.name} is not one plain initialized local`);
+  const localType = text(d.type);
+  const local = intType(localType, false);
+  if (!local || localType === 'bool' || /const|volatile/.test(localType)) refuse('local is not a mutable integer');
+  const resolve = (name: string) => selectTables?.typedefTargets?.[name];
+  const shapeOf = createExprShape(localTypesOf(fn), { resolve });
+  const volatileType = (t: string): boolean => {
+    for (let i = 0; i < 8; i++) {
+      if (/volatile/.test(t)) return true;
+      const base = norm(t).replace(/\*/g, '').replace(/^const/, '');
+      const next = resolve(base);
+      if (!next) return false;
+      t = next;
+    }
+    return true;
+  };
+  // An exact field of a nonvolatile pointer parameter: no guessed field-name type,
+  // operator->, indirect getter, or volatile read may be reordered with the guard.
+  const fieldType = (expr: Expression): string | undefined => {
+    const e = unparen(expr);
+    if (e.kind !== NodeKind.MemberExpr) return undefined;
+    const m = e as MemberExpr, object = unparen(m.object);
+    if (!m.isArrow || !isId(object) || !isId(m.member)) return undefined;
+    const parameters = fn.parameters.filter(p => p.name?.name === (object as Identifier).name);
+    if (parameters.length !== 1 || volatileType(text(parameters[0].type))) return undefined;
+    const shape = shapeOf(object);
+    return shape?.stars === 1 ? selectTables?.structFields?.[shape.base]?.[(m.member as Identifier).name] : undefined;
+  };
+  const source = unparen(d.initializer as Expression);
+  const sourceType = fieldType(source);
+  const loaded = sourceType && intType(sourceType, false);
+  if (!loaded || loaded.w !== local.w || loaded.r.lo !== local.r.lo || loaded.r.hi !== local.r.hi)
+    refuse('loaded field and local must have the same integer type');
+  const guard = st[1];
+  if (guard.kind !== NodeKind.IfStmt || (guard as IfStmt).elseBranch || (guard as IfStmt).init || (guard as IfStmt).isConstexpr)
+    refuse('not a single conditional arm');
+  const gateOf = (expr: Expression): { field: Expression; nonzero: boolean } | undefined => {
+    const e = unparen(expr);
+    if (e.kind === NodeKind.UnaryExpr && (e as UnaryExpr).operator === '!') {
+      const inner = gateOf((e as UnaryExpr).operand);
+      return inner && { ...inner, nonzero: !inner.nonzero };
+    }
+    if (e.kind === NodeKind.BinaryExpr && ['==', '!='].includes((e as BinaryExpr).operator)) {
+      const c = e as BinaryExpr;
+      const field = constValue(c.right) === 0n ? c.left : constValue(c.left) === 0n ? c.right : undefined;
+      const type = field && fieldType(field);
+      return type && intType(type, false) ? { field: field!, nonzero: c.operator === '!=' } : undefined;
+    }
+    const type = fieldType(e);
+    return type && intType(type, false) ? { field: e, nonzero: true } : undefined;
+  };
+  const gate = gateOf((guard as IfStmt).condition);
+  if (!gate) refuse('guard is not a typed nonvolatile integer field test');
+  const returnsLocal = (stmt: Statement): boolean => stmt.kind === NodeKind.ReturnStmt
+    && !!(stmt as ReturnStmt).value && isId(unparen((stmt as ReturnStmt).value!), f.name);
+  const incrementsLocal = (stmt: Statement): boolean => {
+    if (stmt.kind !== NodeKind.ExprStmt) return false;
+    const e = unparen((stmt as ExprStmt).expression);
+    if ((e.kind === NodeKind.PostfixExpr || e.kind === NodeKind.UnaryExpr) && (e as UnaryExpr).operator === '++')
+      return isId(unparen((e as UnaryExpr).operand), f.name);
+    if (e.kind !== NodeKind.AssignExpr || !isId(unparen((e as AssignExpr).left), f.name)) return false;
+    const a = e as AssignExpr, one = (x: Expression): boolean => {
+      const l = unparen(x);
+      return l.kind === NodeKind.IntegerLiteral && (l as IntegerLiteralExpr).value === 1n && !(l as IntegerLiteralExpr).suffix;
+    };
+    if (a.operator === '+=') return one(a.right);
+    const r = unparen(a.right);
+    return a.operator === '=' && r.kind === NodeKind.BinaryExpr && (r as BinaryExpr).operator === '+'
+      && isId(unparen((r as BinaryExpr).left), f.name) && one((r as BinaryExpr).right);
+  };
+  const arm = (guard as IfStmt).thenBranch;
+  const statements = arm.kind === NodeKind.CompoundStmt ? (arm as CompoundStmt).statements : [arm];
+  if (statements.length !== 1) refuse('conditional arm is not one statement');
+  const positive = st.length === 3;
+  if (positive ? !incrementsLocal(statements[0]) || !returnsLocal(st[2])
+      : !returnsLocal(statements[0]) || !incrementsLocal(st[2]) || !returnsLocal(st[3]))
+    refuse('arm, increment, and return do not describe the same local');
+  const condition = `${gate.nonzero === positive ? '' : '!'}${emit(gate.field as never)}`;
+  const load = emit(source as never);
+  const type = emit(d.type as never);
+  // The inner cast gives a bitfield the local's arithmetic type. The outer cast
+  // preserves a narrow local's wrap before the function's own return conversion.
+  fn.body!.statements = parseStmts(`if (${condition}) { return (${type})((${type})${load} + 1); } return (${type})${load};`);
 }
 
 const WIDTH: Record<string, number> = {
@@ -3415,6 +3638,58 @@ function doAcc(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'acc' }>): void {
   prefixUsed.add(acc.definition);
 }
 
+/** Preserve a null-base field address as the exact x86 integer offset VC8 used. */
+function doNullfield(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'nullfield' }>): void {
+  if (!/^x86:LE:32:/.test(selectTables?.targetLanguageId ?? '') || selectTables?.targetPointerSize !== 4)
+    refuse('nullfield requires a 32-bit x86 target');
+  const statements = fn.body?.statements;
+  if (!statements || statements.length !== 2 || statements[0].kind !== NodeKind.IfStmt || statements[1].kind !== NodeKind.ReturnStmt)
+    refuse('body is not one if and one fallback return');
+  const guard = statements[0] as IfStmt;
+  if (guard.elseBranch || !isPure(guard.condition) || hasCall(guard.condition)) refuse('guard has an else or side effects');
+  const arm = soleReturn(guard.thenBranch);
+  const fallback = statements[1] as ReturnStmt;
+  if (!arm?.value || !fallback.value) refuse('both arms must return values');
+
+  const address = unparen(arm.value);
+  if (address.kind !== NodeKind.UnaryExpr || (address as UnaryExpr).operator !== '&') refuse('true arm is not an address');
+  const member = unparen((address as UnaryExpr).operand);
+  if (member.kind !== NodeKind.MemberExpr) refuse('true arm is not a field address');
+  const m = member as unknown as { object: Expression; member: ASTNode; isArrow: boolean };
+  const base = unparen(m.object);
+  if (!m.isArrow || !isId(m.member, f.field) || text(base) !== norm(f.expr) || !plainPointer(base))
+    refuse('field or plain base pointer does not match');
+
+  const tail = unparen(fallback.value);
+  if (tail.kind !== NodeKind.CStyleCastExpr) refuse('fallback is not a typed offset');
+  const cast = tail as CStyleCastExpr;
+  if (unparen(cast.expression).kind !== NodeKind.IntegerLiteral) refuse('fallback is not a literal offset');
+  const offset = selectTables?.structFieldOffsets?.[f.struct]?.[f.field];
+  const fieldType = selectTables?.structFields?.[f.struct]?.[f.field];
+  if (!Number.isSafeInteger(offset) || offset! <= 0 || !fieldType || constValue(cast.expression) !== BigInt(offset!))
+    refuse('field offset or type is unavailable or differs from fallback');
+
+  const resolve = (n: string) => selectTables?.typedefTargets?.[n];
+  const shapeOf = createExprShape(localTypesOf(fn), {
+    globalTypes: selectTables?.globalTypes ?? {}, enclosingVarTypes: selectTables?.enclosingVarTypes ?? {},
+    structFields: selectTables?.structFields ?? {}, fieldTypes: selectTables?.fieldTypes ?? {},
+    returnTypes: selectTables?.functionReturnTypes ?? {}, resolve,
+  });
+  const baseShape = shapeOf(base);
+  const structShape = shapeOfSpelling(`${f.struct}*`, resolve);
+  const fieldShape = shapeOfSpelling(fieldType, resolve);
+  const resultShape = shapeOfNode(fn.returnType, 0, resolve);
+  const castShape = shapeOfNode(cast.type, 0, resolve);
+  if (!baseShape || !structShape || !sameShape(baseShape, structShape)
+      || !fieldShape || !resultShape || !castShape || !sameShape(resultShape, castShape)
+      || !sameShape(resultShape, { ...fieldShape, stars: fieldShape.stars + 1 }))
+    refuse('base, field, fallback, and result types do not agree');
+
+  const resultType = emit(fn.returnType as never).trim();
+  const [ret] = parseStmts(`return (${resultType})((uintptr_t)(${emit(guard.condition as never)} ? ${emit(base as never)} : 0) + offsetof(${f.struct}, ${f.field}));`);
+  statements.splice(0, 2, ret);
+}
+
 // ---------------------------------------------------------------------------------------
 // retvar, onecall: a value VC8 held in a register, written as a variable of its own
 
@@ -4233,7 +4508,8 @@ function doOpas(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'opas' }>): void {
  * only as `V >> K` from some statement of a block on. `V >>= K;` goes right after the last
  * statement of that block that names V before those reads (after any updates already
  * written there, so two tags keep their order), or before the first read when none does.
- * When V's address is taken, nothing from the update on may call or reach memory other
+ * References/captures are not modeled. When V's address is taken or an earlier call
+ * may bind it by reference, nothing from the update on may call or reach memory other
  * than through an unmodified parameter, since that memory could be V.
  */
 function opasShift(fn: FunctionDecl, u: OpasUpdate, matches: (e: Expression, u: OpasUpdate) => boolean,
@@ -4289,7 +4565,21 @@ function opasShift(fn: FunctionDecl, u: OpasUpdate, matches: (e: Expression, u: 
 
   const converted = new Set<ASTNode>(hits.flatMap(h => [...walk(h.node)].filter(x => isId(x.node, u.name)).map(x => x.node)));
   stale([u.name], first, converted);
-  if (addressTaken(fn, u.name)) {
+  // C++ can bind a reference without spelling `&V`. A local reference or a
+  // capture may later observe V through another name; these aliases are not
+  // represented by the direct-read check above.
+  for (const { node } of walk(fn.body!)) {
+    if (node.kind === NodeKind.LambdaExpr) refuse('opas shift does not model lambda captures');
+    if (node.kind !== NodeKind.VariableDecl) continue;
+    if ([...walk((node as VariableDecl).type)].some(x =>
+      x.node.kind === NodeKind.ReferenceType || x.node.kind === NodeKind.RValueReferenceType))
+      refuse('opas shift does not model local reference aliases');
+  }
+  // An unconverted V argument may bind to a reference parameter and escape.
+  // Shifted rvalues themselves cannot alias V and need no such restriction.
+  const callEscape = [...walk(fn.body!)].some(x => x.node.kind === NodeKind.CallExpr
+    && [...walk(x.node)].some(y => isId(y.node, u.name) && !converted.has(y.node)));
+  if (addressTaken(fn, u.name) || callEscape) {
     const steady = (e: Expression): boolean => {
       let x = unparen(e);
       while (x.kind === NodeKind.CStyleCastExpr) x = unparen((x as CStyleCastExpr).expression);
@@ -4314,16 +4604,206 @@ function opasShift(fn: FunctionDecl, u: OpasUpdate, matches: (e: Expression, u: 
   b!.statements.splice(at, 0, ...parseStmts(`${u.name} >>= ${u.constant};`));
 }
 
+// ---------------------------------------------------------------------------------------
+// zinit, znew: a zero fill the original wrote as a memset
+
+const zeroLiteral = (e: Expression): boolean => constValue(e) === 0n || /^'\\0'$/.test(text(e)) || text(e) === '0';
+
+function doZinit(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'zinit' }>): void {
+  const sites: Array<{ b: CompoundStmt; k: number; d: VariableDecl }> = [];
+  for (const b of blocks(fn)) {
+    for (let k = 0; k < b.statements.length; k++) {
+      const d = declOf(b.statements[k]);
+      if (d && d.name.name === f.name) sites.push({ b, k, d });
+    }
+  }
+  if (sites.length !== 1) refuse(`${f.name} is declared ${sites.length} times as a statement`);
+  const { b, k, d } = sites[0];
+  if (d.specifiers.length > 0) refuse(`${f.name} is ${d.specifiers.join(' ')}`);
+  if (!d.initializer || d.initializer.kind !== NodeKind.InitListExpr || norm(emit(d.initializer as never)) !== '{0}') refuse(`${f.name} is not initialised = {0}`);
+  const decl = cloneNode(b.statements[k]) as DeclStmt;
+  const nd = decl.declarations[0] as VariableDecl;
+  nd.initializer = null;
+  delete nd.copyListInit;
+  const [clear] = parseStmts(`memset(&${f.name}, 0, sizeof(${f.name}));`);
+  b.statements.splice(k, 1, decl, clear);
+}
+
+/** Whether e is a place in the object P points to: `P->m...`, `P[i]...`, `*P`. */
+function throughPointer(e: Expression, p: string): boolean {
+  e = unparen(e);
+  for (;;) {
+    if (e.kind === NodeKind.MemberExpr) {
+      const m = e as unknown as { object: Expression; isArrow: boolean };
+      if (m.isArrow) return isId(unparen(m.object), p);
+      e = unparen(m.object); continue;
+    }
+    if (e.kind === NodeKind.SubscriptExpr) {
+      const a = unparen((e as unknown as { array: Expression }).array);
+      if (isId(a, p)) return true;
+      e = a; continue;
+    }
+    if (e.kind === NodeKind.UnaryExpr && (e as UnaryExpr).operator === '*') return isId(unparen((e as UnaryExpr).operand), p);
+    return false;
+  }
+}
+
+function doZnew(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'znew' }>): void {
+  const p = f.name;
+  const sites: Array<{ b: CompoundStmt; k: number }> = [];
+  for (const b of blocks(fn)) {
+    for (let k = 0; k < b.statements.length; k++) {
+      const s = b.statements[k];
+      const d = declOf(s);
+      const st = storeOf(s);
+      if ((d && d.name.name === p && d.initializer && hasCall(d.initializer as Expression))
+        || (st && st.operator === '=' && isId(unparen(st.left), p) && hasCall(st.right))) sites.push({ b, k });
+    }
+  }
+  if (sites.length !== 1) refuse(`${sites.length} allocations into ${p}`);
+  const { b, k } = sites[0];
+  // Up to the first store through P: statements that call nothing and store nothing through
+  // memory P could name, and never store P (a null test that leaves is admitted).
+  let j = k + 1;
+  const isStoreThrough = (s: Statement) => { const st = storeOf(s); return !!st && st.operator === '=' && throughPointer(st.left, p); };
+  while (j < b.statements.length && !isStoreThrough(b.statements[j])) {
+    const s = b.statements[j];
+    if (storedNames(s).has(p)) refuse(`${p} is stored again before the fill`);
+    const st = storeOf(s);
+    if (hasCall(s) && !(s.kind === NodeKind.IfStmt && leaves((s as IfStmt).thenBranch) && !hasCall((s as IfStmt).condition))) refuse(`${emit(s as never).trim()} calls before the fill`);
+    if (!st && s.kind !== NodeKind.IfStmt) refuse(`${emit(s as never).trim()} stands before the fill`);
+    j++;
+  }
+  const start = j;
+  const seen = new Set<string>();
+  const drop: number[] = [];
+  while (j < b.statements.length && isStoreThrough(b.statements[j])) {
+    const st = storeOf(b.statements[j])!;
+    if (hasCall(st.right)) break;
+    const lhs = text(st.left);
+    if (zeroLiteral(st.right) && !seen.has(lhs)) drop.push(j);
+    seen.add(lhs);
+    j++;
+  }
+  if (drop.length === 0) refuse(`no zero store through ${p} after its allocation`);
+  const size = f.size ?? `sizeof(*${p})`;
+  const [clear] = parseStmts(`memset(${p}, 0, ${size});`);
+  for (const x of drop.reverse()) b.statements.splice(x, 1);
+  b.statements.splice(start, 0, clear);
+}
+
+// ---------------------------------------------------------------------------------------
+// swclamp: the index check before a switch, an inline helper with two returns
+
+function doSwclamp(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'swclamp' }>): void {
+  const v = f.name;
+  const strip = (e: Expression): Expression => { e = unparen(e); return e.kind === NodeKind.CStyleCastExpr ? unparen((e as CStyleCastExpr).expression) : e; };
+  const sites: Array<{ b: CompoundStmt; k: number; bound: Expression; value: Expression; sw: SwitchStmt }> = [];
+  for (const b of blocks(fn)) {
+    for (let k = 0; k + 1 < b.statements.length; k++) {
+      const s = b.statements[k];
+      if (s.kind !== NodeKind.IfStmt || (s as IfStmt).elseBranch || (s as IfStmt).init) continue;
+      const c = unparen((s as IfStmt).condition);
+      if (c.kind !== NodeKind.BinaryExpr || (c as BinaryExpr).operator !== '||') continue;
+      const lo = unparen((c as BinaryExpr).left), hi = unparen((c as BinaryExpr).right);
+      if (lo.kind !== NodeKind.BinaryExpr || (lo as BinaryExpr).operator !== '<' || !isId(strip((lo as BinaryExpr).left), v) || constValue((lo as BinaryExpr).right) !== 0n) continue;
+      if (hi.kind !== NodeKind.BinaryExpr || (hi as BinaryExpr).operator !== '>=' || !isId(strip((hi as BinaryExpr).left), v)) continue;
+      const arm = stmtsOf((s as IfStmt).thenBranch);
+      const st = arm.length === 1 ? storeOf(arm[0]) : undefined;
+      if (!st || st.operator !== '=' || !isId(unparen(st.left), v) || !loadsNothing(st.right)) continue;
+      const next = b.statements[k + 1];
+      if (next.kind !== NodeKind.SwitchStmt || !isId(strip((next as SwitchStmt).condition), v)) continue;
+      sites.push({ b, k, bound: (hi as BinaryExpr).right, value: st.right, sw: next as SwitchStmt });
+    }
+  }
+  if (sites.length !== 1) refuse(`${sites.length} checked switches on ${v}`);
+  const { b, k, bound, value, sw } = sites[0];
+  const bt = bound as Expression;
+  if (mentions(bt, v) || hasCall(bt) || storedNames(bt).size > 0) refuse(`the bound ${emit(bt as never)} reads ${v}, calls or stores`);
+  if (mentions(sw.body, v) || b.statements.slice(k + 2).some(s => mentions(s, v))) refuse(`${v} is read after the switch`);
+  const fname = emit(fn.name as never).replace(/\W+/g, '_');
+  const helper = `${fname}_ClampIndex`;
+  const definition = [
+    `// ${helper}: the index check ahead of ${fname}'s switch, an inline function with two returns as the original inlined it.`,
+    `static inline int ${helper}(int nIndex) {`,
+    `    if (nIndex < 0 || nIndex >= ${emit(bt as never)}) {`,
+    `        return ${emit(value as never)};`,
+    '    }',
+    '    return nIndex;',
+    '}',
+  ].join('\n');
+  sw.condition = parseExpr(`${helper}(${v})`);
+  b.statements.splice(k, 1);
+  prefixUsed.add(definition);
+}
+
+// ---------------------------------------------------------------------------------------
+// retbase: a chain of guarded returns of P + K, one base variable added once
+
+function doRetbase(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'retbase' }>): void {
+  const { param: p, name: n } = f;
+  if (!fn.parameters.some(x => isId((x as unknown as { name?: Identifier | null }).name, p))) refuse(`${p} is not a parameter`);
+  if ([...storedNames(fn.body!)].includes(p) || addressTaken(fn, p)) refuse(`${p} is stored or its address taken`);
+  freshName(fn, n);
+  const type = emit(fn.returnType as never).trim();
+  if (type === 'void') refuse('the function returns nothing');
+  const st = fn.body!.statements;
+  const baseOf = (e: Expression): Expression | undefined => {
+    const x = unparen(e);
+    if (isId(x, p)) return parseExpr('0');
+    if (x.kind === NodeKind.BinaryExpr && (x as BinaryExpr).operator === '+') {
+      const l = unparen((x as BinaryExpr).left), r = unparen((x as BinaryExpr).right);
+      if (isId(l, p) && constValue(r) !== undefined && loadsNothing(r)) return r;
+      if (isId(r, p) && constValue(l) !== undefined && loadsNothing(l)) return l;
+    }
+    return undefined;
+  };
+  let i0 = 0;
+  while (i0 < st.length && st[i0].kind !== NodeKind.IfStmt) i0++;
+  const arms: Array<{ cond: Expression; base: Expression }> = [];
+  let i = i0;
+  for (; i < st.length; i++) {
+    const s = st[i];
+    if (s.kind !== NodeKind.IfStmt || (s as IfStmt).elseBranch || (s as IfStmt).init) break;
+    const arm = stmtsOf((s as IfStmt).thenBranch);
+    const r = arm.length === 1 && arm[0].kind === NodeKind.ReturnStmt ? (arm[0] as ReturnStmt).value : undefined;
+    const base = r ? baseOf(r) : undefined;
+    if (!base) break;
+    if (mentions((s as IfStmt).condition, n)) refuse(`${n} is named in a condition`);
+    arms.push({ cond: (s as IfStmt).condition, base });
+  }
+  if (arms.length < 2) refuse(`${arms.length} guarded returns of ${p} + K`);
+  const rest = st.slice(i);
+  const last = rest[rest.length - 1];
+  const exitCall = last ? callOf(last) : undefined;
+  if (!exitCall || calleeName(exitCall.callee) !== 'exit') refuse('the chain is not followed by a tail that ends in exit');
+  if (rest.some(returnsInside)) refuse('the tail returns');
+  let tail: Statement = { kind: NodeKind.CompoundStmt, statements: rest } as unknown as CompoundStmt;
+  for (let a = arms.length - 1; a >= 0; a--) {
+    const [ifs] = parseStmts(`if (__vc8c) { ${n} = __vc8k; } else { }`);
+    (ifs as IfStmt).condition = arms[a].cond;
+    ((((ifs as IfStmt).thenBranch as CompoundStmt).statements[0] as ExprStmt).expression as AssignExpr).right = arms[a].base;
+    (ifs as IfStmt).elseBranch = tail;
+    tail = ifs;
+  }
+  const [decl] = parseStmts(`${type} ${n};`);
+  const [ret] = parseStmts(`return ${n} + ${p};`);
+  fn.body!.statements = [...st.slice(0, i0), decl, tail, ret];
+}
+
 const APPLY: { [K in Vc8Form['op']]: (fn: FunctionDecl, f: Extract<Vc8Form, { op: K }>) => void } = {
-  seq: doSeq, fold: doFold, join: doJoin, coalesce: doCoalesce, cache: doCache, own: doOwn, guards: doGuards, 'merge-guards': doMergeGuards,
-  retval: doRetval, width: doWidth, boolflag: doBoolflag, retwiden: doRetwiden, arms: doArms,
+  nullfault32: doNullfault32,
+  seq: doSeq, fold: doFold, join: doJoin, coalesce: doCoalesce, recordwalk: doRecordwalk, cache: doCache, own: doOwn, guards: doGuards, 'merge-guards': doMergeGuards,
+  retval: doRetval, branchret: doBranchret, width: doWidth, boolflag: doBoolflag, retwiden: doRetwiden, arms: doArms,
   nest: doNest, 'merge-tail': doMergeTail, tailguard: doTailguard, tailcopy: doTailcopy, continue: doContinue, dup: doDup, tarms: doTarms, zero: doZero, nonzero: doNonzero,
   bool: doBool,
   cmp: doCmp, swap: doSwap, ifsel: doIfsel, clamp: doClamp, split: doSplit, select: doSelect, decl: doDecl, unselect: doUnselect,
   tsel: doTsel, hoist: doHoist, nestcall: doNestcall, fill: doFill, elems: doElems, copy: doCopy, shift: doShift, ptrwalk: doPtrwalk, rowptr: doRowptr,
   acc: doAcc,
+  nullfield: doNullfield,
   retvar: doRetvar, onecall: doOnecall, roundup: doRoundup, opas: doOpas, swmerge: doSwmerge, dec: doDec, switch: doSwitch,
   range: doRange, castout: doCastout, signbit: doSignbit,
+  zinit: doZinit, znew: doZnew, swclamp: doSwclamp, retbase: doRetbase,
 };
 
 /**

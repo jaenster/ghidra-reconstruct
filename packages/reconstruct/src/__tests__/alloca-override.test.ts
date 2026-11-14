@@ -48,13 +48,15 @@ function read(name: string): string {
 
 /** Strip `//` comments so assertions see code, not the provenance annotations. */
 function code(src: string): string {
-  return src
-    .split('\n')
-    .map(l => l.replace(/\/\/.*$/, ''))
-    .join('\n');
+  // `.*$` leaves CRLF comments intact: in JavaScript, `.` and `$` stop at `\r`.
+  return src.replace(/\/\/[^\r\n]*/g, '');
 }
 
 describe('SSignature alloca overrides', () => {
+  it('ignores CRLF comment text while keeping body identifiers visible', () => {
+    assert.strictEqual(code('// stack0xdead\r\nint stack0xfeed = 0;'), '\r\nint stack0xfeed = 0;');
+  });
+
   it('ships a body for each of the two undecompilable functions', () => {
     for (const f of [FINISH, GENERATE]) {
       assert.ok(fs.existsSync(path.join(overrideDir, f)), `missing override ${f}`);

@@ -389,8 +389,8 @@ function callsOrStoresThroughPointer(node: ASTNode): boolean {
  *
  * Two ways it is not: it has a side effect of its own (a call, an assignment,
  * an increment), or it reads something the body then changes, which would make
- * later iterations start from a different value. An initialiser that only reads
- * memory is taken as invariant - nothing in the AST can prove otherwise.
+ * later iterations start from a different value. A read through a pointer is
+ * invariant only where the body neither calls nor stores through a pointer.
  */
 function initializerSurvivesReevaluation(initializer: ASTNode, body: ASTNode): boolean {
   const hasSideEffect = (node: ASTNode): boolean => {
@@ -422,8 +422,12 @@ function initializerSurvivesReevaluation(initializer: ASTNode, body: ASTNode): b
   // diagonal edge the border tables cannot index.
   //
   // Any read through a pointer is therefore only invariant if the body stores
-  // through no pointer at all. Declining to sink is always safe.
-  if (readsThroughPointer(initializer) && storesThroughPointer(body)) return false;
+  // through no pointer at all - and calls nothing, since a callee may store there
+  // too. DRLGOUTROOM_PlaceAct5SpecialPresets 0067da70 reads
+  // `pLevel->pDrlgLevelData` once, before a loop that calls
+  // SpawnOutdoorLevelPresetEx(pLevel, ..); sunk into the loop it was read again
+  // after every call. Declining to sink is always safe.
+  if (readsThroughPointer(initializer) && callsOrStoresThroughPointer(body)) return false;
   return true;
 }
 

@@ -32,6 +32,17 @@
  * which VC8 compiles as the original: the record tested after the add and read through.
  * A trailing `&& true` is dropped first; it does not change the chain's value.
  *
+ * A `!`-guard can also be printed as the getter's failure, each range test inverted:
+ * `if (i < 0 || i >= T->nSize || !(T->pTxt + i)) return;` (Skills_SrvDoFunc_106 005cd870).
+ * Inverting a comparison of the index (an integer) is exact, so this is
+ * `if (pre || !(p = getter) || post)`, read through after the branch as a `!`-guard is.
+ * With an else, a `!`-guard's else branch runs only where the getter held, so its reads
+ * route as a plain guard's body does, in an else-if arm too (SUNITMSG state list
+ * `if (i < 0 || i >= T->nSize || !(T->pTxt + i)) .. else if (T->pTxt[i].f & m)`).
+ * A switch's or if's condition is read before its body runs, so its reads route even
+ * when the body calls (SKILLS_CltProcessActiveSkill 004c7890). `&T->pTxt[i]` takes the
+ * address of the record, not of `i`.
+ *
  * Value-preserving by construction, made only when:
  *   - the guard is an `if` in a block whose condition (or its operand under `!`) is an
  *     `&&` chain holding `base + i`: `base` a member chain from a name (`T->pTxt`), a
@@ -39,8 +50,9 @@
  *     address is never taken; the range tests before it mention `i` and neither call nor
  *     write. The local holds `base + i` exactly when they are true, so testing it is
  *     testing them;
- *   - under `!` the guard has no else and its branch leaves (ends in return, goto or a
- *     halt), so the statements after it run only with the record in range;
+ *   - under `!` without an else the guard's branch leaves (ends in return, goto or a
+ *     halt), so the statements after it run only with the record in range; with an else
+ *     only the else branch's reads route, never the statements after the if;
  *   - a read `base[i]` (also `&base[i]`, `base[i].f`) or `base + i` becomes the local
  *     only up to the first statement that could change `base` or `i` or what `base`
  *     points at: a call (one call whose arguments neither call nor write still has its
@@ -61,7 +73,7 @@ import { NodeKind } from '../../../ast/kinds.js';
 import type {
   ASTNode, AssignExpr, BinaryExpr, BinaryOperator, CallExpr, CompoundStmt, CStyleCastExpr, DeclStmt, Expression,
   ExprStmt, FunctionDecl, GotoStmt, Identifier, IfStmt, MemberExpr, ParameterDecl, ParenExpr,
-  PostfixExpr, ReturnStmt, Statement, SubscriptExpr, TypeNode, UnaryExpr, VariableDecl,
+  PostfixExpr, ReturnStmt, Statement, SubscriptExpr, SwitchStmt, TypeNode, UnaryExpr, VariableDecl,
 } from '../../../ast/nodes.js';
 import { traverseAST, getChildren } from '../../../ast/visitor.js';
 import { Decl, Stmt, Expr, Type } from '../../../ast/factory.js';
@@ -225,6 +237,88 @@ function runOf(cond: Expression, indexOk: (name: string) => boolean): Run | null
   return null;
 }
 
+function disjuncts(e: Expression): Expression[] {
+  const u = unwrap(e);
+  if (u.kind === NodeKind.BinaryExpr && (u as BinaryExpr).operator === '||') {
+    const b = u as BinaryExpr;
+    return [...disjuncts(b.left), ...disjuncts(b.right)];
+  }
+  return [e];
+}
+
+const FLIP: Partial<Record<BinaryOperator, BinaryOperator>> = { '<': '>=', '>=': '<', '>': '<=', '<=': '>', '==': '!=', '!=': '==' };
+
+/** `i` itself, or `i` under one cast to a signed or unsigned int. */
+function isIndexOperand(e: Expression, index: string): boolean {
+  let u = unwrap(e);
+  if (u.kind === NodeKind.CStyleCastExpr) {
+    const t = (u as CStyleCastExpr).type as { kind?: string; name?: unknown; modifiers?: string[] };
+    const name = t.kind === NodeKind.BuiltinType ? [...(t.modifiers ?? []), String(t.name)].join(' ')
+      : t.kind === NodeKind.TypedefType ? (t.name as Identifier).name : '';
+    if (!/^((signed |unsigned )?int|unsigned|int32_t|uint32_t)$/.test(name)) return false;
+    u = unwrap((u as CStyleCastExpr).expression);
+  }
+  return u.kind === NodeKind.Identifier && (u as Identifier).name === index;
+}
+
+/**
+ * The range test whose failure a disjunct states, as the getter tests it: `i < 0` is
+ * `i >= 0` failing, `n <= i` is `n > i` failing. Only a comparison with the index (an
+ * integer: it offsets a pointer) on one side flips; null for anything else.
+ */
+function flipBound(e: Expression, index: string): Expression | null {
+  const u = unwrap(e);
+  if (u.kind !== NodeKind.BinaryExpr) return null;
+  const b = u as BinaryExpr;
+  const op = FLIP[b.operator];
+  if (!op || !(isIndexOperand(b.left, index) || isIndexOperand(b.right, index))) return null;
+  return Expr.binary(cloneNode(b.left), op, cloneNode(b.right));
+}
+
+/**
+ * The getter stated as its failure, the form the decompiler prints for a `!`-guard:
+ * `[pre ||] i < 0 || i >= T->nSize || !(T->pTxt + i) [|| post]`. The bounds come back as
+ * the getter's own tests (`i >= 0`, `i < T->nSize`), so a guard of this form is the
+ * negated run `pre || !(getter) || post`.
+ */
+function disjunctRunOf(cond: Expression, indexOk: (name: string) => boolean): Run | null {
+  const parts = disjuncts(cond);
+  for (let k = 1; k < parts.length; k++) {
+    const not = unwrap(parts[k]);
+    if (not.kind !== NodeKind.UnaryExpr || (not as UnaryExpr).operator !== '!') continue;
+    const sum = unwrap((not as UnaryExpr).operand);
+    if (sum.kind !== NodeKind.BinaryExpr || (sum as BinaryExpr).operator !== '+') continue;
+    const base = (sum as BinaryExpr).left;
+    const idx = unwrap((sum as BinaryExpr).right);
+    if (idx.kind !== NodeKind.Identifier || !indexOk((idx as Identifier).name)) continue;
+    const chain = memberChain(base);
+    if (!chain || !pure(base)) continue;
+    const index = idx as Identifier;
+    const bounds: Expression[] = [];
+    let j = k;
+    while (j > 0 && pure(parts[j - 1]) && mentions(parts[j - 1], index.name)) {
+      const f = flipBound(parts[j - 1], index.name);
+      if (!f) break;
+      bounds.unshift(f);
+      j--;
+    }
+    let seed: AssignExpr | null = null;
+    if (j > 0) {
+      const c = isCommaSeed(parts[j - 1], index.name);
+      const f = c ? flipBound(c.test, index.name) : null;
+      if (c && f) { seed = c.seed; bounds.unshift(f); j--; }
+    }
+    if (bounds.length === 0) continue;
+    // `|| false` tests nothing: a chain's value is the same without it.
+    const isFalse = (e: Expression) => { const u = unwrap(e); return u.kind === NodeKind.BoolLiteral && (u as unknown as { value: boolean }).value === false; };
+    return {
+      g: { base, index, bounds, root: chain.root, last: chain.last },
+      pre: parts.slice(0, j), post: parts.slice(k + 1).filter(e => !isFalse(e)), seed,
+    };
+  }
+  return null;
+}
+
 function isSum(e: ASTNode, g: Guard): boolean {
   if (e.kind !== NodeKind.BinaryExpr || (e as BinaryExpr).operator !== '+') return false;
   const b = e as BinaryExpr;
@@ -342,6 +436,18 @@ export function routeReads(stmts: Statement[], g: Guard, name: string, dryRun: b
   let routed = 0;
   for (const s of stmts) {
     if (s.kind === NodeKind.LabelStmt || s.kind === NodeKind.CaseStmt || s.kind === NodeKind.DefaultStmt) break;
+    // A switch or if is evaluated head first: the reads in its condition route even when
+    // its body calls or writes, as long as the condition itself does neither.
+    const head = s.kind === NodeKind.SwitchStmt || s.kind === NodeKind.IfStmt ? s as SwitchStmt | IfStmt : null;
+    if (head && !head.init && (clobbers(s, g) || effectsOf(s).calls > 0) && pure(head.condition)) {
+      if (dryRun) routed += countReads(head.condition, g);
+      else {
+        const holder = { kind: NodeKind.ParenExpr, expression: head.condition } as unknown as ParenExpr;
+        routed += substitute(holder, g, name);
+        (head as { condition: Expression }).condition = holder.expression;
+      }
+      break;
+    }
     if (clobbers(s, g)) {
       // `i = base[i].f;`: the value is read before the store.
       const e = s.kind === NodeKind.ExprStmt ? unwrap((s as ExprStmt).expression) : null;
@@ -410,13 +516,16 @@ function rewriteFunction(fn: FunctionDecl, opts: RecordGetterGuardOptions): Func
       counts.set(v.name.name, (counts.get(v.name.name) ?? 0) + 1);
     }
   }
+  // A name whose address may be taken. `&base[i]` takes no address of `i`: an index is
+  // only read, so the names inside a subscript's index stay out.
   const addressed = new Set<string>();
+  const addressedIn = (e: ASTNode): void => {
+    if (e.kind === NodeKind.Identifier) { addressed.add((e as Identifier).name); return; }
+    if (e.kind === NodeKind.SubscriptExpr) { addressedIn((e as SubscriptExpr).array); return; }
+    for (const k of getChildren(e)) addressedIn(k);
+  };
   for (const n of traverseAST(body)) {
-    if (n.kind === NodeKind.UnaryExpr && (n as UnaryExpr).operator === '&') {
-      for (const m of traverseAST((n as UnaryExpr).operand)) {
-        if (m.kind === NodeKind.Identifier) addressed.add((m as Identifier).name);
-      }
-    }
+    if (n.kind === NodeKind.UnaryExpr && (n as UnaryExpr).operator === '&') addressedIn((n as UnaryExpr).operand);
   }
   const indexOk = (name: string) => counts.get(name) === 1 && !addressed.has(name);
   const shapeOf = createExprShape(localTypes, {
@@ -445,7 +554,10 @@ function rewriteFunction(fn: FunctionDecl, opts: RecordGetterGuardOptions): Func
     let cond = unwrap(ifs.condition);
     const negated = cond.kind === NodeKind.UnaryExpr && (cond as UnaryExpr).operator === '!';
     if (negated) cond = unwrap((cond as UnaryExpr).operand);
-    const run = runOf(cond, indexOk);
+    let run = runOf(cond, indexOk);
+    // `i < 0 || i >= T->nSize || !(T->pTxt + i)`: the getter's failure, a `!`-guard.
+    const failure = !run && !negated;
+    if (failure) run = disjunctRunOf(cond, indexOk);
     if (!run) return null;
     const g = run.g;
     const shape = shapeOf(unwrap(g.base));
@@ -457,8 +569,17 @@ function rewriteFunction(fn: FunctionDecl, opts: RecordGetterGuardOptions): Func
     // so the body's reads go through the record only if none of them can change it.
     const postClean = run.post.every(p => effectsOf(p).calls === 0 && !clobbers(p, g));
     let reads: Statement[] = [];
-    if (negated) {
-      if (!top || ifs.elseBranch || !leaves(ifs.thenBranch)) return null;
+    if ((negated || failure) && ifs.elseBranch) {
+      // The else branch runs only when every test failed, the getter's failure among them:
+      // the getter ran and held, as in the body of a plain guard.
+      if (postClean) {
+        reads = ifs.elseBranch.kind === NodeKind.CompoundStmt
+          ? (ifs.elseBranch as CompoundStmt).statements : [ifs.elseBranch];
+        // A label in it could be reached without the getter having run.
+        if (hasJumpTarget(reads)) return null;
+      }
+    } else if (negated || failure) {
+      if (!top || !leaves(ifs.thenBranch)) return null;
       if (postClean) reads = block.statements.slice(b + 1);
     } else if (postClean) {
       reads = ifs.thenBranch.kind === NodeKind.CompoundStmt
@@ -474,7 +595,7 @@ function rewriteFunction(fn: FunctionDecl, opts: RecordGetterGuardOptions): Func
         if (dryRun) { n += countReads(p, g); continue; }
         const holder = { kind: NodeKind.ParenExpr, expression: p } as unknown as ParenExpr;
         n += substitute(holder, g, name);
-        run.post[i] = holder.expression;
+        run!.post[i] = holder.expression;
       }
       return n;
     };
@@ -489,7 +610,7 @@ function rewriteFunction(fn: FunctionDecl, opts: RecordGetterGuardOptions): Func
     let out: DeclStmt;
     if (plain) {
       out = Stmt.declStmt([Decl.variable(name, type, value)]);
-      (ifs as { condition: Expression }).condition = negated ? Expr.not(id) : id;
+      (ifs as { condition: Expression }).condition = negated || failure ? Expr.not(id) : id;
     } else {
       // The record is set where the getter ran: `pre && (p = getter) && post`, its
       // declaration before the statement. `p` is read only where the getter has run.
@@ -498,11 +619,17 @@ function rewriteFunction(fn: FunctionDecl, opts: RecordGetterGuardOptions): Func
       if (run.seed) {
         at = Expr.binary(cloneNode(run.seed), ',' as BinaryOperator, at);
       }
-      const chain = [...run.pre, Expr.paren(at), ...run.post].reduce((l, r) => Expr.binary(l, '&&', r));
-      (ifs as { condition: Expression }).condition = negated ? Expr.not(Expr.paren(chain)) : chain;
+      if (failure) {
+        // `pre || !(p = getter) || post`: the same disjuncts, the getter's failure as `!p`.
+        (ifs as { condition: Expression }).condition = [...run.pre, Expr.not(Expr.paren(at)), ...run.post]
+          .reduce((l, r) => Expr.binary(l, '||', r));
+      } else {
+        const chain = [...run.pre, Expr.paren(at), ...run.post].reduce((l, r) => Expr.binary(l, '&&', r));
+        (ifs as { condition: Expression }).condition = negated ? Expr.not(Expr.paren(chain)) : chain;
+      }
     }
     changed++;
-    opts.onSite?.({ line: ifs.location?.start.line ?? 0, name, reads: routed, negated });
+    opts.onSite?.({ line: ifs.location?.start.line ?? 0, name, reads: routed, negated: negated || failure });
     return out;
   };
   const visitBlock = (block: CompoundStmt): void => {

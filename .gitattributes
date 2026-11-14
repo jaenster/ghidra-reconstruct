@@ -1,0 +1,3 @@
+# Golden fixtures contain exact bytes, including deliberate non-UTF8 and line endings.
+# Check them out unchanged even when the user's core.autocrlf is enabled.
+**/__tests__/fixtures/** -text

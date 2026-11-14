@@ -196,9 +196,14 @@ function operandsOf(n: ASTNode): ASTNode[] {
   return n.kind === NodeKind.MemberExpr ? [(n as MemberExpr).object] : getChildren(n);
 }
 
-/** The variables an expression names: `&a.nId` names `a`, never a variable called `nId`. */
+/**
+ * The variables whose storage an address expression reaches: `&a.nId` names `a`, never a
+ * variable called `nId`. `&p->nId` names none: it is p's value plus an offset, a read of p,
+ * not p's own address (AddAct124SecondaryBorder 006752a0, `&pLevelData->sGridPreset`).
+ */
 function namedVariables(n: ASTNode): Identifier[] {
   if (n.kind === NodeKind.Identifier) return [n as Identifier];
+  if (n.kind === NodeKind.MemberExpr && (n as MemberExpr).isArrow) return [];
   return operandsOf(n).flatMap(namedVariables);
 }
 

@@ -101,6 +101,14 @@ describe('D2_SeedRoll in d2_platform.h', () => {
     assert.match(header, /#if defined\(_MSC_VER\)\n#define D2_SEED_ROLL_INLINE __forceinline\n#else\n#define D2_SEED_ROLL_INLINE inline __attribute__\(\(always_inline\)\)\n#endif/);
   });
 
+  it('D2_SeedRollLimited takes an int limit: zero when not positive, a mask for a power of two, else a remainder', () => {
+    const header = generatePlatformHeader({ seedType: true });
+    const at = header.indexOf('static D2_SEED_ROLL_INLINE uint32_t D2_SeedRollLimited(TSeed* pSeed, int nMax)');
+    assert.ok(at > header.indexOf('D2_SeedRoll(TSeed* pSeed)'), 'D2_SeedRollLimited not emitted after D2_SeedRoll');
+    const body = header.slice(at, header.indexOf('\n}', at));
+    assert.match(body, /if \(nMax <= 0\) return 0;\n\s+if \(\(nMax - 1\) & nMax\) return D2_SeedRoll\(pSeed\) % \(uint32_t\)nMax;\n\s+return D2_SeedRoll\(pSeed\) & \(uint32_t\)\(nMax - 1\);/);
+  });
+
   it('is not emitted for a binary without the seed type', () => {
     assert.ok(!generatePlatformHeader({ seedType: false }).includes('D2_SeedRoll'));
   });

@@ -57,12 +57,13 @@ describe('aggregateZeroInitPlugin', () => {
       sMsg.pControl = &pButton->sControl;
       pButton->fpOnPress(&sMsg);
       return 0; }`);
-    assert.match(out, /D2ControlMsg sMsg = \{ ?0 ?\};/);
+    // The original zeroing pControl too, which the later store overwrites: a memset, whose
+    // stores VC8 keeps (`{0}` would lose pControl's).
+    assert.match(out, /D2ControlMsg sMsg; memset\(&sMsg, 0, sizeof\(sMsg\)\);/);
     assert.ok(!/sMsg\.uMsg = 0/.test(out), out);
-    assert.ok(!/D2ControlMsg sMsg;/.test(out), out);
     assert.match(out, /sMsg\.pControl = &pButton->sControl; pButton->fpOnPress\(&sMsg\);/);
     // The guard before the run stays before the declaration.
-    assert.ok(out.indexOf('if (!pButton)') < out.indexOf('sMsg = {'), out);
+    assert.ok(out.indexOf('if (!pButton)') < out.indexOf('D2ControlMsg sMsg'), out);
   });
 
   it('counts an enum constant of value zero and a cast zero', () => {
@@ -158,6 +159,26 @@ describe('aggregateZeroInitPlugin', () => {
     assert.match(run('void f() { D2Pair s; s.a = 0; s.b = 0; g(&s); }', { convertingAggregates: ['D2Pair'] }), /D2Pair s;/);
   });
 
+  // NET_D2GS_SERVER_Send_0xA5_FORCESTOPSKILL 0053c190: the original zeroes the eight-byte
+  // packet with two dword stores, then stores every member; the decompile prints none of
+  // the zero stores. The packet converts from uint64_t, so no `{0}`: a memset clears it.
+  it('clears a converting type with memset where every member is stored over its zeroes', () => {
+    const out = run('void f(int x, int y) { D2Pkt6 s; s.a = x; s.q = 1; s.id = 0xa5; s.fl = 2; s.b = y; g(&s); }',
+      { convertingAggregates: ['D2Pkt6'] });
+    assert.match(out, /D2Pkt6 s; memset\(&s, 0, sizeof\(s\)\); s\.a = x; s\.q = 1; s\.id = 0xa5; s\.fl = 2; s\.b = y; g\(&s\);/);
+  });
+
+  it('clears the whole object with memset where the first member is stored after a call', () => {
+    const out = run('void f(int x) { D2Pkt6 s; s.a = 1; s.fl = 2; put(&s.q, x); s.id = 0x6a; s.b = 3; g(&s); }');
+    assert.match(out, /D2Pkt6 s; memset\(&s, 0, sizeof\(s\)\); s\.a = 1; s\.fl = 2; put\(&s\.q, x\); s\.id = 0x6a;/);
+  });
+
+  it('leaves a converting type whose first member the code never stores over', () => {
+    const out = run('void f(int x) { D2Pkt6 s; s.q = 1; s.fl = 2; s.a = x; s.b = 3; g(&s); }',
+      { convertingAggregates: ['D2Pkt6'] });
+    assert.match(out, /D2Pkt6 s; s\.q = 1;/);
+  });
+
   it('leaves pointers, arrays and unknown types alone', () => {
     assert.match(run('void f() { D2Pair *p; p->a = 0; p->b = 0; g(p); }'), /D2Pair ?\* ?p;/);
     assert.match(run('void f() { D2Unknown s; s.a = 0; s.b = 0; g(&s); }'), /D2Unknown s;/);
@@ -193,19 +214,19 @@ describe('aggregateZeroInitPlugin', () => {
   // address before the last zero store, which the decompile still prints.
   it('restores the initialiser from the original zeroes and the printed zero stores', () => {
     const out = run('void f(int x, int y) { D2Pair s; s.b = 0; s.a = x; g(&s); }', { zeroStores: [{ name: 's', size: 8, zero: [[0, 4]] }] });
-    assert.match(out, /D2Pair s = \{ ?0 ?\}; s\.a = x; g\(&s\);/);
+    assert.match(out, /D2Pair s; memset\(&s, 0, sizeof\(s\)\); s\.a = x; g\(&s\);/);
   });
 
   it('keeps a zero store after the first other store that the opening run does not cover', () => {
     const out = run('void f(int x) { D2Pair s; s.a = x; s.b = 0; g(&s); }', { zeroStores: [{ name: 's', size: 8, zero: [[0, 4]] }] });
-    assert.match(out, /D2Pair s = \{ ?0 ?\}; s\.a = x; s\.b = 0; g\(&s\);/);
+    assert.match(out, /D2Pair s; memset\(&s, 0, sizeof\(s\)\); s\.a = x; s\.b = 0; g\(&s\);/);
   });
 
   // Q33_SendQuestStatePacket 00589070: one dword and one word store zero the six bytes, then
   // three byte stores; the decompile prints the byte the dword store leaves after them.
   it('drops a zero store to bytes the opening run zeroes', () => {
     const out = run('void f(int x) { D2Pair s; s.a = x; s.b = 0; g(&s); }', { zeroStores: [{ name: 's', size: 8, zero: [[0, 8]] }] });
-    assert.match(out, /D2Pair s = \{ ?0 ?\}; s\.a = x; g\(&s\);/);
+    assert.match(out, /D2Pair s; memset\(&s, 0, sizeof\(s\)\); s\.a = x; g\(&s\);/);
   });
 
   // Q33_SendQuestStatePacket 00589070: a dword and a word zero the packet from its start, the
@@ -222,9 +243,16 @@ describe('aggregateZeroInitPlugin', () => {
     assert.ok(!/memset/.test(out), out);
   });
 
-  it('keeps `{0}` for a dword first member the original zeroes and overwrites', () => {
+  // PLAYER_CountLivingPlayersInLevel 00535730: both dwords zeroed, then eLevelId stored over
+  // the first; `{0}` would let VC8 drop that zero store.
+  it('clears the whole object with memset for a dword first member the original zeroes and overwrites', () => {
     const out = run('void f(int x) { D2Pair s; s.b = 0; s.a = x; g(&s); }', { zeroStores: [{ name: 's', size: 8, zero: [[0, 8]] }] });
-    assert.match(out, /D2Pair s = \{ ?0 ?\};/);
+    assert.match(out, /D2Pair s; memset\(&s, 0, sizeof\(s\)\); s\.a = x; g\(&s\);/);
+  });
+
+  it('keeps `{0}` for a dword first member the original zeroes and never overwrites', () => {
+    const out = run('void f(int x) { D2Pair s; s.a = 0; s.b = x; g(&s); }', { zeroStores: [{ name: 's', size: 8, zero: [[0, 8]] }] });
+    assert.match(out, /D2Pair s = \{ ?0 ?\}; s\.b = x; g\(&s\);/);
     assert.ok(!/memset/.test(out), out);
   });
 
@@ -232,7 +260,7 @@ describe('aggregateZeroInitPlugin', () => {
   it('takes a memset of a member array for its zero stores', () => {
     const out = run('void f(int x) { D2Arr s; s.n = x; memset(s.aw, 0, 2 * sizeof(s.aw[0])); g(&s); }',
       { zeroStores: [{ name: 's', size: 12, zero: [[0, 12]] }] });
-    assert.match(out, /D2Arr s = \{ ?0 ?\}; s\.n = x; g\(&s\);/);
+    assert.match(out, /D2Arr s; memset\(&s, 0, sizeof\(s\)\); s\.n = x; g\(&s\);/);
   });
 
   it('keeps a memset past the bytes the original zeroes', () => {
