@@ -1,0 +1,1905 @@
+{
+  "source": "c50ad534e1b23d704ce947d9980964f50ee94117",
+  "scope": "Fresh hash-matched v2099 MCP function models and resolved types, current live global type and full enum value table. No invented branch-layout facts; not an owning snapshot export.",
+  "functions": [
+    {
+      "name": "INV_IsInteractiveMode",
+      "address": "00486b30",
+      "signature": "BOOL INV_IsInteractiveMode(void)",
+      "returnType": "BOOL",
+      "callingConvention": "__fastcall_ecxsafe",
+      "size": 33,
+      "namespace": "D2Client::UI::Inv",
+      "isThunk": false,
+      "isExternal": false,
+      "hasVarArgs": false,
+      "tags": null,
+      "parameters": [],
+      "localVariables": [],
+      "decompiled": "\n/* @function INV_IsInteractiveMode\n   @address Game.exe.ram:00486b30\n   @date 2026.09.11\n   @calling __fastcall_ecxsafe\n   @description Returns whether the inventory is in an interactive (shop/stash/trade) mode.\n   Thirty-three bytes that touch EAX only - a global load, a jump table and a return - so it\n   preserves ECX. Declaring it __stdcall made the decompiler treat ECX as killed by the call, and\n   ClickItemLeft carries a SETZ result in ECX across exactly this call. The lost register became an\n   unassigned local, the pick-up branch was never taken, and clicking an inventory item stopped\n   lifting it. */\n\nBOOL __fastcall_ecxsafe D2Client::UI::Inv::INV_IsInteractiveMode(void)\n\n{\n  if (true) {\n    switch(D2Client::UI::Inv::g_nCurrentInventoryPage) {\n    case 0:\n    case 1:\n    case 2:\n    case 0xb:\n    case 0xc:\n    case 0xe:\n    case 0x13:\n      return 1;\n    }\n  }\n  return 0;\n}\n\n"
+    },
+    {
+      "name": "INV_IsInteractiveModeEx",
+      "address": "00486b80",
+      "signature": "BOOL INV_IsInteractiveModeEx(void)",
+      "returnType": "BOOL",
+      "callingConvention": "__stdcall",
+      "size": 33,
+      "namespace": "D2Client::UI::Inv",
+      "isThunk": false,
+      "isExternal": false,
+      "hasVarArgs": false,
+      "tags": null,
+      "parameters": [],
+      "localVariables": [],
+      "decompiled": "\n/* @function INV_IsInteractiveModeEx\n   @address Game.exe.ram:00486b80\n   @date 2026.06.10\n   @calling __stdcall\n   @description Diablo 2 1.14d reverse team\n   https://blizzhackers.dev */\n\nBOOL D2Client::UI::Inv::INV_IsInteractiveModeEx(void)\n\n{\n  if (true) {\n    switch(D2Client::UI::Inv::g_nCurrentInventoryPage) {\n    case 0:\n    case 1:\n    case 2:\n    case 0xb:\n    case 0xc:\n    case 0xe:\n    case 0xf:\n    case 0x13:\n      return 1;\n    }\n  }\n  return 0;\n}\n\n"
+    },
+    {
+      "name": "ITEMMOD_ScaleValueForStatType",
+      "address": "0065ce40",
+      "signature": "void ITEMMOD_ScaleValueForStatType(int * pnValue, eD2UnitStat eStatType)",
+      "returnType": "void",
+      "callingConvention": "__stdcall_edxsafe",
+      "size": 28,
+      "namespace": "D2Common::ITEMS::ItemMods",
+      "isThunk": false,
+      "isExternal": false,
+      "hasVarArgs": false,
+      "tags": [
+        {
+          "type": "llm-named"
+        }
+      ],
+      "parameters": [
+        {
+          "name": "pnValue",
+          "dataType": "int *",
+          "size": 4,
+          "ordinal": 0,
+          "storage": "ECX:4",
+          "stackOffset": null,
+          "resolvedType": null
+        },
+        {
+          "name": "eStatType",
+          "dataType": "eD2UnitStat",
+          "size": 4,
+          "ordinal": 1,
+          "storage": "EAX:4",
+          "stackOffset": null,
+          "resolvedType": null
+        }
+      ],
+      "localVariables": [],
+      "decompiled": "\n/* @function ITEMMOD_ScaleValueForStatType\n   @address Game.exe.ram:0065ce40\n   @date 2026.09.11\n   @calling __stdcall_edxsafe\n   @description Scales stat values by shifting left 8 bits for specific stat types (life, mana,\n   stamina, resistances). Twenty-eight bytes: an ADD, a jump table and a shift through ECX, touching\n   EDX not at all. PropertyFunc_MinMaxDamagePair loads the max-stat code into EDX before calling\n   this and reads it back afterwards, so declaring EDX killed lost the code and every elemental and\n   poison MAX damage value was scaled with garbage. */\n\nvoid __stdcall_edxsafe\nD2Common::ITEMS::ItemMods::ITEMMOD_ScaleValueForStatType(int *pnValue,eD2UnitStat eStatType)\n\n{\n  if (true) {\n    switch(eStatType) {\n    case UNITSTAT_hitpoints:\n    case UNITSTAT_maxhp:\n    case UNITSTAT_mana:\n    case UNITSTAT_maxmana:\n    case UNITSTAT_stamina:\n    case UNITSTAT_maxstamina:\n    case UNITSTAT_item_hp_perlevel:\n    case UNITSTAT_item_mana_perlevel:\n      *pnValue = *pnValue << 8;\n    }\n  }\n  return;\n}\n\n"
+    }
+  ],
+  "enumType": {
+    "kind": "ENUM",
+    "name": "eD2UnitStat",
+    "size": 4,
+    "values": [
+      {
+        "name": "UNITSTAT_strength",
+        "value": 0
+      },
+      {
+        "name": "UNITSTAT_energy",
+        "value": 1
+      },
+      {
+        "name": "UNITSTAT_dexterity",
+        "value": 2
+      },
+      {
+        "name": "UNITSTAT_vitality",
+        "value": 3
+      },
+      {
+        "name": "UNITSTAT_statpts",
+        "value": 4
+      },
+      {
+        "name": "UNITSTAT_newskills",
+        "value": 5
+      },
+      {
+        "name": "UNITSTAT_hitpoints",
+        "value": 6
+      },
+      {
+        "name": "UNITSTAT_maxhp",
+        "value": 7
+      },
+      {
+        "name": "UNITSTAT_mana",
+        "value": 8
+      },
+      {
+        "name": "UNITSTAT_maxmana",
+        "value": 9
+      },
+      {
+        "name": "UNITSTAT_stamina",
+        "value": 10
+      },
+      {
+        "name": "UNITSTAT_maxstamina",
+        "value": 11
+      },
+      {
+        "name": "UNITSTAT_level",
+        "value": 12
+      },
+      {
+        "name": "UNITSTAT_experience",
+        "value": 13
+      },
+      {
+        "name": "UNITSTAT_gold",
+        "value": 14
+      },
+      {
+        "name": "UNITSTAT_goldbank",
+        "value": 15
+      },
+      {
+        "name": "UNITSTAT_item_armor_percent",
+        "value": 16
+      },
+      {
+        "name": "UNITSTAT_item_maxdamage_percent",
+        "value": 17
+      },
+      {
+        "name": "UNITSTAT_item_mindamage_percent",
+        "value": 18
+      },
+      {
+        "name": "UNITSTAT_tohit",
+        "value": 19
+      },
+      {
+        "name": "UNITSTAT_toblock",
+        "value": 20
+      },
+      {
+        "name": "UNITSTAT_mindamage",
+        "value": 21
+      },
+      {
+        "name": "UNITSTAT_maxdamage",
+        "value": 22
+      },
+      {
+        "name": "UNITSTAT_secondary_mindamage",
+        "value": 23
+      },
+      {
+        "name": "UNITSTAT_secondary_maxdamage",
+        "value": 24
+      },
+      {
+        "name": "UNITSTAT_damagepercent",
+        "value": 25
+      },
+      {
+        "name": "UNITSTAT_manarecovery",
+        "value": 26
+      },
+      {
+        "name": "UNITSTAT_manarecoverybonus",
+        "value": 27
+      },
+      {
+        "name": "UNITSTAT_staminarecoverybonus",
+        "value": 28
+      },
+      {
+        "name": "UNITSTAT_lastexp",
+        "value": 29
+      },
+      {
+        "name": "UNITSTAT_nextexp",
+        "value": 30
+      },
+      {
+        "name": "UNITSTAT_armorclass",
+        "value": 31
+      },
+      {
+        "name": "UNITSTAT_armorclass_vs_missile",
+        "value": 32
+      },
+      {
+        "name": "UNITSTAT_armorclass_vs_hth",
+        "value": 33
+      },
+      {
+        "name": "UNITSTAT_normal_damage_reduction",
+        "value": 34
+      },
+      {
+        "name": "UNITSTAT_magic_damage_reduction",
+        "value": 35
+      },
+      {
+        "name": "UNITSTAT_damageresist",
+        "value": 36
+      },
+      {
+        "name": "UNITSTAT_magicresist",
+        "value": 37
+      },
+      {
+        "name": "UNITSTAT_maxmagicresist",
+        "value": 38
+      },
+      {
+        "name": "UNITSTAT_fireresist",
+        "value": 39
+      },
+      {
+        "name": "UNITSTAT_maxfireresist",
+        "value": 40
+      },
+      {
+        "name": "UNITSTAT_lightresist",
+        "value": 41
+      },
+      {
+        "name": "UNITSTAT_maxlightresist",
+        "value": 42
+      },
+      {
+        "name": "UNITSTAT_coldresist",
+        "value": 43
+      },
+      {
+        "name": "UNITSTAT_maxcoldresist",
+        "value": 44
+      },
+      {
+        "name": "UNITSTAT_poisonresist",
+        "value": 45
+      },
+      {
+        "name": "UNITSTAT_maxpoisonresist",
+        "value": 46
+      },
+      {
+        "name": "UNITSTAT_damageaura",
+        "value": 47
+      },
+      {
+        "name": "UNITSTAT_firemindam",
+        "value": 48
+      },
+      {
+        "name": "UNITSTAT_firemaxdam",
+        "value": 49
+      },
+      {
+        "name": "UNITSTAT_lightmindam",
+        "value": 50
+      },
+      {
+        "name": "UNITSTAT_lightmaxdam",
+        "value": 51
+      },
+      {
+        "name": "UNITSTAT_magicmindam",
+        "value": 52
+      },
+      {
+        "name": "UNITSTAT_magicmaxdam",
+        "value": 53
+      },
+      {
+        "name": "UNITSTAT_coldmindam",
+        "value": 54
+      },
+      {
+        "name": "UNITSTAT_coldmaxdam",
+        "value": 55
+      },
+      {
+        "name": "UNITSTAT_coldlength",
+        "value": 56
+      },
+      {
+        "name": "UNITSTAT_poisonmindam",
+        "value": 57
+      },
+      {
+        "name": "UNITSTAT_poisonmaxdam",
+        "value": 58
+      },
+      {
+        "name": "UNITSTAT_poisonlength",
+        "value": 59
+      },
+      {
+        "name": "UNITSTAT_lifedrainmindam",
+        "value": 60
+      },
+      {
+        "name": "UNITSTAT_lifedrainmaxdam",
+        "value": 61
+      },
+      {
+        "name": "UNITSTAT_manadrainmindam",
+        "value": 62
+      },
+      {
+        "name": "UNITSTAT_manadrainmaxdam",
+        "value": 63
+      },
+      {
+        "name": "UNITSTAT_stamdrainmindam",
+        "value": 64
+      },
+      {
+        "name": "UNITSTAT_stamdrainmaxdam",
+        "value": 65
+      },
+      {
+        "name": "UNITSTAT_stunlength",
+        "value": 66
+      },
+      {
+        "name": "UNITSTAT_velocitypercent",
+        "value": 67
+      },
+      {
+        "name": "UNITSTAT_attackrate",
+        "value": 68
+      },
+      {
+        "name": "UNITSTAT_other_animrate",
+        "value": 69
+      },
+      {
+        "name": "UNITSTAT_quantity",
+        "value": 70
+      },
+      {
+        "name": "UNITSTAT_value",
+        "value": 71
+      },
+      {
+        "name": "UNITSTAT_durability",
+        "value": 72
+      },
+      {
+        "name": "UNITSTAT_maxdurability",
+        "value": 73
+      },
+      {
+        "name": "UNITSTAT_hpregen",
+        "value": 74
+      },
+      {
+        "name": "UNITSTAT_item_maxdurability_percent",
+        "value": 75
+      },
+      {
+        "name": "UNITSTAT_item_maxhp_percent",
+        "value": 76
+      },
+      {
+        "name": "UNITSTAT_item_maxmana_percent",
+        "value": 77
+      },
+      {
+        "name": "UNITSTAT_item_attackertakesdamage",
+        "value": 78
+      },
+      {
+        "name": "UNITSTAT_item_goldbonus",
+        "value": 79
+      },
+      {
+        "name": "UNITSTAT_item_magicbonus",
+        "value": 80
+      },
+      {
+        "name": "UNITSTAT_item_knockback",
+        "value": 81
+      },
+      {
+        "name": "UNITSTAT_item_timeduration",
+        "value": 82
+      },
+      {
+        "name": "UNITSTAT_item_addclassskills",
+        "value": 83
+      },
+      {
+        "name": "UNITSTAT_unsentparam1",
+        "value": 84
+      },
+      {
+        "name": "UNITSTAT_item_addexperience",
+        "value": 85
+      },
+      {
+        "name": "UNITSTAT_item_healafterkill",
+        "value": 86
+      },
+      {
+        "name": "UNITSTAT_item_reducedprices",
+        "value": 87
+      },
+      {
+        "name": "UNITSTAT_item_doubleherbduration",
+        "value": 88
+      },
+      {
+        "name": "UNITSTAT_item_lightradius",
+        "value": 89
+      },
+      {
+        "name": "UNITSTAT_item_lightcolor",
+        "value": 90
+      },
+      {
+        "name": "UNITSTAT_item_req_percent",
+        "value": 91
+      },
+      {
+        "name": "UNITSTAT_item_levelreq",
+        "value": 92
+      },
+      {
+        "name": "UNITSTAT_item_fasterattackrate",
+        "value": 93
+      },
+      {
+        "name": "UNITSTAT_item_levelreqpct",
+        "value": 94
+      },
+      {
+        "name": "UNITSTAT_lastblockframe",
+        "value": 95
+      },
+      {
+        "name": "UNITSTAT_item_fastermovevelocity",
+        "value": 96
+      },
+      {
+        "name": "UNITSTAT_item_nonclassskill",
+        "value": 97
+      },
+      {
+        "name": "UNITSTAT_state",
+        "value": 98
+      },
+      {
+        "name": "UNITSTAT_item_fastergethitrate",
+        "value": 99
+      },
+      {
+        "name": "UNITSTAT_monster_playercount",
+        "value": 100
+      },
+      {
+        "name": "UNITSTAT_skill_poison_override_length",
+        "value": 101
+      },
+      {
+        "name": "UNITSTAT_item_fasterblockrate",
+        "value": 102
+      },
+      {
+        "name": "UNITSTAT_skill_bypass_undead",
+        "value": 103
+      },
+      {
+        "name": "UNITSTAT_skill_bypass_demons",
+        "value": 104
+      },
+      {
+        "name": "UNITSTAT_item_fastercastrate",
+        "value": 105
+      },
+      {
+        "name": "UNITSTAT_skill_bypass_beasts",
+        "value": 106
+      },
+      {
+        "name": "UNITSTAT_item_singleskill",
+        "value": 107
+      },
+      {
+        "name": "UNITSTAT_item_restinpeace",
+        "value": 108
+      },
+      {
+        "name": "UNITSTAT_curse_resistance",
+        "value": 109
+      },
+      {
+        "name": "UNITSTAT_item_poisonlengthresist",
+        "value": 110
+      },
+      {
+        "name": "UNITSTAT_item_normaldamage",
+        "value": 111
+      },
+      {
+        "name": "UNITSTAT_item_howl",
+        "value": 112
+      },
+      {
+        "name": "UNITSTAT_item_stupidity",
+        "value": 113
+      },
+      {
+        "name": "UNITSTAT_item_damagetomana",
+        "value": 114
+      },
+      {
+        "name": "UNITSTAT_item_ignoretargetac",
+        "value": 115
+      },
+      {
+        "name": "UNITSTAT_item_fractionaltargetac",
+        "value": 116
+      },
+      {
+        "name": "UNITSTAT_item_preventheal",
+        "value": 117
+      },
+      {
+        "name": "UNITSTAT_item_halffreezeduration",
+        "value": 118
+      },
+      {
+        "name": "UNITSTAT_item_tohit_percent",
+        "value": 119
+      },
+      {
+        "name": "UNITSTAT_item_damagetargetac",
+        "value": 120
+      },
+      {
+        "name": "UNITSTAT_item_demondamage_percent",
+        "value": 121
+      },
+      {
+        "name": "UNITSTAT_item_undeaddamage_percent",
+        "value": 122
+      },
+      {
+        "name": "UNITSTAT_item_demon_tohit",
+        "value": 123
+      },
+      {
+        "name": "UNITSTAT_item_undead_tohit",
+        "value": 124
+      },
+      {
+        "name": "UNITSTAT_item_throwable",
+        "value": 125
+      },
+      {
+        "name": "UNITSTAT_item_elemskill",
+        "value": 126
+      },
+      {
+        "name": "UNITSTAT_item_allskills",
+        "value": 127
+      },
+      {
+        "name": "UNITSTAT_item_attackertakeslightdamage",
+        "value": 128
+      },
+      {
+        "name": "UNITSTAT_ironmaiden_level",
+        "value": 129
+      },
+      {
+        "name": "UNITSTAT_lifetap_level",
+        "value": 130
+      },
+      {
+        "name": "UNITSTAT_thorns_percent",
+        "value": 131
+      },
+      {
+        "name": "UNITSTAT_bonearmor",
+        "value": 132
+      },
+      {
+        "name": "UNITSTAT_bonearmormax",
+        "value": 133
+      },
+      {
+        "name": "UNITSTAT_item_freeze",
+        "value": 134
+      },
+      {
+        "name": "UNITSTAT_item_openwounds",
+        "value": 135
+      },
+      {
+        "name": "UNITSTAT_item_crushingblow",
+        "value": 136
+      },
+      {
+        "name": "UNITSTAT_item_kickdamage",
+        "value": 137
+      },
+      {
+        "name": "UNITSTAT_item_manaafterkill",
+        "value": 138
+      },
+      {
+        "name": "UNITSTAT_item_healafterdemonkill",
+        "value": 139
+      },
+      {
+        "name": "UNITSTAT_item_extrablood",
+        "value": 140
+      },
+      {
+        "name": "UNITSTAT_item_deadlystrike",
+        "value": 141
+      },
+      {
+        "name": "UNITSTAT_item_absorbfire_percent",
+        "value": 142
+      },
+      {
+        "name": "UNITSTAT_item_absorbfire",
+        "value": 143
+      },
+      {
+        "name": "UNITSTAT_item_absorblight_percent",
+        "value": 144
+      },
+      {
+        "name": "UNITSTAT_item_absorblight",
+        "value": 145
+      },
+      {
+        "name": "UNITSTAT_item_absorbmagic_percent",
+        "value": 146
+      },
+      {
+        "name": "UNITSTAT_item_absorbmagic",
+        "value": 147
+      },
+      {
+        "name": "UNITSTAT_item_absorbcold_percent",
+        "value": 148
+      },
+      {
+        "name": "UNITSTAT_item_absorbcold",
+        "value": 149
+      },
+      {
+        "name": "UNITSTAT_item_slow",
+        "value": 150
+      },
+      {
+        "name": "UNITSTAT_item_aura",
+        "value": 151
+      },
+      {
+        "name": "UNITSTAT_item_indesctructible",
+        "value": 152
+      },
+      {
+        "name": "UNITSTAT_item_cannotbefrozen",
+        "value": 153
+      },
+      {
+        "name": "UNITSTAT_item_staminadrainpct",
+        "value": 154
+      },
+      {
+        "name": "UNITSTAT_item_reanimate",
+        "value": 155
+      },
+      {
+        "name": "UNITSTAT_item_pierce",
+        "value": 156
+      },
+      {
+        "name": "UNITSTAT_item_magicarrow",
+        "value": 157
+      },
+      {
+        "name": "UNITSTAT_item_explosivearrow",
+        "value": 158
+      },
+      {
+        "name": "UNITSTAT_item_throw_mindamage",
+        "value": 159
+      },
+      {
+        "name": "UNITSTAT_item_throw_maxdamage",
+        "value": 160
+      },
+      {
+        "name": "UNITSTAT_skill_handofathena",
+        "value": 161
+      },
+      {
+        "name": "UNITSTAT_skill_staminapercent",
+        "value": 162
+      },
+      {
+        "name": "UNITSTAT_skill_passive_staminapercent",
+        "value": 163
+      },
+      {
+        "name": "UNITSTAT_skill_concentration",
+        "value": 164
+      },
+      {
+        "name": "UNITSTAT_skill_enchant",
+        "value": 165
+      },
+      {
+        "name": "UNITSTAT_skill_pierce",
+        "value": 166
+      },
+      {
+        "name": "UNITSTAT_skill_conviction",
+        "value": 167
+      },
+      {
+        "name": "UNITSTAT_skill_chillingarmor",
+        "value": 168
+      },
+      {
+        "name": "UNITSTAT_skill_frenzy",
+        "value": 169
+      },
+      {
+        "name": "UNITSTAT_skill_decrepify",
+        "value": 170
+      },
+      {
+        "name": "UNITSTAT_skill_armor_percent",
+        "value": 171
+      },
+      {
+        "name": "UNITSTAT_alignment",
+        "value": 172
+      },
+      {
+        "name": "UNITSTAT_target0",
+        "value": 173
+      },
+      {
+        "name": "UNITSTAT_target1",
+        "value": 174
+      },
+      {
+        "name": "UNITSTAT_goldlost",
+        "value": 175
+      },
+      {
+        "name": "UNITSTAT_conversion_level",
+        "value": 176
+      },
+      {
+        "name": "UNITSTAT_conversion_maxhp",
+        "value": 177
+      },
+      {
+        "name": "UNITSTAT_unit_dooverlay",
+        "value": 178
+      },
+      {
+        "name": "UNITSTAT_attack_vs_montype",
+        "value": 179
+      },
+      {
+        "name": "UNITSTAT_damage_vs_montype",
+        "value": 180
+      },
+      {
+        "name": "UNITSTAT_fade",
+        "value": 181
+      },
+      {
+        "name": "UNITSTAT_armor_override_percent",
+        "value": 182
+      },
+      {
+        "name": "UNITSTAT_unused183",
+        "value": 183
+      },
+      {
+        "name": "UNITSTAT_unused184",
+        "value": 184
+      },
+      {
+        "name": "UNITSTAT_unused185",
+        "value": 185
+      },
+      {
+        "name": "UNITSTAT_unused186",
+        "value": 186
+      },
+      {
+        "name": "UNITSTAT_unused187",
+        "value": 187
+      },
+      {
+        "name": "UNITSTAT_item_addskill_tab",
+        "value": 188
+      },
+      {
+        "name": "UNITSTAT_unused189",
+        "value": 189
+      },
+      {
+        "name": "UNITSTAT_unused190",
+        "value": 190
+      },
+      {
+        "name": "UNITSTAT_unused191",
+        "value": 191
+      },
+      {
+        "name": "UNITSTAT_unused192",
+        "value": 192
+      },
+      {
+        "name": "UNITSTAT_unused193",
+        "value": 193
+      },
+      {
+        "name": "UNITSTAT_item_numsockets",
+        "value": 194
+      },
+      {
+        "name": "UNITSTAT_item_skillonattack",
+        "value": 195
+      },
+      {
+        "name": "UNITSTAT_item_skillonkill",
+        "value": 196
+      },
+      {
+        "name": "UNITSTAT_item_skillondeath",
+        "value": 197
+      },
+      {
+        "name": "UNITSTAT_item_skillonhit",
+        "value": 198
+      },
+      {
+        "name": "UNITSTAT_item_skillonlevelup",
+        "value": 199
+      },
+      {
+        "name": "UNITSTAT_unused200",
+        "value": 200
+      },
+      {
+        "name": "UNITSTAT_item_skillongethit",
+        "value": 201
+      },
+      {
+        "name": "UNITSTAT_unused202",
+        "value": 202
+      },
+      {
+        "name": "UNITSTAT_unused203",
+        "value": 203
+      },
+      {
+        "name": "UNITSTAT_item_charged_skill",
+        "value": 204
+      },
+      {
+        "name": "UNITSTAT_unused204",
+        "value": 205
+      },
+      {
+        "name": "UNITSTAT_unused205",
+        "value": 206
+      },
+      {
+        "name": "UNITSTAT_unused206",
+        "value": 207
+      },
+      {
+        "name": "UNITSTAT_unused207",
+        "value": 208
+      },
+      {
+        "name": "UNITSTAT_unused208",
+        "value": 209
+      },
+      {
+        "name": "UNITSTAT_unused209",
+        "value": 210
+      },
+      {
+        "name": "UNITSTAT_unused210",
+        "value": 211
+      },
+      {
+        "name": "UNITSTAT_unused211",
+        "value": 212
+      },
+      {
+        "name": "UNITSTAT_unused212",
+        "value": 213
+      },
+      {
+        "name": "UNITSTAT_item_armor_perlevel",
+        "value": 214
+      },
+      {
+        "name": "UNITSTAT_item_armorpercent_perlevel",
+        "value": 215
+      },
+      {
+        "name": "UNITSTAT_item_hp_perlevel",
+        "value": 216
+      },
+      {
+        "name": "UNITSTAT_item_mana_perlevel",
+        "value": 217
+      },
+      {
+        "name": "UNITSTAT_item_maxdamage_perlevel",
+        "value": 218
+      },
+      {
+        "name": "UNITSTAT_item_maxdamage_percent_perlevel",
+        "value": 219
+      },
+      {
+        "name": "UNITSTAT_item_strength_perlevel",
+        "value": 220
+      },
+      {
+        "name": "UNITSTAT_item_dexterity_perlevel",
+        "value": 221
+      },
+      {
+        "name": "UNITSTAT_item_energy_perlevel",
+        "value": 222
+      },
+      {
+        "name": "UNITSTAT_item_vitality_perlevel",
+        "value": 223
+      },
+      {
+        "name": "UNITSTAT_item_tohit_perlevel",
+        "value": 224
+      },
+      {
+        "name": "UNITSTAT_item_tohitpercent_perlevel",
+        "value": 225
+      },
+      {
+        "name": "UNITSTAT_item_cold_damagemax_perlevel",
+        "value": 226
+      },
+      {
+        "name": "UNITSTAT_item_fire_damagemax_perlevel",
+        "value": 227
+      },
+      {
+        "name": "UNITSTAT_item_ltng_damagemax_perlevel",
+        "value": 228
+      },
+      {
+        "name": "UNITSTAT_item_pois_damagemax_perlevel",
+        "value": 229
+      },
+      {
+        "name": "UNITSTAT_item_resist_cold_perlevel",
+        "value": 230
+      },
+      {
+        "name": "UNITSTAT_item_resist_fire_perlevel",
+        "value": 231
+      },
+      {
+        "name": "UNITSTAT_item_resist_ltng_perlevel",
+        "value": 232
+      },
+      {
+        "name": "UNITSTAT_item_resist_pois_perlevel",
+        "value": 233
+      },
+      {
+        "name": "UNITSTAT_item_absorb_cold_perlevel",
+        "value": 234
+      },
+      {
+        "name": "UNITSTAT_item_absorb_fire_perlevel",
+        "value": 235
+      },
+      {
+        "name": "UNITSTAT_item_absorb_ltng_perlevel",
+        "value": 236
+      },
+      {
+        "name": "UNITSTAT_item_absorb_pois_perlevel",
+        "value": 237
+      },
+      {
+        "name": "UNITSTAT_item_thorns_perlevel",
+        "value": 238
+      },
+      {
+        "name": "UNITSTAT_item_find_gold_perlevel",
+        "value": 239
+      },
+      {
+        "name": "UNITSTAT_item_find_magic_perlevel",
+        "value": 240
+      },
+      {
+        "name": "UNITSTAT_item_regenstamina_perlevel",
+        "value": 241
+      },
+      {
+        "name": "UNITSTAT_item_stamina_perlevel",
+        "value": 242
+      },
+      {
+        "name": "UNITSTAT_item_damage_demon_perlevel",
+        "value": 243
+      },
+      {
+        "name": "UNITSTAT_item_damage_undead_perlevel",
+        "value": 244
+      },
+      {
+        "name": "UNITSTAT_item_tohit_demon_perlevel",
+        "value": 245
+      },
+      {
+        "name": "UNITSTAT_item_tohit_undead_perlevel",
+        "value": 246
+      },
+      {
+        "name": "UNITSTAT_item_crushingblow_perlevel",
+        "value": 247
+      },
+      {
+        "name": "UNITSTAT_item_openwounds_perlevel",
+        "value": 248
+      },
+      {
+        "name": "UNITSTAT_item_kick_damage_perlevel",
+        "value": 249
+      },
+      {
+        "name": "UNITSTAT_item_deadlystrike_perlevel",
+        "value": 250
+      },
+      {
+        "name": "UNITSTAT_item_find_gems_perlevel",
+        "value": 251
+      },
+      {
+        "name": "UNITSTAT_item_replenish_durability",
+        "value": 252
+      },
+      {
+        "name": "UNITSTAT_item_replenish_quantity",
+        "value": 253
+      },
+      {
+        "name": "UNITSTAT_item_extra_stack",
+        "value": 254
+      },
+      {
+        "name": "UNITSTAT_item_find_item",
+        "value": 255
+      },
+      {
+        "name": "UNITSTAT_item_slash_damage",
+        "value": 256
+      },
+      {
+        "name": "UNITSTAT_item_slash_damage_percent",
+        "value": 257
+      },
+      {
+        "name": "UNITSTAT_item_crush_damage",
+        "value": 258
+      },
+      {
+        "name": "UNITSTAT_item_crush_damage_percent",
+        "value": 259
+      },
+      {
+        "name": "UNITSTAT_item_thrust_damage",
+        "value": 260
+      },
+      {
+        "name": "UNITSTAT_item_thrust_damage_percent",
+        "value": 261
+      },
+      {
+        "name": "UNITSTAT_item_absorb_slash",
+        "value": 262
+      },
+      {
+        "name": "UNITSTAT_item_absorb_crush",
+        "value": 263
+      },
+      {
+        "name": "UNITSTAT_item_absorb_thrust",
+        "value": 264
+      },
+      {
+        "name": "UNITSTAT_item_absorb_slash_percent",
+        "value": 265
+      },
+      {
+        "name": "UNITSTAT_item_absorb_crush_percent",
+        "value": 266
+      },
+      {
+        "name": "UNITSTAT_item_absorb_thrust_percent",
+        "value": 267
+      },
+      {
+        "name": "UNITSTAT_item_armor_bytime",
+        "value": 268
+      },
+      {
+        "name": "UNITSTAT_item_armorpercent_bytime",
+        "value": 269
+      },
+      {
+        "name": "UNITSTAT_item_hp_bytime",
+        "value": 270
+      },
+      {
+        "name": "UNITSTAT_item_mana_bytime",
+        "value": 271
+      },
+      {
+        "name": "UNITSTAT_item_maxdamage_bytime",
+        "value": 272
+      },
+      {
+        "name": "UNITSTAT_item_maxdamage_percent_bytime",
+        "value": 273
+      },
+      {
+        "name": "UNITSTAT_item_strength_bytime",
+        "value": 274
+      },
+      {
+        "name": "UNITSTAT_item_dexterity_bytime",
+        "value": 275
+      },
+      {
+        "name": "UNITSTAT_item_energy_bytime",
+        "value": 276
+      },
+      {
+        "name": "UNITSTAT_item_vitality_bytime",
+        "value": 277
+      },
+      {
+        "name": "UNITSTAT_item_tohit_bytime",
+        "value": 278
+      },
+      {
+        "name": "UNITSTAT_item_tohitpercent_bytime",
+        "value": 279
+      },
+      {
+        "name": "UNITSTAT_item_cold_damagemax_bytime",
+        "value": 280
+      },
+      {
+        "name": "UNITSTAT_item_fire_damagemax_bytime",
+        "value": 281
+      },
+      {
+        "name": "UNITSTAT_item_ltng_damagemax_bytime",
+        "value": 282
+      },
+      {
+        "name": "UNITSTAT_item_pois_damagemax_bytime",
+        "value": 283
+      },
+      {
+        "name": "UNITSTAT_item_resist_cold_bytime",
+        "value": 284
+      },
+      {
+        "name": "UNITSTAT_item_resist_fire_bytime",
+        "value": 285
+      },
+      {
+        "name": "UNITSTAT_item_resist_ltng_bytime",
+        "value": 286
+      },
+      {
+        "name": "UNITSTAT_item_resist_pois_bytime",
+        "value": 287
+      },
+      {
+        "name": "UNITSTAT_item_absorb_cold_bytime",
+        "value": 288
+      },
+      {
+        "name": "UNITSTAT_item_absorb_fire_bytime",
+        "value": 289
+      },
+      {
+        "name": "UNITSTAT_item_absorb_ltng_bytime",
+        "value": 290
+      },
+      {
+        "name": "UNITSTAT_item_absorb_pois_bytime",
+        "value": 291
+      },
+      {
+        "name": "UNITSTAT_item_find_gold_bytime",
+        "value": 292
+      },
+      {
+        "name": "UNITSTAT_item_find_magic_bytime",
+        "value": 293
+      },
+      {
+        "name": "UNITSTAT_item_regenstamina_bytime",
+        "value": 294
+      },
+      {
+        "name": "UNITSTAT_item_stamina_bytime",
+        "value": 295
+      },
+      {
+        "name": "UNITSTAT_item_damage_demon_bytime",
+        "value": 296
+      },
+      {
+        "name": "UNITSTAT_item_damage_undead_bytime",
+        "value": 297
+      },
+      {
+        "name": "UNITSTAT_item_tohit_demon_bytime",
+        "value": 298
+      },
+      {
+        "name": "UNITSTAT_item_tohit_undead_bytime",
+        "value": 299
+      },
+      {
+        "name": "UNITSTAT_item_crushingblow_bytime",
+        "value": 300
+      },
+      {
+        "name": "UNITSTAT_item_openwounds_bytime",
+        "value": 301
+      },
+      {
+        "name": "UNITSTAT_item_kick_damage_bytime",
+        "value": 302
+      },
+      {
+        "name": "UNITSTAT_item_deadlystrike_bytime",
+        "value": 303
+      },
+      {
+        "name": "UNITSTAT_item_find_gems_bytime",
+        "value": 304
+      },
+      {
+        "name": "UNITSTAT_item_pierce_cold",
+        "value": 305
+      },
+      {
+        "name": "UNITSTAT_item_pierce_fire",
+        "value": 306
+      },
+      {
+        "name": "UNITSTAT_item_pierce_ltng",
+        "value": 307
+      },
+      {
+        "name": "UNITSTAT_item_pierce_pois",
+        "value": 308
+      },
+      {
+        "name": "UNITSTAT_item_damage_vs_monster",
+        "value": 309
+      },
+      {
+        "name": "UNITSTAT_item_damage_percent_vs_monster",
+        "value": 310
+      },
+      {
+        "name": "UNITSTAT_item_tohit_vs_monster",
+        "value": 311
+      },
+      {
+        "name": "UNITSTAT_item_tohit_percent_vs_monster",
+        "value": 312
+      },
+      {
+        "name": "UNITSTAT_item_ac_vs_monster",
+        "value": 313
+      },
+      {
+        "name": "UNITSTAT_item_ac_percent_vs_monster",
+        "value": 314
+      },
+      {
+        "name": "UNITSTAT_firelength",
+        "value": 315
+      },
+      {
+        "name": "UNITSTAT_burningmin",
+        "value": 316
+      },
+      {
+        "name": "UNITSTAT_burningmax",
+        "value": 317
+      },
+      {
+        "name": "UNITSTAT_progressive_damage",
+        "value": 318
+      },
+      {
+        "name": "UNITSTAT_progressive_steal",
+        "value": 319
+      },
+      {
+        "name": "UNITSTAT_progressive_other",
+        "value": 320
+      },
+      {
+        "name": "UNITSTAT_progressive_fire",
+        "value": 321
+      },
+      {
+        "name": "UNITSTAT_progressive_cold",
+        "value": 322
+      },
+      {
+        "name": "UNITSTAT_progressive_lightning",
+        "value": 323
+      },
+      {
+        "name": "UNITSTAT_item_extra_charges",
+        "value": 324
+      },
+      {
+        "name": "UNITSTAT_progressive_tohit",
+        "value": 325
+      },
+      {
+        "name": "UNITSTAT_poison_count",
+        "value": 326
+      },
+      {
+        "name": "UNITSTAT_damage_framerate",
+        "value": 327
+      },
+      {
+        "name": "UNITSTAT_pierce_idx",
+        "value": 328
+      },
+      {
+        "name": "UNITSTAT_passive_fire_mastery",
+        "value": 329
+      },
+      {
+        "name": "UNITSTAT_passive_ltng_mastery",
+        "value": 330
+      },
+      {
+        "name": "UNITSTAT_passive_cold_mastery",
+        "value": 331
+      },
+      {
+        "name": "UNITSTAT_passive_pois_mastery",
+        "value": 332
+      },
+      {
+        "name": "UNITSTAT_passive_fire_pierce",
+        "value": 333
+      },
+      {
+        "name": "UNITSTAT_passive_ltng_pierce",
+        "value": 334
+      },
+      {
+        "name": "UNITSTAT_passive_cold_pierce",
+        "value": 335
+      },
+      {
+        "name": "UNITSTAT_passive_pois_pierce",
+        "value": 336
+      },
+      {
+        "name": "UNITSTAT_passive_critical_strike",
+        "value": 337
+      },
+      {
+        "name": "UNITSTAT_passive_dodge",
+        "value": 338
+      },
+      {
+        "name": "UNITSTAT_passive_avoid",
+        "value": 339
+      },
+      {
+        "name": "UNITSTAT_passive_evade",
+        "value": 340
+      },
+      {
+        "name": "UNITSTAT_passive_warmth",
+        "value": 341
+      },
+      {
+        "name": "UNITSTAT_passive_mastery_melee_th",
+        "value": 342
+      },
+      {
+        "name": "UNITSTAT_passive_mastery_melee_dmg",
+        "value": 343
+      },
+      {
+        "name": "UNITSTAT_passive_mastery_melee_crit",
+        "value": 344
+      },
+      {
+        "name": "UNITSTAT_passive_mastery_throw_th",
+        "value": 345
+      },
+      {
+        "name": "UNITSTAT_passive_mastery_throw_dmg",
+        "value": 346
+      },
+      {
+        "name": "UNITSTAT_passive_mastery_throw_crit",
+        "value": 347
+      },
+      {
+        "name": "UNITSTAT_passive_weaponblock",
+        "value": 348
+      },
+      {
+        "name": "UNITSTAT_passive_summon_resist",
+        "value": 349
+      },
+      {
+        "name": "UNITSTAT_modifierlist_skill",
+        "value": 350
+      },
+      {
+        "name": "UNITSTAT_modifierlist_level",
+        "value": 351
+      },
+      {
+        "name": "UNITSTAT_last_sent_hp_pct",
+        "value": 352
+      },
+      {
+        "name": "UNITSTAT_source_unit_type",
+        "value": 353
+      },
+      {
+        "name": "UNITSTAT_source_unit_id",
+        "value": 354
+      },
+      {
+        "name": "UNITSTAT_shortparam1",
+        "value": 355
+      },
+      {
+        "name": "UNITSTAT_questitemdifficulty",
+        "value": 356
+      },
+      {
+        "name": "UNITSTAT_passive_mag_mastery",
+        "value": 357
+      },
+      {
+        "name": "UNITSTAT_passive_mag_pierce",
+        "value": 358
+      }
+    ]
+  },
+  "tables": {
+    "paramFuncdefs": {},
+    "funcdefSignatures": {},
+    "functionSignatures": {},
+    "variableNames": [
+      "g_nCurrentInventoryPage"
+    ],
+    "voidPointerFunctions": [],
+    "rootQualifiedTypedefs": [],
+    "typedefTargets": {
+      "BOOL": "int",
+      "eD2UnitStat": "uint32_t"
+    },
+    "structFields": {},
+    "globalTypes": {
+      "g_nCurrentInventoryPage": "int",
+      "D2Client::UI::Inv::g_nCurrentInventoryPage": "int"
+    },
+    "enumValues": {
+      "UNITSTAT_strength": 0,
+      "UNITSTAT_energy": 1,
+      "UNITSTAT_dexterity": 2,
+      "UNITSTAT_vitality": 3,
+      "UNITSTAT_statpts": 4,
+      "UNITSTAT_newskills": 5,
+      "UNITSTAT_hitpoints": 6,
+      "UNITSTAT_maxhp": 7,
+      "UNITSTAT_mana": 8,
+      "UNITSTAT_maxmana": 9,
+      "UNITSTAT_stamina": 10,
+      "UNITSTAT_maxstamina": 11,
+      "UNITSTAT_level": 12,
+      "UNITSTAT_experience": 13,
+      "UNITSTAT_gold": 14,
+      "UNITSTAT_goldbank": 15,
+      "UNITSTAT_item_armor_percent": 16,
+      "UNITSTAT_item_maxdamage_percent": 17,
+      "UNITSTAT_item_mindamage_percent": 18,
+      "UNITSTAT_tohit": 19,
+      "UNITSTAT_toblock": 20,
+      "UNITSTAT_mindamage": 21,
+      "UNITSTAT_maxdamage": 22,
+      "UNITSTAT_secondary_mindamage": 23,
+      "UNITSTAT_secondary_maxdamage": 24,
+      "UNITSTAT_damagepercent": 25,
+      "UNITSTAT_manarecovery": 26,
+      "UNITSTAT_manarecoverybonus": 27,
+      "UNITSTAT_staminarecoverybonus": 28,
+      "UNITSTAT_lastexp": 29,
+      "UNITSTAT_nextexp": 30,
+      "UNITSTAT_armorclass": 31,
+      "UNITSTAT_armorclass_vs_missile": 32,
+      "UNITSTAT_armorclass_vs_hth": 33,
+      "UNITSTAT_normal_damage_reduction": 34,
+      "UNITSTAT_magic_damage_reduction": 35,
+      "UNITSTAT_damageresist": 36,
+      "UNITSTAT_magicresist": 37,
+      "UNITSTAT_maxmagicresist": 38,
+      "UNITSTAT_fireresist": 39,
+      "UNITSTAT_maxfireresist": 40,
+      "UNITSTAT_lightresist": 41,
+      "UNITSTAT_maxlightresist": 42,
+      "UNITSTAT_coldresist": 43,
+      "UNITSTAT_maxcoldresist": 44,
+      "UNITSTAT_poisonresist": 45,
+      "UNITSTAT_maxpoisonresist": 46,
+      "UNITSTAT_damageaura": 47,
+      "UNITSTAT_firemindam": 48,
+      "UNITSTAT_firemaxdam": 49,
+      "UNITSTAT_lightmindam": 50,
+      "UNITSTAT_lightmaxdam": 51,
+      "UNITSTAT_magicmindam": 52,
+      "UNITSTAT_magicmaxdam": 53,
+      "UNITSTAT_coldmindam": 54,
+      "UNITSTAT_coldmaxdam": 55,
+      "UNITSTAT_coldlength": 56,
+      "UNITSTAT_poisonmindam": 57,
+      "UNITSTAT_poisonmaxdam": 58,
+      "UNITSTAT_poisonlength": 59,
+      "UNITSTAT_lifedrainmindam": 60,
+      "UNITSTAT_lifedrainmaxdam": 61,
+      "UNITSTAT_manadrainmindam": 62,
+      "UNITSTAT_manadrainmaxdam": 63,
+      "UNITSTAT_stamdrainmindam": 64,
+      "UNITSTAT_stamdrainmaxdam": 65,
+      "UNITSTAT_stunlength": 66,
+      "UNITSTAT_velocitypercent": 67,
+      "UNITSTAT_attackrate": 68,
+      "UNITSTAT_other_animrate": 69,
+      "UNITSTAT_quantity": 70,
+      "UNITSTAT_value": 71,
+      "UNITSTAT_durability": 72,
+      "UNITSTAT_maxdurability": 73,
+      "UNITSTAT_hpregen": 74,
+      "UNITSTAT_item_maxdurability_percent": 75,
+      "UNITSTAT_item_maxhp_percent": 76,
+      "UNITSTAT_item_maxmana_percent": 77,
+      "UNITSTAT_item_attackertakesdamage": 78,
+      "UNITSTAT_item_goldbonus": 79,
+      "UNITSTAT_item_magicbonus": 80,
+      "UNITSTAT_item_knockback": 81,
+      "UNITSTAT_item_timeduration": 82,
+      "UNITSTAT_item_addclassskills": 83,
+      "UNITSTAT_unsentparam1": 84,
+      "UNITSTAT_item_addexperience": 85,
+      "UNITSTAT_item_healafterkill": 86,
+      "UNITSTAT_item_reducedprices": 87,
+      "UNITSTAT_item_doubleherbduration": 88,
+      "UNITSTAT_item_lightradius": 89,
+      "UNITSTAT_item_lightcolor": 90,
+      "UNITSTAT_item_req_percent": 91,
+      "UNITSTAT_item_levelreq": 92,
+      "UNITSTAT_item_fasterattackrate": 93,
+      "UNITSTAT_item_levelreqpct": 94,
+      "UNITSTAT_lastblockframe": 95,
+      "UNITSTAT_item_fastermovevelocity": 96,
+      "UNITSTAT_item_nonclassskill": 97,
+      "UNITSTAT_state": 98,
+      "UNITSTAT_item_fastergethitrate": 99,
+      "UNITSTAT_monster_playercount": 100,
+      "UNITSTAT_skill_poison_override_length": 101,
+      "UNITSTAT_item_fasterblockrate": 102,
+      "UNITSTAT_skill_bypass_undead": 103,
+      "UNITSTAT_skill_bypass_demons": 104,
+      "UNITSTAT_item_fastercastrate": 105,
+      "UNITSTAT_skill_bypass_beasts": 106,
+      "UNITSTAT_item_singleskill": 107,
+      "UNITSTAT_item_restinpeace": 108,
+      "UNITSTAT_curse_resistance": 109,
+      "UNITSTAT_item_poisonlengthresist": 110,
+      "UNITSTAT_item_normaldamage": 111,
+      "UNITSTAT_item_howl": 112,
+      "UNITSTAT_item_stupidity": 113,
+      "UNITSTAT_item_damagetomana": 114,
+      "UNITSTAT_item_ignoretargetac": 115,
+      "UNITSTAT_item_fractionaltargetac": 116,
+      "UNITSTAT_item_preventheal": 117,
+      "UNITSTAT_item_halffreezeduration": 118,
+      "UNITSTAT_item_tohit_percent": 119,
+      "UNITSTAT_item_damagetargetac": 120,
+      "UNITSTAT_item_demondamage_percent": 121,
+      "UNITSTAT_item_undeaddamage_percent": 122,
+      "UNITSTAT_item_demon_tohit": 123,
+      "UNITSTAT_item_undead_tohit": 124,
+      "UNITSTAT_item_throwable": 125,
+      "UNITSTAT_item_elemskill": 126,
+      "UNITSTAT_item_allskills": 127,
+      "UNITSTAT_item_attackertakeslightdamage": 128,
+      "UNITSTAT_ironmaiden_level": 129,
+      "UNITSTAT_lifetap_level": 130,
+      "UNITSTAT_thorns_percent": 131,
+      "UNITSTAT_bonearmor": 132,
+      "UNITSTAT_bonearmormax": 133,
+      "UNITSTAT_item_freeze": 134,
+      "UNITSTAT_item_openwounds": 135,
+      "UNITSTAT_item_crushingblow": 136,
+      "UNITSTAT_item_kickdamage": 137,
+      "UNITSTAT_item_manaafterkill": 138,
+      "UNITSTAT_item_healafterdemonkill": 139,
+      "UNITSTAT_item_extrablood": 140,
+      "UNITSTAT_item_deadlystrike": 141,
+      "UNITSTAT_item_absorbfire_percent": 142,
+      "UNITSTAT_item_absorbfire": 143,
+      "UNITSTAT_item_absorblight_percent": 144,
+      "UNITSTAT_item_absorblight": 145,
+      "UNITSTAT_item_absorbmagic_percent": 146,
+      "UNITSTAT_item_absorbmagic": 147,
+      "UNITSTAT_item_absorbcold_percent": 148,
+      "UNITSTAT_item_absorbcold": 149,
+      "UNITSTAT_item_slow": 150,
+      "UNITSTAT_item_aura": 151,
+      "UNITSTAT_item_indesctructible": 152,
+      "UNITSTAT_item_cannotbefrozen": 153,
+      "UNITSTAT_item_staminadrainpct": 154,
+      "UNITSTAT_item_reanimate": 155,
+      "UNITSTAT_item_pierce": 156,
+      "UNITSTAT_item_magicarrow": 157,
+      "UNITSTAT_item_explosivearrow": 158,
+      "UNITSTAT_item_throw_mindamage": 159,
+      "UNITSTAT_item_throw_maxdamage": 160,
+      "UNITSTAT_skill_handofathena": 161,
+      "UNITSTAT_skill_staminapercent": 162,
+      "UNITSTAT_skill_passive_staminapercent": 163,
+      "UNITSTAT_skill_concentration": 164,
+      "UNITSTAT_skill_enchant": 165,
+      "UNITSTAT_skill_pierce": 166,
+      "UNITSTAT_skill_conviction": 167,
+      "UNITSTAT_skill_chillingarmor": 168,
+      "UNITSTAT_skill_frenzy": 169,
+      "UNITSTAT_skill_decrepify": 170,
+      "UNITSTAT_skill_armor_percent": 171,
+      "UNITSTAT_alignment": 172,
+      "UNITSTAT_target0": 173,
+      "UNITSTAT_target1": 174,
+      "UNITSTAT_goldlost": 175,
+      "UNITSTAT_conversion_level": 176,
+      "UNITSTAT_conversion_maxhp": 177,
+      "UNITSTAT_unit_dooverlay": 178,
+      "UNITSTAT_attack_vs_montype": 179,
+      "UNITSTAT_damage_vs_montype": 180,
+      "UNITSTAT_fade": 181,
+      "UNITSTAT_armor_override_percent": 182,
+      "UNITSTAT_unused183": 183,
+      "UNITSTAT_unused184": 184,
+      "UNITSTAT_unused185": 185,
+      "UNITSTAT_unused186": 186,
+      "UNITSTAT_unused187": 187,
+      "UNITSTAT_item_addskill_tab": 188,
+      "UNITSTAT_unused189": 189,
+      "UNITSTAT_unused190": 190,
+      "UNITSTAT_unused191": 191,
+      "UNITSTAT_unused192": 192,
+      "UNITSTAT_unused193": 193,
+      "UNITSTAT_item_numsockets": 194,
+      "UNITSTAT_item_skillonattack": 195,
+      "UNITSTAT_item_skillonkill": 196,
+      "UNITSTAT_item_skillondeath": 197,
+      "UNITSTAT_item_skillonhit": 198,
+      "UNITSTAT_item_skillonlevelup": 199,
+      "UNITSTAT_unused200": 200,
+      "UNITSTAT_item_skillongethit": 201,
+      "UNITSTAT_unused202": 202,
+      "UNITSTAT_unused203": 203,
+      "UNITSTAT_item_charged_skill": 204,
+      "UNITSTAT_unused204": 205,
+      "UNITSTAT_unused205": 206,
+      "UNITSTAT_unused206": 207,
+      "UNITSTAT_unused207": 208,
+      "UNITSTAT_unused208": 209,
+      "UNITSTAT_unused209": 210,
+      "UNITSTAT_unused210": 211,
+      "UNITSTAT_unused211": 212,
+      "UNITSTAT_unused212": 213,
+      "UNITSTAT_item_armor_perlevel": 214,
+      "UNITSTAT_item_armorpercent_perlevel": 215,
+      "UNITSTAT_item_hp_perlevel": 216,
+      "UNITSTAT_item_mana_perlevel": 217,
+      "UNITSTAT_item_maxdamage_perlevel": 218,
+      "UNITSTAT_item_maxdamage_percent_perlevel": 219,
+      "UNITSTAT_item_strength_perlevel": 220,
+      "UNITSTAT_item_dexterity_perlevel": 221,
+      "UNITSTAT_item_energy_perlevel": 222,
+      "UNITSTAT_item_vitality_perlevel": 223,
+      "UNITSTAT_item_tohit_perlevel": 224,
+      "UNITSTAT_item_tohitpercent_perlevel": 225,
+      "UNITSTAT_item_cold_damagemax_perlevel": 226,
+      "UNITSTAT_item_fire_damagemax_perlevel": 227,
+      "UNITSTAT_item_ltng_damagemax_perlevel": 228,
+      "UNITSTAT_item_pois_damagemax_perlevel": 229,
+      "UNITSTAT_item_resist_cold_perlevel": 230,
+      "UNITSTAT_item_resist_fire_perlevel": 231,
+      "UNITSTAT_item_resist_ltng_perlevel": 232,
+      "UNITSTAT_item_resist_pois_perlevel": 233,
+      "UNITSTAT_item_absorb_cold_perlevel": 234,
+      "UNITSTAT_item_absorb_fire_perlevel": 235,
+      "UNITSTAT_item_absorb_ltng_perlevel": 236,
+      "UNITSTAT_item_absorb_pois_perlevel": 237,
+      "UNITSTAT_item_thorns_perlevel": 238,
+      "UNITSTAT_item_find_gold_perlevel": 239,
+      "UNITSTAT_item_find_magic_perlevel": 240,
+      "UNITSTAT_item_regenstamina_perlevel": 241,
+      "UNITSTAT_item_stamina_perlevel": 242,
+      "UNITSTAT_item_damage_demon_perlevel": 243,
+      "UNITSTAT_item_damage_undead_perlevel": 244,
+      "UNITSTAT_item_tohit_demon_perlevel": 245,
+      "UNITSTAT_item_tohit_undead_perlevel": 246,
+      "UNITSTAT_item_crushingblow_perlevel": 247,
+      "UNITSTAT_item_openwounds_perlevel": 248,
+      "UNITSTAT_item_kick_damage_perlevel": 249,
+      "UNITSTAT_item_deadlystrike_perlevel": 250,
+      "UNITSTAT_item_find_gems_perlevel": 251,
+      "UNITSTAT_item_replenish_durability": 252,
+      "UNITSTAT_item_replenish_quantity": 253,
+      "UNITSTAT_item_extra_stack": 254,
+      "UNITSTAT_item_find_item": 255,
+      "UNITSTAT_item_slash_damage": 256,
+      "UNITSTAT_item_slash_damage_percent": 257,
+      "UNITSTAT_item_crush_damage": 258,
+      "UNITSTAT_item_crush_damage_percent": 259,
+      "UNITSTAT_item_thrust_damage": 260,
+      "UNITSTAT_item_thrust_damage_percent": 261,
+      "UNITSTAT_item_absorb_slash": 262,
+      "UNITSTAT_item_absorb_crush": 263,
+      "UNITSTAT_item_absorb_thrust": 264,
+      "UNITSTAT_item_absorb_slash_percent": 265,
+      "UNITSTAT_item_absorb_crush_percent": 266,
+      "UNITSTAT_item_absorb_thrust_percent": 267,
+      "UNITSTAT_item_armor_bytime": 268,
+      "UNITSTAT_item_armorpercent_bytime": 269,
+      "UNITSTAT_item_hp_bytime": 270,
+      "UNITSTAT_item_mana_bytime": 271,
+      "UNITSTAT_item_maxdamage_bytime": 272,
+      "UNITSTAT_item_maxdamage_percent_bytime": 273,
+      "UNITSTAT_item_strength_bytime": 274,
+      "UNITSTAT_item_dexterity_bytime": 275,
+      "UNITSTAT_item_energy_bytime": 276,
+      "UNITSTAT_item_vitality_bytime": 277,
+      "UNITSTAT_item_tohit_bytime": 278,
+      "UNITSTAT_item_tohitpercent_bytime": 279,
+      "UNITSTAT_item_cold_damagemax_bytime": 280,
+      "UNITSTAT_item_fire_damagemax_bytime": 281,
+      "UNITSTAT_item_ltng_damagemax_bytime": 282,
+      "UNITSTAT_item_pois_damagemax_bytime": 283,
+      "UNITSTAT_item_resist_cold_bytime": 284,
+      "UNITSTAT_item_resist_fire_bytime": 285,
+      "UNITSTAT_item_resist_ltng_bytime": 286,
+      "UNITSTAT_item_resist_pois_bytime": 287,
+      "UNITSTAT_item_absorb_cold_bytime": 288,
+      "UNITSTAT_item_absorb_fire_bytime": 289,
+      "UNITSTAT_item_absorb_ltng_bytime": 290,
+      "UNITSTAT_item_absorb_pois_bytime": 291,
+      "UNITSTAT_item_find_gold_bytime": 292,
+      "UNITSTAT_item_find_magic_bytime": 293,
+      "UNITSTAT_item_regenstamina_bytime": 294,
+      "UNITSTAT_item_stamina_bytime": 295,
+      "UNITSTAT_item_damage_demon_bytime": 296,
+      "UNITSTAT_item_damage_undead_bytime": 297,
+      "UNITSTAT_item_tohit_demon_bytime": 298,
+      "UNITSTAT_item_tohit_undead_bytime": 299,
+      "UNITSTAT_item_crushingblow_bytime": 300,
+      "UNITSTAT_item_openwounds_bytime": 301,
+      "UNITSTAT_item_kick_damage_bytime": 302,
+      "UNITSTAT_item_deadlystrike_bytime": 303,
+      "UNITSTAT_item_find_gems_bytime": 304,
+      "UNITSTAT_item_pierce_cold": 305,
+      "UNITSTAT_item_pierce_fire": 306,
+      "UNITSTAT_item_pierce_ltng": 307,
+      "UNITSTAT_item_pierce_pois": 308,
+      "UNITSTAT_item_damage_vs_monster": 309,
+      "UNITSTAT_item_damage_percent_vs_monster": 310,
+      "UNITSTAT_item_tohit_vs_monster": 311,
+      "UNITSTAT_item_tohit_percent_vs_monster": 312,
+      "UNITSTAT_item_ac_vs_monster": 313,
+      "UNITSTAT_item_ac_percent_vs_monster": 314,
+      "UNITSTAT_firelength": 315,
+      "UNITSTAT_burningmin": 316,
+      "UNITSTAT_burningmax": 317,
+      "UNITSTAT_progressive_damage": 318,
+      "UNITSTAT_progressive_steal": 319,
+      "UNITSTAT_progressive_other": 320,
+      "UNITSTAT_progressive_fire": 321,
+      "UNITSTAT_progressive_cold": 322,
+      "UNITSTAT_progressive_lightning": 323,
+      "UNITSTAT_item_extra_charges": 324,
+      "UNITSTAT_progressive_tohit": 325,
+      "UNITSTAT_poison_count": 326,
+      "UNITSTAT_damage_framerate": 327,
+      "UNITSTAT_pierce_idx": 328,
+      "UNITSTAT_passive_fire_mastery": 329,
+      "UNITSTAT_passive_ltng_mastery": 330,
+      "UNITSTAT_passive_cold_mastery": 331,
+      "UNITSTAT_passive_pois_mastery": 332,
+      "UNITSTAT_passive_fire_pierce": 333,
+      "UNITSTAT_passive_ltng_pierce": 334,
+      "UNITSTAT_passive_cold_pierce": 335,
+      "UNITSTAT_passive_pois_pierce": 336,
+      "UNITSTAT_passive_critical_strike": 337,
+      "UNITSTAT_passive_dodge": 338,
+      "UNITSTAT_passive_avoid": 339,
+      "UNITSTAT_passive_evade": 340,
+      "UNITSTAT_passive_warmth": 341,
+      "UNITSTAT_passive_mastery_melee_th": 342,
+      "UNITSTAT_passive_mastery_melee_dmg": 343,
+      "UNITSTAT_passive_mastery_melee_crit": 344,
+      "UNITSTAT_passive_mastery_throw_th": 345,
+      "UNITSTAT_passive_mastery_throw_dmg": 346,
+      "UNITSTAT_passive_mastery_throw_crit": 347,
+      "UNITSTAT_passive_weaponblock": 348,
+      "UNITSTAT_passive_summon_resist": 349,
+      "UNITSTAT_modifierlist_skill": 350,
+      "UNITSTAT_modifierlist_level": 351,
+      "UNITSTAT_last_sent_hp_pct": 352,
+      "UNITSTAT_source_unit_type": 353,
+      "UNITSTAT_source_unit_id": 354,
+      "UNITSTAT_shortparam1": 355,
+      "UNITSTAT_questitemdifficulty": 356,
+      "UNITSTAT_passive_mag_mastery": 357,
+      "UNITSTAT_passive_mag_pierce": 358
+    }
+  },
+  "forms": {
+    "00486b30": "swdefault(g_nCurrentInventoryPage,3,4,5)",
+    "00486b80": "swdefault(g_nCurrentInventoryPage,3,4,5,17)",
+    "0065ce40": "swdefault(eStatType,57,58)"
+  }
+}
