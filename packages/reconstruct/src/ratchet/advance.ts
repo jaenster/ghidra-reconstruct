@@ -18,11 +18,14 @@
  * release (members.ts writes them) is consumed once every record holding it was captured
  * MATCH: each now stores the body the release let through, so the release has nothing left to
  * do. While a holder is not captured the row stays, or the next regen would put the old body back.
+ * A release that names a body is consumed only once the tree carries that body: a measurement of
+ * the tree the release was decided on (the advance run again, or a regen that kept a newer body)
+ * captures the holders with the old body, and dropping the row there would veto the release.
  */
 import { bindSites, bodyForm, scanSites, type Binding } from './refs.js';
 import { capture, locate } from './ratchet.js';
 import type { RatchetRecord, RatchetStore } from './store.js';
-import { normalizeAddress } from './store.js';
+import { bodyHash, normalizeAddress } from './store.js';
 import type { SymbolIndex } from './symbol-index.js';
 
 export interface AuditRow { address: string; name: string; status: string }
@@ -131,8 +134,15 @@ export function advance(index: SymbolIndex, store: RatchetStore, audit: Map<stri
     if (rec.kind !== 'match') continue;
     for (const m of rec.members.slice(1)) holders.set(m.address, [...(holders.get(m.address) ?? []), rec.address]);
   }
+  const releaseBody = new Map(releases.map(r => [r.address, r.body]));
+  const carriesReleased = (member: string) => {
+    const body = releaseBody.get(member);
+    if (body === undefined) return true;
+    const loc = locate(index, member);
+    return loc !== undefined && bodyHash(loc.definition) === body;
+  };
   for (const [member, hs] of holders) {
-    if (released.has(member) && !existing.has(member) && hs.every(h => captured.has(h))) {
+    if (released.has(member) && !existing.has(member) && hs.every(h => captured.has(h)) && carriesReleased(member)) {
       consumed.add(member);
       rows.push({ address: member, name: '', status: 'consumed', audit: audit.get(member)?.status ?? 'not in audit', detail: `member release: ${hs.join(', ')} captured with the body it let through` });
     }
