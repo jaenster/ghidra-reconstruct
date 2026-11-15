@@ -18,7 +18,13 @@
  *    literal, a thunk forwarding to it - is in a function of its own emitted unit;
  *  - no data initializer names it (a function table, a vtable, a callback slot);
  *  - no foreign source names it: source outside the generated tree (hand-written
- *    files built beside it, a binder that imports by address) counts as another unit;
+ *    files built beside it, a binder that imports by address) counts as another unit.
+ *    An import by address alone does not count for a function selected by its storage:
+ *    whoever calls the original's address has to load the registers the original reads
+ *    (d2bsng imports AUTOMAP_AddLayer 00458d40 as `GameAsmFunc InitAutomapLayer_I{0x58D40}`,
+ *    an asm thunk that sets EDI and jumps), and only the static has that convention - an
+ *    extern copy reads the stack, so keeping it extern serves no importer and costs the
+ *    unit the original's code;
  *  - at least one other function of that unit calls it: VC8 drops a static that
  *    nothing calls. A function nothing references at all still had a caller: VC8
  *    emits a static's copy, in its own convention, for a call it then inlined. Where
@@ -52,9 +58,10 @@
  * unit header declares (`externEntries`). A foreign call by that name does not keep
  * the function extern, so the static keeps its own name, its own register
  * convention and every call its unit makes. Any other foreign mention of the
- * function itself - its own name, its address (a binder that imports by address),
- * its name taken as a value (a patch that redirects calls to it) - still keeps it
- * extern: none of those can be satisfied by a second function. The entry is emitted
+ * function itself - its own name, its address (a binder that imports by address) when
+ * its storage does not select it, its name taken as a value (a patch that redirects
+ * calls to it) - still keeps it extern: none of those can be satisfied by a second
+ * function. The entry is emitted
  * whenever foreign source calls it, whether the function ended up static or not, so
  * hand-written code that adopts the entry never depends on the selection.
  *
@@ -531,6 +538,8 @@ export function selectFileStaticFunctions(inputs: FileStaticInputs): FileStaticS
 
   // Candidates, and the spellings a reference to each can take.
   const candidates = new Map<string, ExtractedFunction>();   // address key -> function
+  // Candidates their storage selects (parameters in registers no declared convention uses).
+  const byStorage = new Set<string>();
   const byName = new Map<string, string>();                  // spelling -> address key
   // Candidates whose name another symbol shares: name -> qualified name -> address key.
   const shared = new Map<string, Map<string, string>>();
@@ -551,6 +560,7 @@ export function selectFileStaticFunctions(inputs: FileStaticInputs): FileStaticS
       continue;
     }
     if (!storage) measuredStatic++;
+    else byStorage.add(key);
     // Every TU that calls a header inline defines it (inline-hosts.ts): none can own it.
     if (isInlineHost(func)) {
       refuse('a header inline', func);
@@ -661,6 +671,8 @@ export function selectFileStaticFunctions(inputs: FileStaticInputs): FileStaticS
 
   // Foreign source that names a candidate, by symbol or by address.
   const foreignReferenced = new Set<string>();
+  // Candidates foreign source reaches only by address (a binder's import).
+  const foreignAddressed = new Set<string>();
   // Foreign calls through an extern entry, by the entry's name; any emitted function
   // can have one, not only a candidate. A name shared with another symbol is skipped:
   // the call could mean either.
@@ -698,7 +710,7 @@ export function selectFileStaticFunctions(inputs: FileStaticInputs): FileStaticS
       }, value => {
         if (src.addressBase === undefined) return;
         const k = (value + src.addressBase).toString(16).padStart(8, '0');
-        if (candidates.has(k)) foreignReferenced.add(k);
+        if (candidates.has(k)) foreignAddressed.add(k);
       });
     }
   }
@@ -723,7 +735,7 @@ export function selectFileStaticFunctions(inputs: FileStaticInputs): FileStaticS
     const unit = inputs.unitOf.get(key)!;
     const refs = referrers.get(key) ?? [];
     if (dataReferenced.has(key)) { refuse('named by a data initializer', func); continue; }
-    if (foreignReferenced.has(key)) { refuse('named by foreign source', func); continue; }
+    if (foreignReferenced.has(key) || (foreignAddressed.has(key) && !byStorage.has(key))) { refuse('named by foreign source', func); continue; }
     if (ambiguous.has(key)) { refuse('name shared with another symbol', func); continue; }
     if (refs.some(r => r.unit === undefined)) { refuse('referenced from excluded code', func); continue; }
     if (refs.some(r => r.unit !== unit)) { refuse('referenced from another unit', func); continue; }

@@ -393,8 +393,11 @@ describe('selectFileStaticFunctions', () => {
   });
 
   it('reads foreign integer literals as addresses only with an address base', () => {
-    const all = [helper, caller];
-    const text = 'inline GameAsmFunc ClickHelper_I{0x1000};';
+    // On the stack, selected only by the oracle's measurement: a C caller by address can call it.
+    const measured = fn('Helper', '00401000', 'A', '  return nValue + 1;', { params: [onStack()] });
+    measured.tags = [{ type: 'vc8linkage', data: `static;ev=0123456789;bh=32-89abcdef;dh=${vc8formBodyHash(measured.decompiled!)}` }];
+    const all = [measured, caller];
+    const text = 'inline CdeclFunc<int(int)> ClickHelper_I{0x1000};';
     const without = selectFileStaticFunctions({
       allFunctions: all, unitOf: unitsOf(all), globals: [], foreignSources: [{ path: 'imports.h', text }],
     });
@@ -445,12 +448,29 @@ describe('selectFileStaticFunctions', () => {
     assert.deepStrictEqual([...sel.externEntries], ['00401000']);
   });
 
-  it('keeps it extern when a binder imports it by address, whatever else calls the entry', () => {
+  // AUTOMAP_AddLayer 00458d40 takes nLayer in EDI; d2bsng imports it as
+  // `GameAsmFunc InitAutomapLayer_I{0x58D40}`, a thunk that loads EDI and jumps. Only the
+  // static reads EDI: kept extern, the rebuild read the stack and lost the original's code.
+  it('makes it static when a binder imports it only by address and its storage selects it', () => {
     const all = [helper, caller];
     const sel = selectFileStaticFunctions({
       allFunctions: all, unitOf: unitsOf(all), globals: [],
       foreignSources: [
         { path: 'support/hand.cpp', text: 'int Hook() { return A::Helper_Extern(7); }' },
+        { path: 'imports.h', text: 'inline GameAsmFunc Helper_I{0x1000};', addressBase: 0x400000 },
+      ],
+    });
+    assert.deepStrictEqual([...sel.selected.keys()], ['00401000']);
+    assert.deepStrictEqual([...sel.externEntries], ['00401000']);
+    assert.strictEqual(sel.refused.get('named by foreign source'), undefined);
+  });
+
+  it('keeps it extern when foreign source names it, whatever imports it by address', () => {
+    const all = [helper, caller];
+    const sel = selectFileStaticFunctions({
+      allFunctions: all, unitOf: unitsOf(all), globals: [],
+      foreignSources: [
+        { path: 'support/hand.cpp', text: 'int Hook() { return A::Helper(7); }' },
         { path: 'imports.h', text: 'inline GameAsmFunc Helper_I{0x1000};', addressBase: 0x400000 },
       ],
     });
