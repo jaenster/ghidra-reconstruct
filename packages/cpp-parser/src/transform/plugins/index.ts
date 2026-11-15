@@ -507,6 +507,11 @@ export {
 } from './builtins/bool-select-form.js';
 
 export {
+  compareBranchFormPlugin,
+  type CompareBranchFormOptions,
+} from './builtins/compare-branch-form.js';
+
+export {
   registerStoreSelectPlugin,
   type RegisterStoreSelectOptions,
 } from './builtins/register-store-select.js';
@@ -1027,6 +1032,7 @@ import { guardNullNestPlugin } from './builtins/guard-null-nest.js';
 import { returnCopySplitPlugin, returnCopyJoinPlugin } from './builtins/return-copy-shape.js';
 import { strlenDifferencePlugin } from './builtins/strlen-difference.js';
 import { boolSelectFormPlugin } from './builtins/bool-select-form.js';
+import { compareBranchFormPlugin } from './builtins/compare-branch-form.js';
 import { registerStoreSelectPlugin } from './builtins/register-store-select.js';
 import { linkNextSelectPlugin } from './builtins/link-next-select.js';
 import { heldAddressMemberPlugin } from './builtins/held-address-member.js';
@@ -1333,6 +1339,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   selectArgumentPlugin,       // Matching: a local set to one of two constants and read once by a call -> the select in the argument (priority 989.983)
   strlenDifferencePlugin,     // Matching: an inlined strlen scan's difference from its start is the length (priority 989.985)
   boolSelectFormPlugin,       // Matching: a materialised comparison spelled for the original's setcc or neg/sbb, from the compare sites (priority 989.99)
+  compareBranchFormPlugin,    // Matching: a value-position comparison the original branched on -> a zeroed local set in one arm, from the compare sites (priority 989.991)
   registerStoreSelectPlugin,  // Matching: two stores of one lvalue whose constant the original stores from a register become a select (priority 989.992)
   linkNextSelectPlugin,       // Matching: a loop-leaving sign test of a list link becomes the inlined next-node select and a null test (priority 989.993)
   heldAddressMemberPlugin,    // Matching: a member of the link an inlined TSLink member runs on is addressed through the local holding it (priority 989.994)

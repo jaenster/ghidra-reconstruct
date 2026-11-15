@@ -4157,6 +4157,13 @@ function transformDecompiledCode(
     // neg/sbb selects the generator folds.
     if (enclosing?.compareSites) {
       perPluginOptions['bool-select-form'] = { compareSites: enclosing.compareSites, decompile: decompiled };
+      // A value-position comparison the original branched on (compare-branch-form.ts): the
+      // rows give where the decompiler printed it and how the original read its flags.
+      perPluginOptions['compare-branch-form'] = {
+        compareSites: enclosing.compareSites,
+        onSite: (e: { kind: string; text: string }) =>
+          console.warn(`[compare-branch-form] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.kind} ${e.text}`),
+      };
     }
     // Two stores of one lvalue whose constant the original stores from the register of a
     // merged value become one store of a select (register-store-select.ts).
