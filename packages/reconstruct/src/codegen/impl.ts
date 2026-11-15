@@ -4085,6 +4085,13 @@ function transformDecompiledCode(
         onSite: (e: { line: number }) =>
           console.warn(`[hoisted-return] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: dropped at line ${e.line}`),
       };
+      // A zero return whose copy moves a register into EAX: the join VC8 tail-duplicated
+      // (join-constant-return.ts).
+      perPluginOptions['join-constant-return'] = {
+        branchLayout: layout,
+        onSite: (e: { line: number; form: string }) =>
+          console.warn(`[join-return] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.form} at line ${e.line}`),
+      };
       // A case ending in the return after its switch, one copy in the original (case-return-break.ts).
       perPluginOptions['case-return-break'] = {
         branchLayout: layout,

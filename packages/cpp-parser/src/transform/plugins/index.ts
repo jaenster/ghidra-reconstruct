@@ -553,6 +553,11 @@ export {
 } from './builtins/record-null-fold.js';
 
 export {
+  joinConstantReturnPlugin,
+  type JoinConstantReturnOptions,
+} from './builtins/join-constant-return.js';
+
+export {
   caseReturnBreakPlugin,
   type CaseReturnBreakOptions,
 } from './builtins/case-return-break.js';
@@ -1020,6 +1025,7 @@ import { linkSelectTailPlugin } from './builtins/link-select-tail.js';
 import { linkRetestForPlugin } from './builtins/link-retest-for.js';
 import { hoistedReturnDropPlugin } from './builtins/hoisted-return-drop.js';
 import { caseReturnBreakPlugin } from './builtins/case-return-break.js';
+import { joinConstantReturnPlugin } from './builtins/join-constant-return.js';
 import { armConstantCallPlugin } from './builtins/arm-constant-call.js';
 import { fieldPointerFoldPlugin } from './builtins/field-pointer-fold.js';
 import { newResultTempPlugin } from './builtins/new-result-temp.js';
@@ -1299,6 +1305,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   guardNullNestPlugin,        // Matching: a compound guard and a later null test of one return become one null-initialised test (priority 989.97)
   returnCopySplitPlugin,      // Matching: an else-if chain whose first arm falls into a constant return writes the return in that arm (priority 989.975)
   returnCopyJoinPlugin,       // Matching: an arm and a guard returning one constant before another final return become an else-if join (priority 989.98)
+  joinConstantReturnPlugin,   // Matching: a zero return whose copy moves a register into EAX goes back to its join (priority 989.988)
   caseReturnBreakPlugin,      // Matching: a case ending in the return after its switch, one copy in the original, breaks (priority 989.987)
   linkRetestForPlugin,        // Matching: a walk to the last node the original re-tests after the copy becomes for (; p && p->next; p = p->next) (priority 989.986)
   linkSelectTailPlugin,       // Matching: a TSList::Next's two tail-duplicated returns become its one link pick (priority 989.985)
