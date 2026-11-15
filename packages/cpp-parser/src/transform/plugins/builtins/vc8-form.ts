@@ -1,3 +1,4 @@
+import { guardInitializer } from './guarded-initializer.js';
 import { builtinTruthSite } from './truth-form-safety.js';
 /**
  * VC8 source forms recorded per function.
@@ -28,6 +29,11 @@ import { builtinTruthSite } from './truth-form-safety.js';
  *                        Refused when one statement mentions what another stores, or
  *                        when a statement that stores through memory shares the run with
  *                        a call.
+ *   guardinit(V)        a unique top-level primitive/pointer copy enters its following
+ *                        builtin guard, and guard reads of V use the identical-type source.
+ *                        The local is private, both bindings dominate the copy, and no
+ *                        later outer statement reads V. Escapes, unknown conversions,
+ *                        volatile/const storage, shadowing and alternate entries refuse.
  *   fold(V)              each value stored to local V is written into its uses up to the
  *                        next store to V, and the store goes; `*V` of a stored `&X` is X.
  *                        V's declaration goes once nothing names V. A compound store
@@ -441,6 +447,7 @@ import { restoreSwitchDefault, switchDefaultValue } from './switch-default.js';
 import { countdownFieldPtrwalk } from './countdown-field-ptrwalk.js';
 
 export type Vc8Form =
+  | { op: 'guardinit'; name: string }
   | { op: 'zerolife'; name: string }
   | { op: 'nullfault32' }
   | { op: 'swdefault'; expr: string; values: string[]; index?: number }
@@ -554,7 +561,7 @@ export interface Vc8FormOptions {
   selectTables?: Vc8FormTables;
 }
 
-const OPS = new Set(['zerolife', 'nullfault32', 'swdefault', 'seq', 'fold', 'join', 'coalesce', 'recordwalk', 'cache', 'own', 'guards', 'merge-guards', 'retval', 'branchret', 'width', 'boolflag', 'retwiden', 'arms',
+const OPS = new Set(['guardinit', 'zerolife', 'nullfault32', 'swdefault', 'seq', 'fold', 'join', 'coalesce', 'recordwalk', 'cache', 'own', 'guards', 'merge-guards', 'retval', 'branchret', 'width', 'boolflag', 'retwiden', 'arms',
   'nest', 'merge-tail', 'tailguard', 'tailcopy', 'continue', 'dup', 'tarms', 'zero', 'nonzero', 'bool', 'cmp', 'swap', 'ifsel', 'clamp', 'split', 'select', 'decl', 'unselect', 'tsel', 'hoist',
   'nestcall', 'fill', 'elems', 'copy', 'shift', 'ptrwalk', 'rowptr', 'acc', 'retvar', 'onecall', 'roundup', 'swmerge', 'switch', 'dec', 'opas', 'range', 'castout', 'signbit', 'nullfield', 'zinit', 'znew', 'swclamp', 'retbase', 'postdec']);
 
@@ -596,6 +603,7 @@ export function parseVc8Form(text: string): Vc8Form | undefined {
       return args.length >= 2 && args[0] !== '' && values.every(v => v !== undefined) && new Set(values).size === values.length
         && (n === undefined || (Number.isSafeInteger(n) && n >= 1)) ? { op: 'swdefault', expr: args[0], values: args.slice(1), ...(n === undefined ? {} : { index: n }) } : undefined;
     }
+    case 'guardinit': return args.length === 1 && !anchor && /^[A-Za-z_]\w*$/.test(args[0]) ? { op: 'guardinit', name: args[0] } : undefined;
     case 'nullfault32': return args.length === 0 && !anchor ? { op: 'nullfault32' } : undefined;
     case 'seq': {
       // `seq(a,b,@N)`: the N-th run, when several store these.
@@ -5104,6 +5112,7 @@ function doRetbase(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'retbase' }>): vo
 }
 
 const APPLY: { [K in Vc8Form['op']]: (fn: FunctionDecl, f: Extract<Vc8Form, { op: K }>) => void } = {
+  guardinit: (fn, f) => { const why = guardInitializer(fn, f.name, selectTables); if (why) refuse(why); },
   zerolife: doZeroLife,
   nullfault32: doNullfault32,
   swdefault: (fn, f) => { const why = restoreSwitchDefault(fn, f.expr, f.values, f.index, selectTables); if (why) refuse(why); },
