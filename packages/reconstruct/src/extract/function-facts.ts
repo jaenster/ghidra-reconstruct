@@ -40,7 +40,7 @@
 
 import type { GhidraConnection, ExtractedFunction } from '../types.js';
 import { STAMPER_JAVA, functionStampsScript, parseFunctionStamps, normalizeEntry, type TypeStamp } from './function-stamps.js';
-import { printsComparison, javaStringHash, parseCompareSiteOutput, COMPARE_SETTER_JAVA } from './compare-sites.js';
+import { printsComparison, javaStringHash, parseCompareSiteOutput, COMPARE_SETTER_JAVA, COMPARE_USE_JAVA } from './compare-sites.js';
 import { printsBranch, parseBranchLayout, IF_OPERANDS_DECL_JAVA, IF_OPERANDS_TOKEN_JAVA, RETURN_COPIES_JAVA, EDGES_DECL_JAVA, EDGES_TOKEN_JAVA, EDGES_AFTER_JAVA, PUSHES_JAVA } from './branch-layout.js';
 import { printsCallTemporary, parseCallOrder, CALL_PUSHES_JAVA, SEH_LINK_JAVA } from './call-order.js';
 import { ACCESS_ORDER_TOKEN_JAVA, parseAccessOrderRow, printsAccess } from './access-order.js';
@@ -89,6 +89,7 @@ import { ZERO_REGISTER_TEST_JAVA, EQUALITY_TEST_DELTA_JAVA } from './zero-regist
 export const FUNCTION_FACTS_SCRIPT = `
 ${STAMPER_JAVA}
 ${COMPARE_SETTER_JAVA}
+${COMPARE_USE_JAVA}
 final java.util.List<String> todo = new java.util.ArrayList<>();
 for (String a : "__ITEMS__".split(";")) if (a.length() > 0) todo.add(a);
 final java.util.concurrent.ConcurrentLinkedQueue<String> queue = new java.util.concurrent.ConcurrentLinkedQueue<>(todo);
@@ -247,7 +248,8 @@ ${ZERO_REGISTER_TEST_JAVA}
                 .append('\\t').append(user == null ? "-" : user.getAddress().toString()).append('\\t').append(user == null ? "-" : user.getMnemonicString())
                 .append('\\t').append(setter == null ? "-" : setter.getAddress().toString()).append('\\t').append(setter == null ? "-" : setter.getMnemonicString())
                 .append('\\t').append(w).append('\\t').append(aKind).append('\\t').append(bKind).append('\\t').append(bVal)
-                .append('\\t').append(onPair ? 1 : 0).append('\\n');
+                .append('\\t').append(onPair ? 1 : 0)
+                .append('\\t').append(compareUse.of(op, compareUse.branches(op), L, passive)).append('\\n');
             }
           }
           // branch-layout and call-order, over the same lines
@@ -500,7 +502,7 @@ println(sb.toString());
  */
 export const FACT_SCRIPT_VERSION = createHash('sha1')
   .update(FUNCTION_FACTS_SCRIPT).update(LABEL_FLOW_SCRIPT).update(functionStampsScript([], []))
-  .update('facts-17')
+  .update('facts-18')
   .digest('hex').slice(0, 16);
 
 export function functionFactsScript(batch: string[], threads = 8, timeout = 60): string {
