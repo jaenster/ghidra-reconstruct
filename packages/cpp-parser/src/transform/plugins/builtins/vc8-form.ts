@@ -238,6 +238,12 @@ import { builtinTruthSite } from './truth-form-safety.js';
  *                        calls nothing, stores nothing and reads only such locals and
  *                        constants; refused under `&&`, `||` or `?:` arms, which would make
  *                        the call conditional, and in a loop condition.
+ *                        A pointer lookup may cross bare, nonvolatile pointer declarations
+ *                        that shadow nothing it reads. A top-level pointer temporary may
+ *                        be dead before terminal labels when the entire suffix names it
+ *                        nowhere and cannot jump back. These extensions require typed
+ *                        by-value call arguments, an exact pointer return type, and no
+ *                        references or lambda captures.
  *   fill(A[,i])          `memset(A[ + K], 0, N * sizeof(A[0]));` (or a byte count, A a
  *                        local array of a scalar whose size divides it), and the pointer
  *                        loop the string instruction decompiles to, `P = A; for (N = K; N;
@@ -3212,6 +3218,68 @@ function deadAfter(fn: FunctionDecl, b: CompoundStmt, k: number, last: number, v
   return !blockReadsAfter(fn, b, v, k, true);
 }
 
+/** An ordinary pointer object: no implicit construction/destruction or volatile access. */
+function nestcallPointerType(type: string | undefined): boolean {
+  return !!type && /\*$/.test(type) && !/[&()[\]]|volatile/.test(type);
+}
+
+/**
+ * The extra nestcall shapes cannot rely on addressTaken alone: a local reference or
+ * a reference parameter can expose the pointer object without a written &V. Unknown
+ * parameter types refuse, as do captures and local reference declarations.
+ */
+function privatePointerLookup(fn: FunctionDecl, v: string, value: Expression): boolean {
+  const declarations = [...walk(fn.body!)].filter(x => x.node.kind === NodeKind.VariableDecl
+    && (x.node as VariableDecl).name.name === v);
+  if (declarations.length !== 1 || fn.parameters.some(p =>
+    isId((p as unknown as { name?: Identifier | null }).name, v))) return false;
+  // Unlike source-form expression matching, type identity must retain namespaces:
+  // A::Client* and B::Client* may need a pointer adjustment between them.
+  const typeKey = (s: string) => s.replace(/\s+/g, '').replace(/^::/, '');
+  const type = typeKey(emit((declarations[0].node as VariableDecl).type as never));
+  if (!nestcallPointerType(type) || addressTaken(fn, v)) return false;
+  const lookup = unparen(value) as CallExpr;
+  const lookupName = calleeName(lookup.callee);
+  const returned = lookupName && selectTables?.functionReturnTypes
+    ? scopedLookup(selectTables.functionReturnTypes, lookupName, selectTables.enclosingSegments ?? []) : undefined;
+  if (!returned || typeKey(returned) !== type) return false;
+  for (const { node } of walk(fn.body!)) {
+    if (node.kind === NodeKind.LambdaExpr || node.kind === NodeKind.FunctionDecl
+      || node.kind === NodeKind.ClassDecl || node.kind === NodeKind.StructDecl
+      || node.kind === NodeKind.AsmDecl || node.kind === NodeKind.MacroDecl) return false;
+    if (node.kind === NodeKind.VariableDecl && [...walk((node as VariableDecl).type)].some(x =>
+      x.node.kind === NodeKind.ReferenceType || x.node.kind === NodeKind.RValueReferenceType)) return false;
+    if (node.kind === NodeKind.VariableDecl) {
+      const d = node as VariableDecl;
+      if (d.initializer?.kind === NodeKind.InitListExpr && mentions(d.initializer, v)) return false;
+    }
+    if (node.kind !== NodeKind.CallExpr) continue;
+    const call = node as CallExpr;
+    const name = calleeName(call.callee);
+    const params = name && selectTables?.functionParamTypes
+      ? scopedLookup(selectTables.functionParamTypes, name, selectTables.enclosingSegments ?? []) : undefined;
+    for (let i = 0; i < call.arguments.length; i++) {
+      if (!mentions(call.arguments[i], v)) continue;
+      const type = params?.[i];
+      if (!type || !nestcallPointerType(norm(type))) return false;
+    }
+  }
+  return true;
+}
+
+/** No later label can read V or return to a previous read of it from this suffix. */
+function deadBeforeTerminalLabels(fn: FunctionDecl, b: CompoundStmt, last: number, v: string, value: Expression): boolean {
+  if (b !== fn.body || !privatePointerLookup(fn, v, value)) return false;
+  for (let i = last; i < b.statements.length; i++) {
+    const s = b.statements[i];
+    if (i > last && mentions(s, v)) return false;
+    for (const { node } of walk(s)) {
+      if (LIFE_JUMPS.has(node.kind) && node.kind !== NodeKind.LabelStmt) return false;
+    }
+  }
+  return true;
+}
+
 function doNestcall(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'nestcall' }>): void {
   const v = f.name;
   const hits: Array<{ b: CompoundStmt; k: number; value: Expression; decl?: VariableDecl }> = [];
@@ -3225,7 +3293,16 @@ function doNestcall(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'nestcall' }>): 
   if (addressTaken(fn, v)) refuse(`&${v} is taken`);
   if (!keepsValue(declaredType(fn, v))) refuse(`${v}'s type may convert the stored value`);
   if (mentions(hit.value, v)) refuse(`${v} is stored from itself`);
-  const next = b.statements[k + 1] ?? refuse('nothing follows the store');
+  let nextIndex = k + 1;
+  while (nextIndex < b.statements.length) {
+    const d = declOf(b.statements[nextIndex]);
+    if (!d || d.initializer || d.specifiers.length || d.attributes.length
+      || !nestcallPointerType(norm(emit(d.type as never))) || d.name.name === v
+      || mentions(hit.value, d.name.name)) break;
+    if (!privatePointerLookup(fn, v, hit.value)) break;
+    nextIndex++;
+  }
+  const next = b.statements[nextIndex] ?? refuse('nothing follows the store');
   // The expression the call moves into: the statement's own, never a loop's.
   let root: Expression | undefined;
   if (next.kind === NodeKind.ExprStmt) root = (next as ExprStmt).expression;
@@ -3306,7 +3383,8 @@ function doNestcall(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'nestcall' }>): 
       default: refuse(`the call cannot go under ${p.kind}`);
     }
   }
-  if (!deadAfter(fn, b, k, k + 1, v)) refuse(`${v} is read after the next statement`);
+  if (!deadAfter(fn, b, k, nextIndex, v) && !deadBeforeTerminalLabels(fn, b, nextIndex, v, hit.value))
+    refuse(`${v} is read after the next statement`);
   put(uses[0].slot!, cloneNode(hit.value));
   if (hit.decl && mentionsOutsideDecl(fn, v)) hit.decl.initializer = null;
   else b.statements.splice(k, 1);
