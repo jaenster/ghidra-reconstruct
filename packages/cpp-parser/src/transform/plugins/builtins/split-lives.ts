@@ -56,7 +56,7 @@ import type {
 import { Expr, Decl, Stmt, Type } from '../../../ast/factory.js';
 import { findNodesByKind } from '../../../ast/visitor.js';
 import { emit } from '../../../emit/index.js';
-import { createTransformer, updateNode, type Transformer } from '../../transformer.js';
+import { createTransformer, updateNode, cloneNode, type Transformer } from '../../transformer.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
 import { buildFunctionFlow, calleeSpelling, ENTRY_DEF, funcdefOutWidth, type FunctionFlow, type Reach } from '../../cfg/index.js';
 import { callNeedsFrame, frameAliasOffset, knownCountWrites, movableLocals } from './frame-group-locals.js';
@@ -1915,6 +1915,26 @@ export function splitLives(fn: FunctionDecl, o: SplitLivesOptions): Statement[] 
     if (!splitThisRound) break;
   }
   return changed ? statements : null;
+}
+
+/** Conservative dry proof for handing a scalar parameter lifetime to this pass. */
+export function canSplitScalarParameter(fn: FunctionDecl, name: string, options: SplitLivesOptions): boolean {
+  if (!fn.body || !options.slots?.some(s => s.name === name && s.isParameter && s.size === 4)) return false;
+  const before = new Set([...fn.parameters.map(p => p.name?.name),
+    ...(findNodesByKind(fn.body, NodeKind.VariableDecl) as VariableDecl[]).map(d => d.name.name)]);
+  const original = buildFunctionFlow(fn.body.statements, new Set([...before].filter((n): n is string => !!n)));
+  if (!original.cfg.nodes.some(n => original.writes(n.id).has(name))) return false;
+  const copy = cloneNode(fn);
+  const statements = splitLives(copy, { ...options, onReport: undefined });
+  if (!statements) return false;
+  const body = { ...copy.body!, statements };
+  const locals = findNodesByKind(body, NodeKind.VariableDecl) as VariableDecl[];
+  const created = locals.filter(d => !before.has(d.name.name));
+  // Pointer lives or slot overlays are not a proof of an integer local. Refuse
+  // the deferral if any such lifetime is involved in this conservative preview.
+  if (!created.length || created.some(d => lifeClass(spellingOf(d.type)) !== 'int')) return false;
+  const flow = buildFunctionFlow(statements, new Set([...before].filter((n): n is string => !!n).concat(locals.map(d => d.name.name))));
+  return flow.cfg.nodes.every(n => !flow.writes(n.id).has(name));
 }
 
 function createSplitLivesTransformer(options?: PluginOptions): Transformer {

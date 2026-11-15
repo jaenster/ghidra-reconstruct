@@ -335,9 +335,11 @@ describe('reused-param-slot: mixed integer views of a reused pointer slot', () =
     assert.doesNotMatch(out, /\(Region\*\)nP/);
   });
 
-  it('leaves scalar-only lifetimes to split-lives when full codegen supplies frame slots', () => {
+  it('keeps a proved scalar lifetime integer without relying on a later split', () => {
     const src = `int f(Region *p, uint32_t next) { UseRegion(p); p = (Region *)(uint32_t)next; if (!p) return 0; return (int)p; }`;
-    assert.strictEqual(run(src, { stackParameters: ['p'], deferScalarValues: true }), run(src, {}));
+    const out=run(src,{stackParameters:['p']});
+    assert.match(out,/uint32_t nP;/);assert.match(out,/if \(!nP\)/);assert.match(out,/return \(int\)nP;/);
+    assert.doesNotMatch(out,/p = \(Region\*\)/);
   });
 
   for (const use of ['if (p == other) return 1;', 'if (p && other) return 1;']) {

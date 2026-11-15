@@ -8,6 +8,7 @@ import type {ExtractedFunction, ReconstructOptions} from '../types.js';
 // v2105 live complete models; golden damage bodies come from ece9b518 main.
 // 0057c6c0 is the review's address; the nDefender example is 0057c420.
 const fixture = JSON.parse(readFileSync(new URL('./fixtures/reused-pointer-slot-v2105.json', import.meta.url), 'utf8'));
+const review = JSON.parse(readFileSync(new URL('./fixtures/reused-pointer-review-v2109.json', import.meta.url), 'utf8'));
 const options: ReconstructOptions = {
   outputDir: './out', format: 'cpp', organization: 'namespace',
   generateCMake: false, generateSourceMaps: false, transformPreset: 'full',
@@ -22,6 +23,18 @@ describe('reused integer pointer slot through complete function codegen', () => 
       const fn = row.function as ExtractedFunction;
       const output = generateFunctionImplementation(fn, undefined, options, context);
       if (fn.address !== '00573cb0') {
+        if(fn.address==='0057c6c0'){
+          // The old blanket deferral also suppressed this already-proved enum
+          // life. Retain the frozen main golden and name its exact corrections.
+          const expected=row.expected
+            .replace('    eD2UnitType eVictimType;','    eD2UnitType eVictimType;\n    eD2UnitType nVictim;')
+            .replace('pVictim = (D2UnitStrc*)0x6;','nVictim = (eD2UnitType)6;')
+            .replace('pVictim = (D2UnitStrc*)pUnit->eUnitType;','nVictim = pUnit->eUnitType;')
+            .replace('pVictim == (D2UnitStrc*)0x1','nVictim == 0x1');
+          assert.equal(output,expected,'restore the enum local instead of pointer-encoded values');
+          assert.doesNotMatch(output,/pVictim = \(D2UnitStrc\*\)/);
+          return;
+        }
         assert.equal(output, row.expected, 'preserve the current main complete body');
         if (fn.address === '0057c420') {
           assert.match(output, /int32_t nDefender;/);
@@ -42,4 +55,22 @@ describe('reused integer pointer slot through complete function codegen', () => 
       assert.doesNotMatch(output, /\(D2MonsterRegionFieldStrc\*\)nMonRegionField/);
     });
   }
+});
+
+describe('review regression guards across Inv and Storm source files',()=>{
+  // Fresh complete bodies, with the same bounded typed context as the older
+  // fixtures. These guards do not claim a complete owning database export.
+  for(const fn of review.functions as ExtractedFunction[])it(`${fn.address} ${fn.name} retains its integer lifetime`,()=>{
+    setAggregateTypeNames(fixture.types);
+    const output=generateFunctionImplementation(structuredClone(fn),undefined,options,structuredClone(context));
+    if(fn.address==='00485410'){
+      assert.match(output,/\bint nUnit\b/);
+      assert.match(output,/AppendAsWideChar\(wszTempBuffer, nUnit\)/);
+      assert.doesNotMatch(output,/pUnit = \(D2UnitStrc\*\)|\(int\)pUnit/);
+    }else{
+      assert.match(output,/\bint nPszUTF16Out\b/);
+      assert.match(output,/pInCur \+= nPszUTF16Out;/);
+      assert.doesNotMatch(output,/pszUTF16Out = \(uint16_t\*\)|\(intptr_t\)pszUTF16Out/);
+    }
+  });
 });

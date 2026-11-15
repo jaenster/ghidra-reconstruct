@@ -91,8 +91,8 @@ export interface ReusedParamSlotOptions extends PluginOptions {
   enumValues?: Record<string, number>;
   /** Known enum type names when a synthetic/external declaration supplies them. */
   enumTypes?: readonly string[];
-  /** Let the following split-lives pass keep scalar lives it already prints cleanly. */
-  deferScalarValues?: boolean;
+  /** Only defer a scalar lifetime when the later pass proves its integer split. */
+  canDeferScalarValues?: (fn: FunctionDecl, name: string) => boolean;
 }
 
 /** Anonymous call-site override funcdefs: never the source's type. */
@@ -659,7 +659,7 @@ export function splitReusedValueSlots(fn: FunctionDecl, o: ReusedParamSlotOption
     const projection = paramClass === 'ptr' && (targetClass === 'int' || targetClass === 'enum')
       ? integerSlotReads(statements, flow, occurrences, p, param, target, local, localTypes, o) : undefined;
     if (projection === null) { o.onRefused?.(fnName, `${p}: a pointer view is not a proven integer use or memory access`); continue; }
-    if (o.deferScalarValues && projection?.scalarOnly) continue;
+    if (projection?.scalarOnly && o.canDeferScalarValues?.({ ...fn, body: { ...body, statements } }, p)) continue;
     declared.add(local);
     const castReads = projection?.replacements ?? new Map<object, Expression>();
     const bareReads = new Set<object>();

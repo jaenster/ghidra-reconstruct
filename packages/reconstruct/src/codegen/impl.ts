@@ -24,6 +24,7 @@ import { CPP_KEYWORDS, INLINE_MARKER, INLINE_END_MARKER, declarationMarkersOn } 
 
 // Import cpp-parser for code transformation
 import { branchLayoutLines } from './branch-layout-spec.js';
+import { canSplitScalarParameter, type SplitLivesOptions } from '@ghidra-mcp/cpp-parser';
 import { isInlineHost } from './inline-hosts.js';
 import { callOrderLines } from './call-order-spec.js';
 import { accessOrderLines } from './access-order-spec.js';
@@ -3276,7 +3277,8 @@ function transformDecompiledCode(
         // The value split (a reused stack-argument slot): which parameters have a
         // 4-byte stack slot, and the return types that say what a store holds.
         stackParameters: (enclosing?.stackSlots ?? []).filter(s => s.isParameter && s.size === 4).map(s => s.name),
-        deferScalarValues: Boolean(enclosing?.stackSlots?.length),
+        canDeferScalarValues: (fn: FunctionDecl, name: string) =>
+          canSplitScalarParameter(fn, name, perPluginOptions['split-lives'] as SplitLivesOptions),
         functionReturnTypes: context.funcPtrArgCasts.functionReturnTypes,
         structFields: context.funcPtrArgCasts.structFields,
         fieldTypes: context.funcPtrArgCasts.fieldTypes,
