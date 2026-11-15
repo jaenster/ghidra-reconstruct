@@ -18,8 +18,16 @@ function run(code: string, rows: string[]): { out: string; sites: string[] } {
 
 /** A row of the compare-sites script: operator, operand fingerprints, then pos/use/arm. */
 let nextAt = 0x400000;
-const row = (op: string, fp0: string, fp1: string, pos: string, use: string, arm = '-', at = (nextAt += 4).toString(16).padStart(8, '0')) =>
-  ['0', op, 'INT_X', '4', '1', '0', fp0, fp1, at, '-', '-', '-', '-', '0', '-', '-', '-', '0', pos, use, arm, arm === '-' ? '0' : '1'].join('\t');
+const row = (op: string, fp0: string, fp1: string, pos: string, use: string, arm = '-', at = (nextAt += 4).toString(16).padStart(8, '0'),
+  more?: { om?: string; f0?: string; f1?: string; ic?: string }) =>
+  ['0', op, 'INT_X', '4', '1', '0', fp0, fp1, at, '-', '-', '-', '-', '0', '-', '-', '-', '0', pos, use, arm, arm === '-' ? '0' : '1',
+    ...(more ? [more.om ?? 'CMP', '-', more.f0 ?? '-', more.f1 ?? '-', more.ic ?? '-'] : [])].join('\t');
+/** A row from the newer script, with the op's instruction, fields and intervening calls. */
+const row27 = (op: string, fp0: string, fp1: string, pos: string, use: string, arm: string, more: { om?: string; f0?: string; f1?: string; ic?: string }) =>
+  row(op, fp0, fp1, pos, use, arm, undefined, more);
+/** A row whose flags reader is the conditional jump `um`. */
+const rowJ = (op: string, fp0: string, fp1: string, um: string, arm = 't') =>
+  row(op, fp0, fp1, 'v', 'j', arm).split('\t').map((c, i) => (i === 10 ? um : c)).join('\t');
 
 describe('compare-branch-form', () => {
   it('writes a branched-on value store to a local as one arm (0044cca0)', () => {
@@ -125,5 +133,82 @@ describe('compare-branch-form', () => {
 
   it('leaves a pointer-returning function', () => {
     assert.deepStrictEqual(run('int *f(int a) { return (int *)(a == 5); }', [row('==', 'v:a', 'c:5', 'v', 'j', 't')]).sites, []);
+  });
+
+  it('ties a test of a field by the field the newer rows name, and not without them', () => {
+    const code = 'struct Q { int nStateFlag; }; int f(Q *q) { bool b; b = q->nStateFlag == 6; return b ? 3 : 4; }';
+    const { out, sites } = run(code, [row27('==', 'e', 'c:6', 'v', 'j', 't', { f0: 'nStateFlag' })]);
+    assert.deepStrictEqual(sites, ['local']);
+    assert.ok(out.includes('b = false; if (q->nStateFlag == 6) b = true;'), out);
+    assert.deepStrictEqual(run(code, [row('==', 'e', 'c:6', 'v', 'j', 't')]).sites, []);
+    assert.deepStrictEqual(run(code, [row27('==', 'e', 'c:6', 'v', 'j', 't', { f0: 'nOther' })]).sites, []);
+  });
+
+  it('leaves a case test of a switch the decompiler joined into a value (SUNITNPC_ResurrectMerc 00579c00)', () => {
+    const rows = [row27('==', 'v:n', 'c:c6', 'v', 'j', '-', { om: 'SUB' }), row27('==', 'v:n', 'c:203', 'v', 'j', '-', { om: 'CMP' })];
+    const { sites } = run('void f(unsigned n) { bool b; if (n < 0xfc) { b = n == 0xc6; } else { b = n == 0x203; } if (!b) return; g(); }', rows);
+    assert.deepStrictEqual(sites, []);
+  });
+
+  it('writes only the one arm where the local already holds zero (AI_BAAL_ChooseCombatAction 005e9750)', () => {
+    const rows = [row('<', 'c:55', 'v:d', 'v', 'j', 't')];
+    const { out } = run('void f(int c) { bool b; int d; b = false; bool e; e = false; if (c) { d = g(); b = 0x55 < d; } if (b) h(); }', rows);
+    assert.ok(out.includes('if (c) { d = g(); if (0x55 < d) b = true; }'), out);
+    // a label joins other paths in: the zero store stays
+    const { out: labelled } = run('void f(int c) { bool b; int d; b = false; L: d = g(); b = 0x55 < d; if (b) goto L; }', rows);
+    assert.ok(labelled.includes('d = g(); b = false; if (0x55 < d) b = true;'), labelled);
+    // a store of the local in between: the zero store stays
+    const { out: stored } = run('void f(int c) { bool b; int d; b = false; d = g(); b = k(c); b = 0x55 < d; if (b) h(); }', rows);
+    assert.ok(stored.includes('b = k(c); b = false; if (0x55 < d) b = true;'), stored);
+  });
+
+  it('stores a branched-on test to a field or a global through a local', () => {
+    const rows = [row('!=', 'v:a', 'c:0', 'v', 'j', 't')];
+    const { out, sites } = run('struct S { unsigned f; }; void f(S *s, int a) { s->f = (unsigned)(a != 0); }', rows);
+    assert.deepStrictEqual(sites, ['store']);
+    assert.ok(out.includes('unsigned int nTest = 0; if (a != 0) nTest = 1; s->f = nTest;'), out);
+    const { out: g } = run('extern bool gb; void f(int a) { gb = a != 0; }', rows);
+    assert.ok(g.includes('bool bTest = false; if (a != 0) bTest = true; gb = bTest;'), g);
+    // a store whose address computation calls is left
+    assert.deepStrictEqual(run('struct S { unsigned f; }; void f(int a) { k()->f = (unsigned)(a != 0); }', rows).sites, []);
+  });
+
+  it('tests a call argument where its operand was set when the original read it before other calls (DRAW_WORLD_Unit 004dc7b0)', () => {
+    const rows = [row27('!=', 'v:x', 'c:0', 'v', 'j', 't', { ic: '1' })];
+    const { out, sites } = run('void f() { int x; x = g(); k(); h(1, (unsigned)(x != 0)); }', rows);
+    assert.deepStrictEqual(sites, ['arg-hoist']);
+    assert.ok(out.includes('x = g(); unsigned int nTest = 0; if (x != 0) nTest = 1; k(); h(1, nTest);'), out);
+    // a typedef in the cast names no operand
+    const { out: typed } = run('typedef unsigned int uint32_t; void f() { int x; x = g(); k(); h(1, (uint32_t)(x != 0)); }', rows);
+    assert.ok(typed.includes('x = g(); uint32_t nTest = 0; if (x != 0) nTest = 1; k(); h(1, nTest);'), typed);
+    // no statement of the block sets it: left
+    assert.deepStrictEqual(run('void f(int x) { k(); h(1, (unsigned)(x != 0)); }', rows).sites, []);
+    // tested next to the call: the local goes right before it
+    const { out: near } = run('void f() { int x; x = g(); k(); h(1, (unsigned)(x != 0)); }', [row27('!=', 'v:x', 'c:0', 'v', 'j', 't', { ic: '0' })]);
+    assert.ok(near.includes('k(); unsigned int nTest = 0; if (x != 0) nTest = 1; h(1, nTest);'), near);
+  });
+
+  it('presets the 1 where the jump is taken when the test holds (MAINMENU_DetectDoubleClick 00431a60)', () => {
+    // cmp [ecx+4], 0x201; mov esi, 1; je L; xor esi, esi; L:
+    const { out } = run('struct M { unsigned uMsg; }; int f(M *m) { unsigned b = (unsigned)(m->uMsg == 0x201); return g(b); }',
+      [rowJ('==', 'e', 'c:201', 'JZ').replace(/\t-\t-\t-\t-\t-$/, '')].map((r) => [...r.split('\t').slice(0, 22), 'CMP', '-', 'uMsg', '-', '-'].join('\t')));
+    assert.ok(out.includes('unsigned int b = 1; if (m->uMsg != 0x201) b = 0;'), out);
+    // the same jump read with != holds the 0
+    const { out: ne } = run('int f(int a) { int b; b = a != 5; return b; }', [rowJ('!=', 'v:a', 'c:5', 'JZ')]);
+    assert.ok(ne.includes('b = 0; if (a != 5) b = 1;'), ne);
+    const { out: eq } = run('int f(int a) { int b; b = a == 5; return b; }', [rowJ('==', 'v:a', 'c:5', 'JZ')]);
+    assert.ok(eq.includes('b = 1; if (a != 5) b = 0;'), eq);
+    // an ordered test, or a jump past no single arm, keeps the 0
+    const { out: lt } = run('int f(int a) { int b; b = a < 5; return b; }', [rowJ('<', 'v:a', 'c:5', 'JL')]);
+    assert.ok(lt.includes('b = 0; if (a < 5) b = 1;'), lt);
+  });
+
+  it('stores the 1 straight into a field of a local the code just cleared (NET_D2GS_CLIENT_Send_0x5D 00478740)', () => {
+    const code = 'struct P { char id; char on; }; void f(int t) { P s; memset(&s, 0, sizeof(s)); s.on = t != 0; send(&s); }';
+    const { out } = run(code, [row('!=', 'v:t', 'c:0', 'v', 'j', 't')]);
+    assert.ok(out.includes('memset(&s, 0, sizeof(s)); if (t != 0) s.on = true; send(&s);'), out);
+    // a call between: through a local
+    const { out: called } = run(code.replace('s.on = t', 'g(); s.on = t'), [row('!=', 'v:t', 'c:0', 'v', 'j', 't')]);
+    assert.ok(called.includes('bool bTest = false; if (t != 0) bTest = true; s.on = bTest;'), called);
   });
 });
