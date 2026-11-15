@@ -247,6 +247,12 @@ describe('ratchet: releasing non-MATCH closure members', () => {
     const s = setup(UNIT.replace(OLD_LEVEL, NEW_LEVEL));
     try {
       s.store.writeReleases([{ address: '00401000', reason: 'r', body: bodyHash(s.bodies.get('00401000')!) }]);
+      // The tree the release was decided on still carries the kept body: the holder is captured
+      // unchanged, and the release stays for the regen to let its body through.
+      const before = advance(s.measured, s.store, auditOf(NONMATCH), 'ev1');
+      assert.strictEqual(before.find(r => r.address === '00401100')!.status, 'unchanged');
+      assert.strictEqual(before.find(r => r.address === '00401000'), undefined);
+      assert.deepStrictEqual(s.store.releases().map(r => r.address), ['00401000']);
       // The tree now carries the released body; the record is still MATCH.
       const now = tree(UNIT.replace(OLD_LEVEL, NEW_LEVEL));
       const rows = advance(now, s.store, auditOf(NONMATCH), 'ev2');
