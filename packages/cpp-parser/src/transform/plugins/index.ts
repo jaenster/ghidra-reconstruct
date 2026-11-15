@@ -442,6 +442,11 @@ export {
 } from './builtins/tail-walk-reread.js';
 
 export {
+  dyingAccumulatorPlugin,
+  type DyingAccumulatorOptions,
+} from './builtins/dying-accumulator.js';
+
+export {
   rotatedStepWhilePlugin,
   type RotatedStepWhileOptions,
 } from './builtins/rotated-step-while.js';
@@ -975,6 +980,7 @@ import { selectArgumentPlugin } from './builtins/select-argument.js';
 import { inPlaceOperandPlugin } from './builtins/in-place-operand.js';
 import { loopCompareDifferencePlugin } from './builtins/loop-compare-difference.js';
 import { tailWalkRereadPlugin } from './builtins/tail-walk-reread.js';
+import { dyingAccumulatorPlugin } from './builtins/dying-accumulator.js';
 import { rotatedStepWhilePlugin } from './builtins/rotated-step-while.js';
 import { copiedTestWhilePlugin } from './builtins/copied-test-while.js';
 import { decidedBoolReturnPlugin } from './builtins/decided-bool-return.js';
@@ -1270,6 +1276,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   accumulateSumPlugin,        // Matching: a sum of two single-use values accumulates into the first with += (priority 989.95)
   inPlaceOperandPlugin,       // Matching: a value worked on once before its one use is worked on in place, x OP= e (priority 989.951)
   loopCompareDifferencePlugin, // Matching: share a comparison loop's exit subtraction with its signed result (priority 989.952)
+  dyingAccumulatorPlugin,     // Matching: a sum into a local that dies with its use updates the local, A op= E (priority 989.955)
   shortLocalWidenPlugin,      // Matching: a short local read only as an index is an int (priority 989.96)
   guardNullNestPlugin,        // Matching: a compound guard and a later null test of one return become one null-initialised test (priority 989.97)
   returnCopySplitPlugin,      // Matching: an else-if chain whose first arm falls into a constant return writes the return in that arm (priority 989.975)
