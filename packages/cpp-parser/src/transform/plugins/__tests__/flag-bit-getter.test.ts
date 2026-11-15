@@ -34,7 +34,7 @@ describe('flag-bit-getter', () => {
     const { out, prefix } = run(SRC, new Map([[3, [cmp(0x2b), and(0x39)]]]));
     assert.ok(out.includes('(FlagBit_U_eUnitFlags_1(pOther)) != 0') || out.includes('FlagBit_U_eUnitFlags_1(pOther) != 0'), out);
     assert.strictEqual(prefix.length, 1);
-    assert.ok(flat(prefix[0]).includes('static inline uint32_t FlagBit_U_eUnitFlags_1(U * p) { if (!p) { return 0; } return p->eUnitFlags >> 1 & 1; }'), prefix[0]);
+    assert.ok(flat(prefix[0]).includes('static D2_FORCEINLINE uint32_t FlagBit_U_eUnitFlags_1(U * p) { if (!p) { return 0; } return p->eUnitFlags >> 1 & 1; }'), prefix[0]);
   });
 
   it('leaves a bit the original tests in memory', () => {
