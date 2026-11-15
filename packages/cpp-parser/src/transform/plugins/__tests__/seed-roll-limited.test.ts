@@ -629,4 +629,165 @@ describe('seedRollLimitedPlugin', () => {
       assert.strictEqual(run(shape('n <= 0', good, 'g(&r);')).sites.length, 0);
     });
   });
+
+  describe('the zero result written elsewhere: only the positive branch\'s roll goes', () => {
+    it('ITEMDROP_RollArmorItemClass 00555e70: the guard has no else and jumps on', () => {
+      const { out, sites } = run(`int f(D2SeedStrc * pSeedLocal, uint32_t nCandidateIdx, int * aiCandidateIdxs) {
+      uint32_t seedNext;
+      uint32_t nRandIndex;
+      if ((int)nCandidateIdx > 0) {
+        if (nCandidateIdx & nCandidateIdx - 1) {
+          seedNext = D2_SeedRoll(pSeedLocal);
+          nRandIndex = (uint32_t)(seedNext % nCandidateIdx);
+        } else {
+          seedNext = D2_SeedRoll(pSeedLocal);
+          nRandIndex = nCandidateIdx - 1 & seedNext;
+        }
+
+        goto return_candidate;
+      }
+      nRandIndex = 0;
+      return_candidate:
+      return aiCandidateIdxs[nRandIndex * 2];
+    }`);
+      assert.deepStrictEqual(sites, ['nRandIndex=pSeedLocal,nCandidateIdx']);
+      assert.ok(out.includes('if ((int)nCandidateIdx > 0) { nRandIndex = D2_SeedRollLimited(pSeedLocal, nCandidateIdx); goto return_candidate; }'), out);
+      assert.ok(!out.includes('uint32_t seedNext'), out);
+    });
+    it('OBJECTS 005506d0: a struct temporary per arm, the result read after the roll', () => {
+      const { out, sites } = run(`void f(D2SeedStrc * pObjCtrlSeed, int nChainLength) {
+      D2SeedStrc sSeedRoll;
+      uint32_t dwTmp;
+      for (;;) {
+        dwTmp = nChainLength >> 1;
+        if ((int)dwTmp > 0) {
+          if (dwTmp & dwTmp - 1) {
+            sSeedRoll = D2_SEED_NEXT(*pObjCtrlSeed);
+            pObjCtrlSeed->nSeedHigh = sSeedRoll.nSeedHigh;
+            pObjCtrlSeed->nSeedLow = sSeedRoll.nSeedLow;
+            dwTmp = sSeedRoll.nSeedLow % dwTmp;
+          } else {
+            sSeedRoll = D2_SEED_NEXT(*pObjCtrlSeed);
+            pObjCtrlSeed->nSeedHigh = sSeedRoll.nSeedHigh;
+            pObjCtrlSeed->nSeedLow = sSeedRoll.nSeedLow;
+            dwTmp = dwTmp - 1 & sSeedRoll.nSeedLow;
+          }
+          if (dwTmp) {
+            continue;
+          }
+        }
+        g();
+      }
+    }`);
+      assert.deepStrictEqual(sites, ['dwTmp=pObjCtrlSeed,dwTmp']);
+      assert.ok(out.includes('if ((int)dwTmp > 0) { dwTmp = D2_SeedRollLimited(pObjCtrlSeed, dwTmp); if (dwTmp) { continue; } }'), out);
+    });
+    it('an else-if after a zero branch that does more than store zero', () => {
+      const { out, sites } = run(`void f(D2UnitStrc * pUnit, int n) {
+      uint32_t r; uint32_t x;
+      if (n <= 0) { r = 0; g(); }
+      else if (n & n - 1) { x = D2_SeedRoll(&pUnit->sSeed); r = x % (uint32_t)n; }
+      else { x = D2_SeedRoll(&pUnit->sSeed); r = n - 1U & x; }
+      h(r);
+    }`);
+      assert.deepStrictEqual(sites, ['r=&pUnit->sSeed,n']);
+      assert.ok(out.includes('if (n <= 0) { r = 0; g(); } else r = D2_SeedRollLimited(&pUnit->sSeed, n);'), out);
+    });
+    it('OBJECTS 00551c00: the high-word store sunk below the join belongs to the roll', () => {
+      const { out, sites } = run(`void f(D2SeedStrc * pSeed, int nChainLen) {
+      uint32_t uVar1;
+      uint32_t nSeedHighTmp0;
+      uint32_t nSeedHighTmp1;
+      int64_t lNewSeed;
+      uint32_t nRandBit;
+      uint32_t nChainStopRoll;
+      for (;;) {
+        nRandBit = nChainLen >> 1;
+        if ((int)nRandBit > 0) {
+          if (nRandBit & nRandBit - 1) {
+            lNewSeed = (uint64_t)pSeed->nSeedLow * 0x6ac690c5;
+            nSeedHighTmp1 = (uint32_t)((uint64_t)lNewSeed >> 0x20);
+            lNewSeed += (uint64_t)pSeed->nSeedHigh;
+            nChainStopRoll = (uint32_t)lNewSeed;
+            uVar1 = (uint32_t)((uint64_t)lNewSeed >> 0x20);
+            pSeed->nSeedLow = nChainStopRoll;
+            nChainStopRoll %= nRandBit;
+          } else {
+            lNewSeed = (uint64_t)pSeed->nSeedLow * 0x6ac690c5;
+            nSeedHighTmp0 = (uint32_t)((uint64_t)lNewSeed >> 0x20);
+            lNewSeed += (uint64_t)pSeed->nSeedHigh;
+            nChainStopRoll = (uint32_t)lNewSeed;
+            uVar1 = (uint32_t)((uint64_t)lNewSeed >> 0x20);
+            pSeed->nSeedLow = nChainStopRoll;
+            nChainStopRoll = nRandBit - 1 & nChainStopRoll;
+          }
+
+          pSeed->nSeedHigh = uVar1;
+          if (nChainStopRoll) {
+            continue;
+          }
+        }
+        g();
+      }
+    }`);
+      assert.deepStrictEqual(sites, ['nChainStopRoll=pSeed,nRandBit']);
+      assert.ok(out.includes('if ((int)nRandBit > 0) { nChainStopRoll = D2_SeedRollLimited(pSeed, nRandBit); if (nChainStopRoll) { continue; } }'), out);
+    });
+    it('a temporary read after the roll keeps the block', () => {
+      const code = `void f(D2SeedStrc * pSeed, int n) {
+      uint32_t r; uint32_t x;
+      if (n > 0) {
+        if (n & n - 1) { x = D2_SeedRoll(pSeed); r = x % (uint32_t)n; }
+        else { x = D2_SeedRoll(pSeed); r = n - 1U & x; }
+        h(r, x);
+      }
+    }`;
+      assert.strictEqual(run(code).sites.length, 0);
+    });
+    it('the limit written between the guard and the test', () => {
+      const code = `void f(D2SeedStrc * pSeed, int n) {
+      uint32_t r; uint32_t x;
+      if (n > 0) {
+        n = n + 1;
+        if (n & n - 1) { x = D2_SeedRoll(pSeed); r = x % (uint32_t)n; }
+        else { x = D2_SeedRoll(pSeed); r = n - 1U & x; }
+        h(r);
+      }
+    }`;
+      assert.strictEqual(run(code).sites.length, 0);
+    });
+    it('a guard that does not prove the limit positive', () => {
+      const code = `void f(D2SeedStrc * pSeed, uint32_t n) {
+      uint32_t r; uint32_t x;
+      if (n != 0) {
+        if (n & n - 1) { x = D2_SeedRoll(pSeed); r = x % n; }
+        else { x = D2_SeedRoll(pSeed); r = n - 1U & x; }
+        h(r);
+      }
+    }`;
+      assert.strictEqual(run(code).sites.length, 0);
+    });
+    it('an unsigned limit compared as unsigned', () => {
+      const code = `void f(D2SeedStrc * pSeed, uint32_t n) {
+      uint32_t r; uint32_t x;
+      if (n > 0) {
+        if (n & n - 1) { x = D2_SeedRoll(pSeed); r = x % n; }
+        else { x = D2_SeedRoll(pSeed); r = n - 1U & x; }
+        h(r);
+      }
+    }`;
+      assert.strictEqual(run(code).sites.length, 0);
+    });
+    it('arms that store different results', () => {
+      const code = `void f(D2SeedStrc * pSeed, int n) {
+      uint32_t r; uint32_t q; uint32_t x;
+      if (n > 0) {
+        if (n & n - 1) { x = D2_SeedRoll(pSeed); r = x % (uint32_t)n; }
+        else { x = D2_SeedRoll(pSeed); q = n - 1U & x; }
+        h(r, q);
+      }
+    }`;
+      assert.strictEqual(run(code).sites.length, 0);
+    });
+  });
 });
