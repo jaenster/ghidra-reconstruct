@@ -126,7 +126,7 @@ export function foreignReferencedFileLocals(
 export function giveMeasuredExternalLinkage(globals: AnalyzedDataSymbol[]): number {
   let n = 0;
   for (const g of globals) {
-    if (!g.externalLinkage || g.scope !== 'file-local') continue;
+    if (!g.externalLinkage || (g.scope !== 'file-local' && g.scope !== 'static-local')) continue;
     demote(g, 'vc8datalinkage-defined');
     n++;
   }

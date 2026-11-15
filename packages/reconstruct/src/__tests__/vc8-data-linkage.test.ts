@@ -140,6 +140,16 @@ describe('vc8datalinkage:defined', () => {
     }
   });
 
+  it('a function\'s static leaves the function and is homed in the run', () => {
+    // ApplicationRunCurrentMode 004059d0: CurrentApplication 0074c700 is its own static, and
+    // the function matches only with the global external.
+    const gs = [sym('gnLocal', '007c0c79', 2, ['NPCMENU_TradeDrawCallback'])];
+    gs[0].scope = 'static-local'; gs[0].ownerFunction = 'NPCMENU_TradeDrawCallback'; gs[0].ownerFile = NPCMENU;
+    markMeasuredExternData(gs, vc8DataLinkage([defined('007c0c79')] as never));
+    assert.strictEqual(giveMeasuredExternalLinkage(gs), 1);
+    assert.deepStrictEqual([gs[0].scope, gs[0].ownerFunction], ['global', undefined]);
+  });
+
   it('a global measured both extern and defined keeps the scope its users give it', () => {
     const l = vc8DataLinkage([defined('007c0c79'), func(tagData('007c0c79'))]);
     assert.strictEqual(l.external.size + l.defined.size, 0);
