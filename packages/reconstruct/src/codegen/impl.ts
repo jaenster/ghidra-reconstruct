@@ -3132,6 +3132,7 @@ function transformDecompiledCode(
     }
 
     const tebFields = getTebFields();
+    perPluginOptions['subpiece-access'] = { littleEndian: context?.targetLanguageId?.split(':')[1] === 'LE' };
     // Under every preset: a TEB label has no declaration left to fall back on.
     if (Object.keys(tebFields).length > 0) {
       enablePlugins.push('teb-field-access');
