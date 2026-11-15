@@ -19,6 +19,7 @@ import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 import { advance, formatAdvanceReport, readAudit } from './advance.js';
 import { followHandFile } from './follow.js';
@@ -235,6 +236,18 @@ export async function main(argv: string[]): Promise<number> {
   }
 }
 
-if (import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith('ratchet/cli.ts') || process.argv[1]?.endsWith('ratchet/cli.js')) {
+function isEntryPoint(): boolean {
+  if (!process.argv[1]) return false;
+  const entry = path.resolve(process.argv[1]);
+  // Also accept the invoked path when Node preserves the main module's symlink.
+  if (import.meta.url === pathToFileURL(entry).href) return true;
+  try {
+    return import.meta.url === pathToFileURL(fs.realpathSync(entry)).href;
+  } catch {
+    return false; // The unresolved path was checked above.
+  }
+}
+
+if (isEntryPoint()) {
   main(process.argv.slice(2)).then(code => process.exit(code), err => { console.error(err instanceof Error ? err.message : err); process.exit(1); });
 }
