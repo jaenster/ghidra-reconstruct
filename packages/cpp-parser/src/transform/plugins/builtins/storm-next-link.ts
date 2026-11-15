@@ -43,6 +43,7 @@ import type {
 } from '../../../ast/nodes.js';
 import { getChildren, traverseAST } from '../../../ast/visitor.js';
 import { Expr, Type } from '../../../ast/factory.js';
+import { emit } from '../../../emit/index.js';
 import { createTransformer, updateNode, cloneNode, type Transformer } from '../../transformer.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
 import { createExprShape, thisClassOf, type ExprShape } from './expr-shape.js';
@@ -430,9 +431,12 @@ function createStormNextLinkTransformer(options: StormNextLinkOptions = {}): Tra
         if ((stripParens(sumArm.left) as Identifier).name !== sName || !localTypes.has(sName)) return;
         const sShape = shapeOfNode(localTypes.get(sName)!, 0, resolve);
         if (!isWord(sShape)) return;
+        let conditionLocal = stripParens(n0);
+        while (conditionLocal.kind === NodeKind.CStyleCastExpr) conditionLocal = stripParens((conditionLocal as CStyleCastExpr).expression);
+        const selfTarget = conditionLocal.kind === NodeKind.Identifier && (conditionLocal as Identifier).name === sName;
         for (const part of [ifs.condition, negArm.right, sumArm.right]) {
           if (!isPure(part)) return;
-          for (const r of traverseAST(part)) if (r.kind === NodeKind.Identifier && (r as Identifier).name === sName) return;
+          if (!selfTarget) for (const r of traverseAST(part)) if (r.kind === NodeKind.Identifier && (r as Identifier).name === sName) return;
         }
 
         const defs = defsAt(ifs);
@@ -566,6 +570,33 @@ function createStormNextLinkTransformer(options: StormNextLinkOptions = {}): Tra
         };
 
         // ---- the proof
+        if (selfTarget) {
+          // A decompiler local may hold first the next word and then the slot
+          // address. The same linear proof uses its reaching value BEFORE this
+          // assignment; the helper reads that word again, so no volatile or
+          // ambiguous binding may be involved.
+          const def = defs.get(sName);
+          if (!def || def.poisoned) return;
+          const names = [...fn.parameters.map(p => p.name?.name).filter(Boolean),
+            ...[...traverseAST(fn.body!)].filter(n => n.kind === NodeKind.VariableDecl).map(n => (n as VariableDecl).name.name)];
+          if (new Set(names).size !== names.length) return;
+          const volatileType = (spelling: string, seen = new Set<string>()): boolean => {
+            if (/\bvolatile\b/.test(spelling)) return true;
+            const base = spelling.replace(/\[[^\]]*\]/g, '').replace(/\bconst\b|\*/g, '').replace(/\s+/g, ' ').trim();
+            const target = typedefTargets[base];
+            if (!target) return false;
+            if (seen.has(base)) return true;
+            seen.add(base);
+            return volatileType(target, seen);
+          };
+          if ([...localTypes.values()].some(t => volatileType(emit(t)))) return;
+          for (const part of [def.rhs, ifs.condition, negArm.right, sumArm.right]) {
+            for (const n of traverseAST(part)) {
+              if (n.kind === NodeKind.Identifier && volatileType(options.globalTypes?.[(n as Identifier).name] ?? options.enclosingVarTypes?.[(n as Identifier).name] ?? '')) return;
+              if (n.kind === NodeKind.MemberExpr && volatileType(memberSpelling(n as MemberExpr) ?? '')) return;
+            }
+          }
+        }
         const nVal = val(n0);
         if (!nVal || nVal.c !== 0n || nVal.terms.size !== 1) return;
         const [[nKey, nCoeff]] = [...nVal.terms.entries()];
@@ -645,11 +676,31 @@ function createStormNextLinkTransformer(options: StormNextLinkOptions = {}): Tra
         rewrites.set(ifs, stmt);
         respellNextReads(ifs, linkExpr, link, val, addr);
 
+        // In a straight-line, unescaped automatic local, an adjacent first
+        // assignment of N is dead once the helper rereads N itself. Retain it
+        // if an earlier use, a backedge, a captured value or the helper argument
+        // could still depend on that local's old value. Never drop its declaration.
+        if (selfTarget) {
+          const d = defs.get(sName)!, block = parent.get(ifs);
+          const nodes = [...traverseAST(fn.body!)];
+          const declaration = nodes.find(n => n.kind === NodeKind.VariableDecl && (n as VariableDecl).name.name === sName) as VariableDecl | undefined;
+          const first = nodes.find(n => n.kind === NodeKind.Identifier && (n as Identifier).name === sName && !declNames.has(n));
+          const a = d.stmt.kind === NodeKind.ExprStmt ? stripParens((d.stmt as ExprStmt).expression) : null;
+          const lhs = a?.kind === NodeKind.AssignExpr ? stripParens((a as AssignExpr).left) : null;
+          const backedgeOrScope = nodes.some(n => [NodeKind.WhileStmt, NodeKind.DoWhileStmt, NodeKind.ForStmt, NodeKind.ForRangeStmt,
+            NodeKind.GotoStmt, NodeKind.LabelStmt, NodeKind.FunctionDecl, NodeKind.LambdaExpr, NodeKind.ClassDecl, NodeKind.StructDecl].includes(n.kind));
+          const argumentReadsTarget = [...traverseAST(arg)].some(n => n.kind === NodeKind.Identifier && (n as Identifier).name === sName);
+          if (declaration && !declaration.specifiers.length && !declaration.attributes.length && first === lhs && !backedgeOrScope && !argumentReadsTarget
+            && block?.kind === NodeKind.CompoundStmt && (block as CompoundStmt).statements[(block as CompoundStmt).statements.indexOf(ifs)-1] === d.stmt) drops.add(d.stmt);
+        }
+
         // A local that only carried N here goes with its definition.
         let dropped: string | undefined;
         let nIdent = stripParens(n0);
         while (nIdent.kind === NodeKind.CStyleCastExpr) nIdent = stripParens((nIdent as CStyleCastExpr).expression);
-        if (nIdent.kind === NodeKind.Identifier) {
+        // Only the guarded adjacent case above may drop a self-target's reaching
+        // definition. Its declaration remains needed by the replacement store.
+        if (nIdent.kind === NodeKind.Identifier && (nIdent as Identifier).name !== sName) {
           const name = (nIdent as Identifier).name;
           const d = defs.get(name);
           if (d && !d.poisoned && !drops.has(d.stmt)) {
