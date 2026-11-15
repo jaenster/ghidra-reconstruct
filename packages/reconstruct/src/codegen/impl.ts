@@ -4168,7 +4168,11 @@ function transformDecompiledCode(
     }
 
     if (enclosing?.registerStores) {
-      perPluginOptions['register-store-select'] = { registerStores: enclosing.registerStores };
+      perPluginOptions['register-store-select'] = {
+        registerStores: enclosing.registerStores,
+        structFields: context?.funcPtrArgCasts?.structFields,
+        typedefTargets: context?.funcPtrArgCasts?.typedefTargets,
+      };
     }
     if (enclosing?.registerStores || enclosing?.zeroStores) {
       // Zero stores to every member of *P that the original makes from one zeroed register
