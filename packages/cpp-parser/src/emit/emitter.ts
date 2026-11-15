@@ -239,9 +239,6 @@ const OPERATOR_PRECEDENCE: Record<string, number> = {
   ',': 18,
 };
 
-/** Operators that are truly associative: a op (b op c) ≡ (a op b) op c */
-const ASSOCIATIVE_OPS = new Set(['+', '*', '&&', '||', '&', '|', '^']);
-
 /**
  * The last statement of a switch body when it is a `case`/`default` label with
  * nothing after it. Returns null for every other shape, so an empty label that
@@ -2671,16 +2668,16 @@ export class CppEmitter {
       this.emitExprWithPrecedence(node.left, precedence);
     }
     // Right child grouping also determines whether the first right token is visible.
-    const rightPrec = this.rightChildSameAssociativeOp(node) ? precedence : precedence - 1;
+    const rightPrec = this.rightChildSameLogicalOp(node) ? precedence : precedence - 1;
     if (this.style.spaceAroundOperators) {
       this.write(' ' + node.operator + ' ');
     } else {
       this.write(node.operator);
       if (this.binaryRightNeedsTokenSeparator(node, rightPrec)) this.write(' ');
     }
-    // Right child: use precedence - 1 to force parens for same-precedence ops
-    // (e.g. a - (b - c) ≠ a - b - c). But if the right child is the same
-    // associative operator, parens are unnecessary (e.g. a && b && c).
+    // Arithmetic and bitwise grouping can change promotions, width or rounding.
+    // Built-in && and || are associative with the same evaluation order and
+    // short-circuit, so keep the existing flattened logical guard chains.
     this.emitExprWithPrecedence(node.right, rightPrec);
   }
 
@@ -2750,17 +2747,11 @@ export class CppEmitter {
     return expr.kind === NodeKind.BinaryExpr && (expr as BinaryExpr).operator === '<';
   }
 
-  /** Check if right child (looking through ParenExpr) is the same associative operator */
-  private rightChildSameAssociativeOp(node: BinaryExpr): boolean {
+  private rightChildSameLogicalOp(node: BinaryExpr): boolean {
+    if (node.operator !== '&&' && node.operator !== '||') return false;
     let right: Expression = node.right;
-    while (right.kind === NodeKind.ParenExpr) {
-      right = (right as ParenExpr).expression;
-    }
-    if (right.kind !== NodeKind.BinaryExpr) return false;
-    const rightOp = (right as BinaryExpr).operator;
-    if (rightOp !== node.operator) return false;
-    // Only truly associative operators: &&, ||, &, |, ^, +, *
-    return ASSOCIATIVE_OPS.has(node.operator);
+    while (right.kind === NodeKind.ParenExpr) right = (right as ParenExpr).expression;
+    return right.kind === NodeKind.BinaryExpr && (right as BinaryExpr).operator === node.operator;
   }
 
   /** Keep adjacent prefix operators and signed literal text from lexing as ++, --, or &&. */
