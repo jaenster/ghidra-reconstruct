@@ -64,6 +64,14 @@ describe('addNestingPlugin', () => {
     assert.match(out, /nRand = nRand \+ nMin; p\[2\] = p\[2\] \+ nRand;/);
   });
 
+  it('splits in an if arm, and not when a statement after the if reads the variable', () => {
+    const into = `[${add({})},${add({ consumer: 0, into: { input: 0, name: 'nRand' } })}]@@`;
+    const out = run([addNestingPlugin], ['void f(int *p, int nMin, unsigned int nRand) {', 'if (p) {', `${into} p[2] = p[2] + nRand + nMin;`, '}', '}']);
+    assert.match(out, /if \(p\) \{ nRand = nRand \+ nMin; p\[2\] = p\[2\] \+ nRand; \}/);
+    const kept = run([addNestingPlugin], ['int f(int *p, int nMin, int nRand) {', 'if (p) {', `${into} p[2] = p[2] + nRand + nMin;`, '}', 'return nRand;', '}']);
+    assert.match(kept, /p\[2\] = p\[2\] \+ \(nRand \+ nMin\);/);
+  });
+
   it('nests the sum without splitting when the variable is read later', () => {
     const out = run([addNestingPlugin], [
       'int f(int *p, int nMin, int nRand) {',

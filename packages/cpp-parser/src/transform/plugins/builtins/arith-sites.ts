@@ -24,8 +24,9 @@
  *   - `(x + a) + b` and `x + (a + b)` are the same value modulo 2^32 when both ops are 4-byte
  *     INT_ADDs (or the outer a PTRADD over a 4-byte index): the facts say so per op.
  *   - `a = a + b; x = x + a;` stores `a + b` into `a` as well: only where `a` is a 32-bit
- *     integer local or parameter, never address-taken, the statement in no loop, the function
- *     without a goto, and no later statement naming `a`.
+ *     integer local or parameter, never address-taken, the statement in a block of the
+ *     function or of an if (no loop, no switch), the function without a goto, nothing that
+ *     runs after it naming `a`, and no call, assignment or increment in `x`, `a` or `b`.
  *   - A CONCAT's value is below 2^(8 * its width) by construction; dropping the truncation to
  *     that width drops nothing.
  *
@@ -36,7 +37,7 @@
 
 import { NodeKind } from '../../../ast/kinds.js';
 import type {
-  ASTNode, AssignExpr, BinaryExpr, CallExpr, CompoundStmt, ExprStmt, Expression, FunctionDecl, Identifier,
+  ASTNode, AssignExpr, BinaryExpr, CallExpr, CompoundStmt, ExprStmt, Expression, FunctionDecl, Identifier, IfStmt,
   IntegerLiteralExpr, ParenExpr, Statement, TypeNode, UnaryExpr,
 } from '../../../ast/nodes.js';
 import { traverseAST, findNodesByKind } from '../../../ast/visitor.js';
@@ -242,23 +243,38 @@ function rewriteAdds(fn: FunctionDecl, o: ArithSiteOptions): FunctionDecl | unde
     return [first, second];
   };
 
-  // Splitting only in the function's own top-level block, where the statements that follow
-  // are all that runs after; a nested block keeps the nesting rewrite below.
+  // A statement is split in a block of the function's own or of an if's arms, never under a
+  // loop or a switch; what runs after it is the rest of its block and of every enclosing block.
   const done = new Set<string>();
-  let body: Statement = fn.body;
-  const top = fn.body as CompoundStmt;
-  if (top.kind === NodeKind.CompoundStmt) {
-    let changed = false;
-    const next: Statement[] = [];
-    top.statements.forEach((s, i) => {
-      const pair = split(s, top.statements.slice(i + 1));
-      if (!pair) { next.push(s); return; }
-      next.push(...pair);
-      changed = true;
-      done.add(at(unparen(((s as ExprStmt).expression as AssignExpr).right)));
-    });
-    if (changed) body = { ...top, statements: next } as CompoundStmt;
-  }
+  const walk = (s: Statement, after: Statement[]): Statement => {
+    if (s.kind === NodeKind.CompoundStmt) {
+      const block = s as CompoundStmt;
+      let changed = false;
+      const next: Statement[] = [];
+      block.statements.forEach((c, i) => {
+        const rest = [...block.statements.slice(i + 1), ...after];
+        const pair = split(c, rest);
+        if (pair) {
+          next.push(...pair);
+          changed = true;
+          done.add(at(unparen(((c as ExprStmt).expression as AssignExpr).right)));
+          return;
+        }
+        const w = walk(c, rest);
+        if (w !== c) changed = true;
+        next.push(w);
+      });
+      return changed ? ({ ...block, statements: next } as CompoundStmt) : s;
+    }
+    if (s.kind === NodeKind.IfStmt) {
+      const f = s as IfStmt;
+      const thenBranch = walk(f.thenBranch, after);
+      const elseBranch = f.elseBranch ? walk(f.elseBranch, after) : f.elseBranch;
+      return thenBranch !== f.thenBranch || elseBranch !== f.elseBranch ? ({ ...f, thenBranch, elseBranch } as IfStmt) : s;
+    }
+    return s;
+  };
+  const body: Statement = walk(fn.body, []);
   // Every other nesting the facts give: `x + (a + b)`.
   const t = createTransformer({
     visitBinaryExpr(node: BinaryExpr): ASTNode | undefined {
