@@ -42,6 +42,18 @@
  *    once outside the loop, from an expression not naming the object, before anything names
  *    it (SaveQuests 00569320: the save buffer pointer read from the caller before the record
  *    is filled);
+ *  - a pointer computed (not loaded) from a parameter the function never reassigns holds an
+ *    address the caller made before this frame existed, so it cannot reach into a non-static
+ *    frame object (DEBUG_AddModuleToList 00404ab0: `pListSlot = pModuleList + n*0x8a + 1` against the
+ *    frame record);
+ *  - a block an allocator returned (AllocServerMemory, AllocClientMemory, SMemAlloc: every
+ *    definition of the local reaching the copy is that call or null, its address never taken)
+ *    overlaps no object that existed before the call: a frame or global object, a string
+ *    literal, or a parameter's memory (SUBTILE_AllocAndCompress, the collision map, the key
+ *    binding record);
+ *  - the same member of two pointers to one struct type, over bytes inside the struct, either
+ *    coincides (each byte is copied onto itself) or does not overlap: a copy constructor's
+ *    `this->a` from `pSource->a` (SGAMEDATA). `this` is the parameter this-param-rewrite names.
  *  - a `movsw`/`movsb` tail (the same copy continued through both pointers right after the
  *    loop, over fewer bytes than one unit) is part of the memcpy, and the pointers must be
  *    dead after the tail instead. A tail read narrowed by a cast (`(short)pSrc->nMagic`) is
@@ -72,7 +84,7 @@ import type { TransformPlugin, PluginOptions } from '../types.js';
 import { createPlugin } from '../registry.js';
 import { Expr, Stmt } from '../../../ast/factory.js';
 import { emit } from '../../../emit/index.js';
-import { buildFunctionFlow, type FunctionFlow } from '../../cfg/dataflow.js';
+import { buildFunctionFlow, ENTRY_DEF, type FunctionFlow } from '../../cfg/dataflow.js';
 import { findNodesByKind } from '../../../ast/visitor.js';
 import { localTypesOf } from './compare-form.js';
 import type { LayoutField } from './byte-spans.js';
@@ -104,6 +116,8 @@ export interface RepStringFormOptions extends PluginOptions {
   aggregateSizes?: Record<string, number>;
   /** Typedef name -> its target spelling. */
   typedefTargets?: Record<string, string>;
+  /** The parameter a `this` expression of the body stands for (this-param-rewrite's name). */
+  thisName?: string;
   /** Called once per function with what was rewritten. */
   onCensus?: (c: { fills: number; copies: number; untied: number }) => void;
 }
@@ -448,7 +462,7 @@ export function createRepStringFormTransformer(options?: PluginOptions): Transfo
       };
 
       /** Can the copy's two pointers be shown to start in objects that do not overlap? */
-      const separateCopy = (list: Statement[], i: number, f: ForStmt, body: Statement[], d: string, s: string): boolean => {
+      const separateCopy = (list: Statement[], i: number, f: ForStmt, body: Statement[], d: string, s: string, bytes: number): boolean => {
         const inits = new Map<string, Expression>();
         for (const st of list.slice(Math.max(0, i - 2), i)) {
           const x = exprOf(st);
@@ -528,7 +542,127 @@ export function createRepStringFormTransformer(options?: PluginOptions): Transfo
           const at = def.location?.end?.offset, first = firstMention(r!);
           return at !== undefined && first !== undefined && first >= 0 && at < first;
         };
+        // Where a start address comes from without reading memory on the way: the variable
+        // the address is computed from (`(T *)(p + n)`, `&p->f[i]`, `&p[i]`, `p->a` for an array
+        // member a), or null when the address is loaded (`p->q`, `*p`).
+        const fieldNamed = (base: string, m: string): LayoutField | undefined => fieldsOf(pointeeName(base))?.find(x => x.name === m);
+        const addressBase = (e: Expression): string | null => {
+          let x = unwrap(e);
+          let addressOf = false;
+          for (;;) {
+            if (x.kind === NodeKind.CStyleCastExpr) x = unwrap((x as CStyleCastExpr).expression);
+            else if (x.kind === NodeKind.UnaryExpr && (x as UnaryExpr).operator === '&' && !addressOf) { addressOf = true; x = unwrap((x as UnaryExpr).operand); }
+            else if (x.kind === NodeKind.BinaryExpr && ['+', '-'].includes((x as BinaryExpr).operator) && !addressOf) x = unwrap((x as BinaryExpr).left);
+            else if (x.kind === NodeKind.SubscriptExpr && addressOf) x = unwrap((x as SubscriptExpr).array);
+            else if (x.kind === NodeKind.MemberExpr && !(x as unknown as { isArrow: boolean }).isArrow && addressOf) x = unwrap((x as unknown as { object: Expression }).object);
+            else if (x.kind === NodeKind.MemberExpr && (x as unknown as { isArrow: boolean }).isArrow) {
+              const m = x as unknown as { object: Expression; member: ASTNode };
+              const base = identName(m.object);
+              if (!base || m.member.kind !== NodeKind.Identifier) return null;
+              // Without `&`, only an array member is an address computed from the base.
+              if (!addressOf && !/\]\s*$/.test(fieldNamed(base, (m.member as Identifier).name)?.type ?? '')) return null;
+              return base;
+            }
+            else break;
+          }
+          const n = identName(x);
+          if (!n) return null;
+          const tn = types.get(n);
+          if (addressOf) return null;          // `&v`: the address of v itself, not a value it holds
+          return tn && tn.kind === NodeKind.PointerType ? n : null;
+        };
+        // A pointer computed (not loaded) from a parameter the function never reassigns holds an
+        // address the caller passed, made before this call's frame existed: it cannot reach into
+        // a frame object.
+        const paramDerived = (v: string): boolean => {
+          if (untouchedParam(v)) return true;
+          const e = inits.get(v);
+          const b = e ? addressBase(e) : null;
+          return b !== null && b !== v && params.has(b) && !writesOutside(b);
+        };
+        const nonStaticLocal = (r: string | null) => frameObject(r)
+          && findNodesByKind(fnBody, NodeKind.VariableDecl).filter(x => (x as VariableDecl).name.name === r)
+            .every(x => !(x as VariableDecl).specifiers.includes('static'));
+        // A fresh block: the start address is computed from a local whose one value is what an
+        // allocator returned (other writes only null), whose address is never taken. The block
+        // overlaps nothing that existed before the call - a frame or global object, the memory a
+        // parameter pointed to - so a copy between it and one of those is between two objects.
+        const ALLOCATORS = ['Memory::AllocServerMemory', 'Memory::AllocClientMemory', 'SMem::SMemAlloc'];
+        const isNull = (e: Expression) => { let x = unwrap(e); while (x.kind === NodeKind.CStyleCastExpr) x = unwrap((x as CStyleCastExpr).expression); return x.kind === NodeKind.NullptrLiteral || intValue(x) === 0n; };
+        const allocCall = (e: Expression): boolean => {
+          let x = unwrap(e);
+          while (x.kind === NodeKind.CStyleCastExpr) x = unwrap((x as CStyleCastExpr).expression);
+          if (x.kind !== NodeKind.CallExpr) return false;
+          const callee = emit((x as unknown as { callee: AnyNode }).callee).replace(/\s+/g, '');
+          return ALLOCATORS.some(a => callee === a || callee.endsWith('::' + a));
+        };
+        const freshBlock = (v: string): boolean => {
+          const e = inits.get(v);
+          if (!e) return false;
+          const b = addressBase(e);
+          return b !== null && b !== v && allocLocal(b, initStmt.get(v)!);
+        };
+        // Every definition of b reaching the read is a whole store of an allocator's result or
+        // of null, never the entry value, and b's address is never taken.
+        const allocLocal = (b: string, at: Statement): boolean => {
+          if (params.has(b) || !types.has(b)) return false;
+          const decls = findNodesByKind(fnBody, NodeKind.VariableDecl).filter(x => (x as VariableDecl).name.name === b) as VariableDecl[];
+          if (decls.length !== 1 || decls[0].specifiers.includes('static')) return false;
+          const fl = flowOf();
+          if (fl.isEscaped(b)) return false;
+          const node = fl.nodeOf(at);
+          if (node === undefined) return false;
+          const defs = [...fl.reaching(node, b)];
+          if (defs.length === 0) return false;
+          let alloc = false;
+          for (const n of defs) {
+            if (n === ENTRY_DEF) return false;
+            const df = fl.definition(n, b);
+            if (!df || !df.killing || !df.rhs) return false;
+            if (allocCall(df.rhs)) alloc = true;
+            else if (!isNull(df.rhs)) return false;
+          }
+          return alloc;
+        };
+        // Existing before the call: a frame or global object, a string literal, or memory a
+        // parameter pointed to (an address computed from it, or the parameter itself).
+        const preexisting = (v: string, r: string | null) => r !== null || literal(v) || paramDerived(v);
+        // The same member of two pointers to one struct type, over bytes inside the struct: the
+        // two objects either coincide (the copy writes each byte with itself) or do not overlap.
+        // `this` is the parameter this-param-rewrite will name it.
+        const baseName = (e: Expression): string | null =>
+          unwrap(e).kind === NodeKind.ThisExpr ? (o.thisName && types.has(o.thisName) ? o.thisName : null) : identName(e);
+        const sameMember = (): boolean => {
+          const di = inits.get(d), si = inits.get(s);
+          if (!di || !si) return false;
+          const strip = (e: Expression) => { let x = unwrap(e); while (x.kind === NodeKind.CStyleCastExpr) x = unwrap((x as CStyleCastExpr).expression); return x; };
+          const member = (e: Expression): { base: string; m: string } | null => {
+            let x = strip(e);
+            if (x.kind === NodeKind.UnaryExpr && (x as UnaryExpr).operator === '&') x = strip((x as UnaryExpr).operand);
+            else {
+              const mm = x as unknown as { object: Expression; member: ASTNode };
+              if (x.kind !== NodeKind.MemberExpr || mm.member.kind !== NodeKind.Identifier) return null;
+              const b = baseName(mm.object);
+              if (!b || !/\]\s*$/.test(fieldNamed(b, (mm.member as Identifier).name)?.type ?? '')) return null;
+            }
+            if (x.kind !== NodeKind.MemberExpr || !(x as unknown as { isArrow: boolean }).isArrow) return null;
+            const mx = x as unknown as { object: Expression; member: ASTNode };
+            const b = baseName(mx.object);
+            return b && mx.member.kind === NodeKind.Identifier ? { base: b, m: (mx.member as Identifier).name } : null;
+          };
+          const a = member(di), c = member(si);
+          if (!a || !c || a.m !== c.m || a.base === c.base) return false;
+          const ta = pointeeName(a.base), tc = pointeeName(c.base);
+          if (!ta || ta !== tc || !aggregateSizes[ta]) return false;
+          const fld = fieldNamed(a.base, a.m);
+          return !!fld && fld.offset + bytes <= aggregateSizes[ta];
+        };
         const separate = (dRoot !== null && sRoot !== null && dRoot !== sRoot)
+          || (nonStaticLocal(dRoot) && paramDerived(s))
+          || (nonStaticLocal(sRoot) && paramDerived(d))
+          || (freshBlock(d) && !freshBlock(s) && preexisting(s, sRoot))
+          || (freshBlock(s) && !freshBlock(d) && preexisting(d, dRoot))
+          || sameMember()
           || (frameObject(dRoot) && untouchedParam(s))
           || (frameObject(sRoot) && untouchedParam(d))
           || (frameObject(dRoot) && earlyLocal(s, dRoot))
@@ -574,7 +708,7 @@ export function createRepStringFormTransformer(options?: PluginOptions): Transfo
         if (steps.get(d) !== BigInt(unit / de) || steps.get(s) !== BigInt(unit / se) || unit % de !== 0 || unit % se !== 0) return null;
         // memcpy needs two separate objects: an overlapping rep movsd (`dst = a + 1; src = a`)
         // propagates the first element through the array, which memcpy does not promise.
-        const separate = separateCopy(list, i, f, body, d, s);
+        const separate = separateCopy(list, i, f, body, d, s, Number(loop.count) * unit + unit - 1);
         if (!separate) return null;
         const op = tiedOp('movs', unit, loop.count, [loop.counter, d, s]);
         if (!op) return 'untied';
@@ -829,7 +963,7 @@ export function createRepStringFormTransformer(options?: PluginOptions): Transfo
         // Two pointers to one struct type over the whole struct: the assignment, whose objects
         // either coincide or do not overlap. Anything else is memcpy, between objects shown apart.
         const assign = tn !== null && bytes === aggregateSizes[tn];
-        if (!assign && !separateCopy(list, i, f, body, d, s)) return null;
+        if (!assign && !separateCopy(list, i, f, body, d, s, Number(loop.count) * unit + unit - 1)) return null;
         const op = tiedOp('movs', unit, loop.count, [loop.counter, d, s]);
         if (!op) return 'untied';
         const fl = flowOf();
