@@ -4,7 +4,7 @@ import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { COMPARE_SETTER_JAVA, COMPARE_SITES_SCRIPT, COMPARE_USE_JAVA, compareSiteRows } from './compare-sites.js';
+import { COMPARE_MORE_JAVA, COMPARE_SETTER_JAVA, COMPARE_SITES_SCRIPT, COMPARE_USE_JAVA, compareSiteRows } from './compare-sites.js';
 import { FUNCTION_FACTS_SCRIPT } from './function-facts.js';
 
 it('uses the exact flags-setter helper in both extraction paths', () => {
@@ -232,4 +232,22 @@ it('parses the flags-use columns and leaves rows of an older script without them
   const [old] = compareSiteRows(base.join('\t'));
   assert.equal(old.pos, undefined);
   assert.equal(old.use, undefined);
+});
+
+it('uses the exact op-instruction, zeroing, field and call helper in both extraction paths', () => {
+  for (const script of [COMPARE_SITES_SCRIPT, FUNCTION_FACTS_SCRIPT]) {
+    assert.ok(script.includes(COMPARE_MORE_JAVA));
+    assert.equal(script.match(/compareMore\.of\(op, L, passive\)/g)?.length, 1);
+  }
+});
+
+it('parses the op mnemonic, set zeroing, field and intervening-call columns', () => {
+  const base = ['0', '==', 'INT_EQUAL', '4', '1', '5', 'e', 'c:5', '00400000', '00400004', 'JNZ', '00400000', 'CMP', '4', 'm', 'i', '5', '1', 'v', 's', '-', '0'];
+  const [row] = compareSiteRows([...base, 'CMP', '1', 'nStateFlag', '-', '2'].join('\t'));
+  assert.deepStrictEqual([row.opMnemonic, row.setZeroed, row.fields, row.interveningCalls], ['CMP', true, ['nStateFlag', '-'], 2]);
+  const [none] = compareSiteRows([...base, 'SUB', '-', '-', '-', '-'].join('\t'));
+  assert.deepStrictEqual([none.opMnemonic, none.setZeroed, none.interveningCalls], ['SUB', undefined, undefined]);
+  const [old] = compareSiteRows(base.join('\t'));
+  assert.equal(old.opMnemonic, undefined);
+  assert.equal(old.fields, undefined);
 });
