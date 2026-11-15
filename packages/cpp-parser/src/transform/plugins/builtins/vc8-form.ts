@@ -194,6 +194,14 @@ import { builtinTruthSite } from './truth-form-safety.js';
  *   decl(V,W)            the declaration of V without an initializer moves to just before
  *                        the declaration of W in its block; refused when a statement it
  *                        moves past names V.
+ *   guardstore(V,N)      a typed scalar call-result store followed by an equality guard
+ *                        returning a value uses a same-type temporary N in the test.
+ *                        V is assigned from N before the original return and on the
+ *                        passing path. V's storage identity and all later uses stay.
+ *                        Only top-level nonvolatile 32-bit V, direct primitive calls
+ *                        with local scalar/pointer arguments, and literal/enum bounds
+ *                        qualify; control-flow entry, shadowing and temporary objects
+ *                        refuse. A later &V remains the same object.
  *   split(V,T,N)         the store `V = E;` that begins a new life of V is written
  *                        `T N = E;` and that life's reads read N (E may read V: it reads
  *                        the old value, and keeps V); refused when V is read again after
@@ -441,6 +449,7 @@ import { restoreSwitchDefault, switchDefaultValue } from './switch-default.js';
 import { countdownFieldPtrwalk } from './countdown-field-ptrwalk.js';
 
 export type Vc8Form =
+  | { op: 'guardstore'; name: string; temp: string }
   | { op: 'zerolife'; name: string }
   | { op: 'nullfault32' }
   | { op: 'swdefault'; expr: string; values: string[]; index?: number }
@@ -524,6 +533,8 @@ export interface Vc8Accessor {
 
 /** The tables vc8-form reads: select-argument's, and the accessors `acc` writes. */
 export type Vc8FormTables = SelectArgumentOptions & RecordWalkTables & {
+  /** Declared enum types, for primitive call-result and argument proofs. */
+  enumTypes?: readonly string[];
   accessors?: Vc8Accessor[];
   /**
    * Bytes a callee stores through argument `index` (a non-null `&local`) on every path
@@ -554,7 +565,7 @@ export interface Vc8FormOptions {
   selectTables?: Vc8FormTables;
 }
 
-const OPS = new Set(['zerolife', 'nullfault32', 'swdefault', 'seq', 'fold', 'join', 'coalesce', 'recordwalk', 'cache', 'own', 'guards', 'merge-guards', 'retval', 'branchret', 'width', 'boolflag', 'retwiden', 'arms',
+const OPS = new Set(['guardstore', 'zerolife', 'nullfault32', 'swdefault', 'seq', 'fold', 'join', 'coalesce', 'recordwalk', 'cache', 'own', 'guards', 'merge-guards', 'retval', 'branchret', 'width', 'boolflag', 'retwiden', 'arms',
   'nest', 'merge-tail', 'tailguard', 'tailcopy', 'continue', 'dup', 'tarms', 'zero', 'nonzero', 'bool', 'cmp', 'swap', 'ifsel', 'clamp', 'split', 'select', 'decl', 'unselect', 'tsel', 'hoist',
   'nestcall', 'fill', 'elems', 'copy', 'shift', 'ptrwalk', 'rowptr', 'acc', 'retvar', 'onecall', 'roundup', 'swmerge', 'switch', 'dec', 'opas', 'range', 'castout', 'signbit', 'nullfield', 'zinit', 'znew', 'swclamp', 'retbase', 'postdec']);
 
@@ -602,6 +613,9 @@ export function parseVc8Form(text: string): Vc8Form | undefined {
       const n = anchor === undefined ? 0 : /^\d+$/.test(anchor) ? Number(anchor) : NaN;
       return args.length >= 2 && (n === 0 || n >= 1) ? { op: 'seq', targets: args, ...(n ? { index: n } : {}) } : undefined;
     }
+    case 'guardstore':
+      return args.length === 2 && !anchor && args.every(a => /^[A-Za-z_]\w*$/.test(a) && !isKeywordString(a)) && args[0] !== args[1]
+        ? { op: 'guardstore', name: args[0], temp: args[1] } : undefined;
     case 'fold': return args.length === 1 && !anchor ? { op: 'fold', name: args[0] } : undefined;
     case 'coalesce': return (args.length === 1 || args.length === 2) && !anchor && /^[A-Za-z_]\w*$/.test(args[0])
       && (args.length === 1 || /^[A-Za-z_]\w*(?:->[A-Za-z_]\w*)?$/.test(norm(args[1])))
@@ -3071,6 +3085,81 @@ function doZeroLife(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'zerolife' }>): 
   b.statements.splice(k, 2, guard, statement);
 }
 
+/**
+ * Delay the physical V store past a pure test while preserving it on BOTH paths.
+ * Calls may observe/mutate aliases of V; those effects still finish before the new
+ * temporary is initialized. No class argument/result temporary may be destroyed
+ * between that initialization and V's store, and the comparison observes no memory.
+ */
+function doGuardstore(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'guardstore' }>): void {
+  freshName(fn, f.temp);
+  if (new RegExp(`\\b${f.temp}\\b`).test(emit(fn as never))) refuse(`${f.temp} already names text or a type`);
+  const unsafe = new Set([NodeKind.GotoStmt, NodeKind.LabelStmt, NodeKind.CaseStmt, NodeKind.DefaultStmt,
+    NodeKind.TryStmt, NodeKind.SehTryStmt, NodeKind.LambdaExpr, NodeKind.FunctionDecl,
+    NodeKind.ClassDecl, NodeKind.StructDecl, NodeKind.UnionDecl, NodeKind.EnumDecl,
+    NodeKind.TypedefDecl, NodeKind.TypeAliasDecl, NodeKind.UsingDecl, NodeKind.UsingDirective,
+    NodeKind.Error, NodeKind.AsmDecl, NodeKind.PpConditionalStmt]);
+  for (const { node } of walk(fn.body!)) if (unsafe.has(node.kind)) refuse(`unsupported ${node.kind} in function`);
+  const counts = new Map<string, number>();
+  for (const p of fn.parameters) if (p.name) counts.set(p.name.name, (counts.get(p.name.name) ?? 0) + 1);
+  for (const { node } of walk(fn.body!)) if (node.kind === NodeKind.VariableDecl) {
+    const n = (node as VariableDecl).name.name; counts.set(n, (counts.get(n) ?? 0) + 1);
+  }
+  if ([...counts.values()].some(n => n !== 1)) refuse('a local or parameter is shadowed');
+  // Keep namespaces: Other::uint32_t is not the canonical integer typedef.
+  const key = (t: string) => t.replace(/\s+/g, '');
+  const primitive = (t: string): boolean => {
+    if (/\bvolatile\b/.test(t)) return false;
+    const k = key(t.replace(/\bconst\b/g, ''));
+    if (Object.prototype.hasOwnProperty.call(RANGE, k) || selectTables?.enumTypes?.includes(k)) return true;
+    // No references, function pointers, templates, arrays or value-class parameters.
+    return /^(?:(?:struct|union)\s+)?(?:::)?[A-Za-z_]\w*(?:::[A-Za-z_]\w*)*\s*(?:\*\s*)+$/.test(t.replace(/\bconst\b/g, '').trim());
+  };
+  const locals = new Map<string, string>();
+  for (const p of fn.parameters) if (p.name && !p.isVariadic) locals.set(p.name.name, emit(p.type as never).trim());
+  const sites: Array<{ k: number; guard: IfStmt; type: string; call: CallExpr }> = [];
+  const st = fn.body!.statements;
+  for (let k = 0; k < st.length; k++) {
+    if (st[k].kind === NodeKind.DeclStmt) for (const d of (st[k] as DeclStmt).declarations) {
+      if (d.kind === NodeKind.VariableDecl && !(d as VariableDecl).specifiers.length) locals.set((d as VariableDecl).name.name, emit((d as VariableDecl).type as never).trim());
+    }
+    const store = storeOf(st[k]), g = st[k + 1];
+    if (!store || store.operator !== '=' || !isId(unparen(store.left), f.name) || !g || g.kind !== NodeKind.IfStmt) continue;
+    const guard = g as IfStmt, c = unparen(guard.condition), arm = stmtsOf(guard.thenBranch);
+    if (guard.init || guard.isConstexpr || guard.elseBranch || arm.length !== 1 || arm[0].kind !== NodeKind.ReturnStmt || !(arm[0] as ReturnStmt).value) refuse('guard is not a plain single value return');
+    if (c.kind !== NodeKind.BinaryExpr || !['==', '!='].includes((c as BinaryExpr).operator)) refuse('guard is not equality');
+    const cmp = c as BinaryExpr;
+    const bound = isId(unparen(cmp.left), f.name) ? unparen(cmp.right) : isId(unparen(cmp.right), f.name) ? unparen(cmp.left) : undefined;
+    if (!bound) continue;
+    const enumName = calleeName(bound);
+    const literal = bound.kind === NodeKind.IntegerLiteral || (bound.kind === NodeKind.UnaryExpr && ['+', '-'].includes((bound as UnaryExpr).operator) && unparen((bound as UnaryExpr).operand).kind === NodeKind.IntegerLiteral);
+    if (!literal && !(enumName && !counts.has(enumName) && !counts.has(enumName.split('::').pop()!) && selectTables?.enumValues?.[enumName] !== undefined)) refuse('bound is not an unshadowed literal or enum constant');
+    const type = locals.get(f.name), r = type && RANGE[key(type)];
+    if (!type || !r || (r !== I32 && r !== U32)) refuse('destination is not a canonical nonvolatile 32-bit local or parameter');
+    const rhs = unparen(store.right);
+    if (rhs.kind !== NodeKind.CallExpr) refuse('value is not a direct call');
+    const call = rhs as CallExpr, callee = calleeName(call.callee);
+    if (!callee || counts.has(callee) || counts.has(callee.split('::').pop()!)) refuse('callee is indirect or shadowed');
+    const ret = scopedLookup(selectTables?.functionReturnTypes ?? {}, callee, selectTables?.enclosingSegments ?? []);
+    const params = scopedLookup(selectTables?.functionParamTypes ?? {}, callee, selectTables?.enclosingSegments ?? []);
+    if (!ret || !primitive(ret) || ret.includes('*') || !params || params.length !== call.arguments.length || !params.every(primitive)) refuse('call has unknown or nonprimitive return/parameter types');
+    for (const arg of call.arguments) {
+      const a = unparen(arg), t = isId(a) ? locals.get(a.name) : undefined;
+      if (!t || !primitive(t)) refuse('argument is not a typed scalar or pointer local');
+    }
+    sites.push({ k, guard, type, call });
+  }
+  if (sites.length !== 1) refuse(`found ${sites.length} guarded call stores`);
+  const { k, guard, type, call } = sites[0];
+  const [decl, copy] = parseStmts(`${type} ${f.temp} = 0; ${f.name} = ${f.temp};`);
+  declOf(decl)!.initializer = call;
+  const cmp = unparen(guard.condition) as BinaryExpr;
+  if (isId(unparen(cmp.left), f.name)) cmp.left = parseExpr(f.temp);
+  else cmp.right = parseExpr(f.temp);
+  guard.thenBranch = { kind: NodeKind.CompoundStmt, statements: [cloneNode(copy), ...stmtsOf(guard.thenBranch)] } as CompoundStmt;
+  st.splice(k, 2, decl, guard, copy);
+}
+
 function doSplit(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'split' }>): void {
   if (localNames(fn).has(f.rename)) refuse(`${f.rename} exists`);
   if (addressTaken(fn, f.name)) refuse(`&${f.name} is taken`);
@@ -5104,6 +5193,7 @@ function doRetbase(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'retbase' }>): vo
 }
 
 const APPLY: { [K in Vc8Form['op']]: (fn: FunctionDecl, f: Extract<Vc8Form, { op: K }>) => void } = {
+  guardstore: doGuardstore,
   zerolife: doZeroLife,
   nullfault32: doNullfault32,
   swdefault: (fn, f) => { const why = restoreSwitchDefault(fn, f.expr, f.values, f.index, selectTables); if (why) refuse(why); },

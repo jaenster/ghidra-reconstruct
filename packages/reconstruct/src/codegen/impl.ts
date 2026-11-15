@@ -4607,6 +4607,7 @@ function transformDecompiledCode(
           aggregateMembers: context?.funcPtrArgCasts?.aggregateMembers,
           unionNames: context?.funcPtrArgCasts?.unionNames,
           accessors: context?.accessorTwins,
+          enumTypes: context?.funcPtrArgCasts?.enumTypes,
           ...(context?.funcPtrArgCasts?.outParams ? {
             outParamWidth: (callee: string, index: number) => context.funcPtrArgCasts!.outParams!.outParamWidthDocumented(callee, index),
             typeSize: (spelling: string) => context.funcPtrArgCasts!.outParams!.typeSize(spelling),
