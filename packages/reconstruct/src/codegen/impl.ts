@@ -28,6 +28,7 @@ import { isInlineHost } from './inline-hosts.js';
 import { callOrderLines } from './call-order-spec.js';
 import { accessOrderLines } from './access-order-spec.js';
 import { rotateSiteLines } from './rotate-sites-spec.js';
+import { arithSiteLines } from './arith-sites-spec.js';
 import { storeBaseLines } from './store-bases-spec.js';
 import { callDivideLines } from './call-divides-spec.js';
 import { shadowedGlobalLines } from './shadowed-globals-spec.js';
@@ -1840,6 +1841,7 @@ export function generateFunctionImplementation(
           registerStores: override?.action === 'patch' ? undefined : func.registerStores,
           // A text patch anchors on the shifts as Ghidra printed them.
           rotateSites: override?.action === 'patch' ? undefined : func.rotateSites,
+          arithSites: override?.action === 'patch' ? undefined : func.arithSites,
           // A text patch anchors on the stores as Ghidra printed them.
           storeBases: override?.action === 'patch' ? undefined : func.storeBases,
           // A text patch anchors on the divisions as Ghidra printed them.
@@ -2995,6 +2997,8 @@ function transformDecompiledCode(
     registerStores?: import('../extract/register-stores.js').RegisterStoreFacts;
     /** The rotates by an immediate the original performs, per line (extract/rotate-sites.ts). */
     rotateSites?: import('../extract/rotate-sites.js').RotateSiteFacts;
+    /** Per line, the instructions behind its `*`, `+` and CONCAT tokens (extract/arith-sites.ts). */
+    arithSites?: import('../extract/arith-sites.js').ArithSiteFacts;
     /** The registers stores are addressed off and LEAs write, per line (extract/store-bases.ts). */
     storeBases?: import('../extract/store-bases.js').StoreBaseFacts;
     /** The calls the original divides right after they return, per line (extract/call-divides.ts). */
@@ -3055,6 +3059,10 @@ function transformDecompiledCode(
     // The original's rotates by an immediate, keyed by line of `wrapped` (rotate-sites-spec.ts).
     const rotates = funcBodyMatch && funcBodyMatch.index !== undefined
       ? rotateSiteLines(enclosing?.rotateSites, decompiled, funcBodyMatch.index + funcBodyMatch[0].indexOf('{'), body, preprocessedBody, wrapperPrefix)
+      : undefined;
+    // The original's multiplies, sums and CONCATs, keyed by line of `wrapped` (arith-sites-spec.ts).
+    const arith = funcBodyMatch && funcBodyMatch.index !== undefined
+      ? arithSiteLines(enclosing?.arithSites, decompiled, funcBodyMatch.index + funcBodyMatch[0].indexOf('{'), body, preprocessedBody, wrapperPrefix)
       : undefined;
     // The calls the original divides at once, keyed by line of `wrapped` (call-divides-spec.ts).
     const divides = funcBodyMatch && funcBodyMatch.index !== undefined
@@ -4189,6 +4197,15 @@ function transformDecompiledCode(
         onSite: (e: { function: string; name: string; uses: number }) =>
           console.warn(`[held-address] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.uses} through ${e.name}`),
       };
+    }
+
+    // A multiply the original shifted, a sum it nested, a CONCAT it never truncated (arith-sites.ts).
+    if (arith) {
+      const report = (e: { line: number; rule: string }) =>
+        console.warn(`[arith-sites] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.rule} at line ${e.line}`);
+      perPluginOptions['shift-multiply'] = { arith, onSite: report };
+      perPluginOptions['add-nesting'] = { arith, onSite: report };
+      perPluginOptions['concat-widen'] = { arith, onSite: report };
     }
 
     // A shift pair, multiply pair or byte swap the original performs with rotates (rotate-intrinsic.ts).

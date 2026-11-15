@@ -16,7 +16,7 @@
  * test reads through a getter written once per unit, ahead of the first function that
  * calls it:
  *
- *     static inline uint32_t FlagBit_D2UnitStrc_eUnitFlags_1(D2UnitStrc * p) {
+ *     static D2_FORCEINLINE uint32_t FlagBit_D2UnitStrc_eUnitFlags_1(D2UnitStrc * p) {
  *         if (!p) { return 0; }
  *         return p->eUnitFlags >> 1 & 1;
  *     }
@@ -24,6 +24,11 @@
  * The value is the same wherever the bit is read: the pointer is non-null there (the
  * printed read goes through it), and the getter returns the very bit. A line whose AND
  * count differs from its bit tests is left as printed.
+ *
+ * The getter is forced inline. The same AND is the evidence that the original expanded it at
+ * the site (a call would leave no AND on the line), and VC8 at /Ob1 keeps a plain `inline`
+ * as a call where its own heuristic declines (AI_ForEachFn11_AltHittableTarget 005dccc0:
+ * `call FlagBit_...` where the original has `mov ecx, [esi + 0xc4]; shr ecx, 2; and ecx, 1`).
  */
 
 import { NodeKind } from '../../../ast/kinds.js';
@@ -132,7 +137,7 @@ function rewriteFunction(fn: FunctionDecl, opts: FlagBitGetterOptions): Function
       const value = r.shift ? `p->${field} >> ${r.shift} & 1` : `p->${field} & 1`;
       opts.onPrefix?.([
         `// The flag bit as the original's header getter returns it: a value of its own, tested in a register.`,
-        `static inline uint32_t ${name}(${type} * p) {`,
+        `static D2_FORCEINLINE uint32_t ${name}(${type} * p) {`,
         `    if (!p) {`,
         `        return 0;`,
         `    }`,

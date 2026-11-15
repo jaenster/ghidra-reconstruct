@@ -179,6 +179,12 @@ export interface ExtractedFunction {
    */
   rotateSites?: import('./extract/rotate-sites.js').RotateSiteFacts;
   /**
+   * Per decompile line, the instructions behind its `*` by a power of two, the nesting of its
+   * `+` chains and the widening of its CONCATs (extract/arith-sites.ts). Absent when there are
+   * none or the snapshot predates the field.
+   */
+  arithSites?: import('./extract/arith-sites.js').ArithSiteFacts;
+  /**
    * The register each store is addressed off and each LEA writes, per `=` of a decompile line
    * (extract/store-bases.ts). Absent when there are none or the snapshot predates the field.
    */
