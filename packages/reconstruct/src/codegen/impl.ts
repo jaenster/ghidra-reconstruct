@@ -4078,6 +4078,12 @@ function transformDecompiledCode(
             console.warn(`[flag-bit] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.getter} on line ${e.line}`),
         } : {}),
       };
+      // A walk to the last node whose original re-tests the copied pointer (link-retest-for.ts).
+      perPluginOptions['link-retest-for'] = {
+        branchLayout: layout,
+        onSite: (e: { line: number; form: string; pointer: string }) =>
+          console.warn(`[link-retest] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.form} on ${e.pointer} at line ${e.line}`),
+      };
       // A TSList::Next whose two returns VC8 tail-duplicated from one link pick (link-select-tail.ts).
       perPluginOptions['link-select-tail'] = {
         branchLayout: layout,
