@@ -75,6 +75,30 @@ const fileTools = row('startupInfo,-1085c,44;processInfo,-10818,10', 1, [
   'aa,-,LEA,r:ECX,m,ECX,-,-10858,-,-',
 ]);
 
+// ITEMEVENT_SlowTarget 005c0310: xor eax, eax and nine dword stores clear sStateArg, the lea
+// for the call ends the opening run before the last one, then the members are stored, among
+// them eSkill at +8 from EAX, still 0: the source's `sStateArg.eSkill = SKILL_Attack`.
+const slowTarget = row('sStateArg,-28,24', 1, [
+  '0,-,PUSH,r:EBP,-,ESP,-,-,-,-',
+  '1,-,MOV,r:EBP,r:ESP,EBP,-,-,-,-',
+  'be,-,XOR,r:EAX,r:EAX,EAX,-,-,-,-',
+  ...[0x24, 0x20, 0x1c, 0x18, 0x14, 0x10, 0xc, 0x8].map((d, n) =>
+    `${(0xc0 + 3 * n).toString(16)},-,MOV,m,r:EAX,-,-${(d + 4).toString(16)}:w,-${d.toString(16)},4:r:EAX,-`),
+  'd8,-,NEG,r:ESI,-,ESI,-,-,-,-',
+  'da,-,LEA,r:ECX,m,ECX,-28:a,-24,-,-',
+  'dd,-,MOV,m,r:EAX,-,-8:w,-4,4:r:EAX,-',
+  'e0,-,MOV,m,r:EDI,-,-28:w,-24,4:r:EDI,-',
+  'e3,-,MOV,m,r:EBX,-,-24:w,-20,4:r:EBX,-',
+  'e6,-,MOV,m,r:EAX,-,-20:w,-1c,4:r:EAX,-',
+  'e9,-,MOV,m,i:1,-,-1c:w,-18,4:c:1,-',
+  'f0,-,MOV,m,i:2ee,-,-18:w,-14,4:c:2ee,-',
+  'f7,-,MOV,m,i:43,-,-14:w,-10,4:c:43,-',
+  'fe,-,MOV,m,r:ESI,-,-10:w,-c,4:r:ESI,-',
+  '101,-,MOV,m,i:18,-,-c:w,-8,4:c:18,-',
+  '108,c,CALL,i:56e970,-,EAX|ECX|EDX,-,-,-,SetStateWithExpiryTime',
+  '10d,-,MOV,m,i:0,-,-20:w,-1c,4:c:0,-',
+]);
+
 describe('zero stores - the opening stores of a struct local, from the instructions', () => {
   it('counts the stores of a register the block zeroed (HandleMouseWheel)', () => {
     assert.deepStrictEqual(parseZeroStoreRow(mouseWheel), [{ name: 'sMsg', offset: -0x24, size: 32, zero: [[4, 32]], other: [[0, 4]] }]);
@@ -128,6 +152,18 @@ describe('zero stores - the opening stores of a struct local, from the instructi
     assert.deepStrictEqual(parseZeroStoreRow(t), [{ name: 's', offset: -0x24, size: 32, zero: [], other: [] }]);
     const memsetOfOther = fileTools.replace('74,-,PUSH,i:0', '74,-,PUSH,i:1');
     assert.deepStrictEqual(parseZeroStoreRow(memsetOfOther)[0], { name: 'startupInfo', offset: -0x1085c, size: 0x44, zero: [], other: [] });
+  });
+
+  it('records a zero store the source makes again after the clear (SlowTarget)', () => {
+    assert.deepStrictEqual(parseZeroStoreRow(slowTarget), [{ name: 'sStateArg', offset: -0x28, size: 0x24, zero: [[0, 32]], other: [], rezero: [[8, 12]] }]);
+    // Not past a read of the local, a call or a block entry.
+    assert.strictEqual(parseZeroStoreRow(slowTarget.replace('e3,-,MOV,m,r:EBX,-,-24:w,-20,4:r:EBX,-', 'e3,-,MOV,r:EBX,m,EBX,-24:r,-20,-,-'))[0].rezero, undefined);
+    assert.strictEqual(parseZeroStoreRow(slowTarget.replace('e3,-,MOV', 'e3,e,MOV'))[0].rezero, undefined);
+  });
+
+  it('records no rezero where every zero store is the first to its bytes', () => {
+    assert.strictEqual(parseZeroStoreRow(mouseWheel)[0].rezero, undefined);
+    assert.strictEqual(parseZeroStoreRow(clearScreen)[0].rezero, undefined);
   });
 
   it('rejects a malformed row', () => {

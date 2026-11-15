@@ -15,6 +15,9 @@
  *   offset  its stack offset (the frame offsets Ghidra's stack references use), size its size
  *   zero    the bytes, relative to the local, the opening run stores zero to
  *   other   the bytes the opening run stores anything else to
+ *   rezero  the bytes of `zero` stored zero again before the first read of the local, call or
+ *           block entry, past an address-take that ended the opening run: a zero store the
+ *           source wrote after the clear, which the compiler kept
  *
  * The opening run is every store to the local, in address order, up to the first instruction
  * that reads it, takes its address for anything but a zeroing fill, or writes it in place
@@ -42,6 +45,13 @@ export interface ZeroStoreLocal {
   /** [from, to) byte ranges relative to the local, ascending and disjoint. */
   zero: [number, number][];
   other: [number, number][];
+  /**
+   * Bytes of `zero` the original stores zero to again before it reads the local, a call or
+   * a block entry: an explicit zero store the source made after clearing the object
+   * (ITEMEVENT_SlowTarget 005c0310 clears the argument, then stores `eSkill = SKILL_Attack`,
+   * which is 0). Absent when there are none.
+   */
+  rezero?: [number, number][];
 }
 
 export type ZeroStoreFacts = ZeroStoreLocal[];
@@ -362,7 +372,10 @@ export function zeroStoresFromTrace(trace: ZeroStoreTrace): ZeroStoreFacts {
 
   const zero = locals.map(() => new Set<number>());
   const other = locals.map(() => new Set<number>());
-  const open = locals.map(() => true);
+  const rezero = locals.map(() => new Set<number>());
+  // open: the opening run; tail: the run ended where the local's address was taken, and its
+  // later stores are still read for `rezero` up to the first read, call or block entry; done.
+  const state = locals.map((): 'open' | 'tail' | 'done' => 'open');
   const mark = (k: number, from: number, to: number, isZero: (byte: number) => boolean) => {
     const l = locals[k];
     for (let b = Math.max(from, l.offset); b < Math.min(to, l.offset + l.size); b++) {
@@ -371,10 +384,21 @@ export function zeroStoresFromTrace(trace: ZeroStoreTrace): ZeroStoreFacts {
       (isZero(b - from) ? zero[k] : other[k]).add(rb);
     }
   };
+  /** A zero store to bytes the opening run already zeroed: a store the source made itself. */
+  const markRezero = (k: number, from: number, to: number) => {
+    const l = locals[k];
+    for (let b = Math.max(from, l.offset); b < Math.min(to, l.offset + l.size); b++) {
+      if (zero[k].has(b - l.offset)) rezero[k].add(b - l.offset);
+    }
+  };
   walk((i, imm) => {
+    if (i.entered || i.call) locals.forEach((_, k) => { if (state[k] === 'tail') state[k] = 'done'; });
     const fill = fills.get(i.at);
     if (fill) {
-      locals.forEach((_, k) => { if (open[k]) mark(k, fill.offset, fill.offset + fill.length, () => true); });
+      locals.forEach((_, k) => {
+        if (state[k] === 'open') mark(k, fill.offset, fill.offset + fill.length, () => true);
+        else if (state[k] === 'tail') state[k] = 'done';
+      });
       return;
     }
     if (feeds.has(i.at)) return;
@@ -389,14 +413,18 @@ export function zeroStoresFromTrace(trace: ZeroStoreTrace): ZeroStoreFacts {
     }
     for (const ref of refsOf(i)) {
       locals.forEach((l, k) => {
-        if (!open[k]) return;
+        if (state[k] === 'done') return;
         const store = !!i.store && ref.kind === 'w';
         const end = store ? ref.offset + i.store!.size : ref.offset + 1;
         if (end <= l.offset || ref.offset >= l.offset + l.size) return;
-        if (!store) { open[k] = false; return; }
+        if (!store) {
+          state[k] = state[k] === 'open' && ref.kind === 'a' ? 'tail' : 'done';
+          return;
+        }
         // A store writes a value, not bytes: `cb = 0x44` is no zero store, whatever its upper bytes hold.
         const zeroValue = value !== undefined && value % 2 ** (8 * i.store!.size) === 0;
-        mark(k, ref.offset, end, () => zeroValue);
+        if (zeroValue) markRezero(k, ref.offset, end);
+        if (state[k] === 'open') mark(k, ref.offset, end, () => zeroValue);
       });
     }
   });
@@ -410,7 +438,10 @@ export function zeroStoresFromTrace(trace: ZeroStoreTrace): ZeroStoreFacts {
     }
     return out;
   };
-  return locals.map((l, k) => ({ ...l, zero: ranges(zero[k]), other: ranges(other[k]) }));
+  return locals.map((l, k) => ({
+    ...l, zero: ranges(zero[k]), other: ranges(other[k]),
+    ...(rezero[k].size > 0 ? { rezero: ranges(rezero[k]) } : {}),
+  }));
 }
 
 /** One function's row, as the facts script prints it without the entry. */

@@ -39,7 +39,11 @@ import type { RegisterStoreRow } from './register-store-select.js';
 import { covers, disjoint, lvalueSpan, memberSpan, memsetSpan, type RootInfo, type Span } from './byte-spans.js';
 
 /** Per struct-typed stack local, the bytes the original's opening stores write zero (extract/zero-stores.ts). */
-export interface ZeroStoreRow { name: string; size: number; zero: [number, number][] }
+export interface ZeroStoreRow {
+  name: string; size: number; zero: [number, number][];
+  /** Bytes the original stores zero to again after its clear: the source's own stores. */
+  rezero?: [number, number][];
+}
 
 export interface PointeeClearMemsetOptions extends PluginOptions {
   /** Aggregate name -> every field's offset, size and Ghidra type, in offset order. */
@@ -239,7 +243,8 @@ function pureRead(e: Expression): boolean {
  * the decompiler's own memset of an array member in the run). The evidence that the original
  * cleared the whole object: through a pointer, the register-store facts tie at least one zero
  * store of the run to a register loaded with zero and none to an immediate; for a stack
- * local, the zero-store facts say its opening stores write zero to every byte.
+ * local, the zero-store facts say its opening stores write zero to every byte, and none of the
+ * run's stores is one the original makes again after that clear (`rezero`).
  *
  * The window after the run is a straight run of whole-member stores `R->m = E` whose E only
  * reads (no call, assignment or increment) and never names R, so nothing between the memset
@@ -318,6 +323,9 @@ function partialClear(
   } else {
     const z = zeroRows.find(r => r.name === root);
     if (!z || z.size !== info.size || !covers(z.zero.map(([a, b]) => ({ start: a, size: b - a })), 0, info.size)) return null;
+    // A zero store the original makes again after its clear is the source's own statement, not
+    // the clear (PLAYER_HasHostilePlayer 00535b10 clears sHostileArgs, then stores bHostile = 0).
+    if (spans.some(sp => (z.rezero ?? []).some(([a, b]) => sp.start < b && a < sp.start + sp.size))) return null;
   }
   const id = Expr.identifier(root);
   const call = arrow

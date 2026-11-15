@@ -28,7 +28,7 @@ const LAYOUTS = {
 const SIZES = { POINT: 8, MS: 16, MSG: 14, PKT: 22 };
 
 type Rows = Array<{ name: string; size: number; value: number; register: boolean }>;
-function run(src: string, rows: Rows, zeroStores: Array<{ name: string; size: number; zero: [number, number][] }> = []): { out: string; sites: string[] } {
+function run(src: string, rows: Rows, zeroStores: Array<{ name: string; size: number; zero: [number, number][]; rezero?: [number, number][] }> = []): { out: string; sites: string[] } {
   const sites: string[] = [];
   const t = pointeeClearMemsetPlugin.createTransformer({
     structLayouts: LAYOUTS, aggregateSizes: SIZES, typedefTargets: { tagPOINT: 'POINT', LPMS: '_MS *', _MS: 'MS' }, registerStores: rows, zeroStores,
@@ -113,6 +113,14 @@ describe('pointee-clear-memset', () => {
       assert.ok(r.out.includes('PKT s; memset(&s, 0, sizeof(s)); s.nId = 0x5a; s.nArg = 0; g(&s); }'), r.out);
       assert.deepStrictEqual(run(src, [], [{ name: 's', size: 22, zero: [[0, 5]] }]).sites, []);
       assert.deepStrictEqual(run(src, []).sites, []);
+    });
+
+    // PLAYER_HasHostilePlayer 00535b10: the clear is already a memset (aggregate-zero-init), and
+    // the zero store after it is one the original makes again: the source's own, not the clear.
+    it('leaves a zero store the original makes again after its clear', () => {
+      const src = 'void f(int x) { POINT s; memset(&s, 0, sizeof(s)); s.x = 0; s.y = x; g(&s); }';
+      assert.deepStrictEqual(run(src, [], [{ name: 's', size: 8, zero: [[0, 8]], rezero: [[0, 4]] }]).sites, []);
+      assert.deepStrictEqual(run(src, [], [{ name: 's', size: 8, zero: [[0, 8]] }]).sites, ['s:POINT:1:partial']);
     });
   });
 });
