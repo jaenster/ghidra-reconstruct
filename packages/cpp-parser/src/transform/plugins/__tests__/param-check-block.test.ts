@@ -219,6 +219,9 @@ describe('paramCheckBlockPlugin', () => {
 
   it('leaves checks that dereference, call or divide: the block evaluates all of them', () => {
     for (const cond of ['!p || !*p', '!p || !p->n', '!p || !f(p)', '!p || !(8 / n)', '!p || !a[0]']) {
+      // A read through a name waits for the compare-sites row of its NEG (below).
+      const why = cond.endsWith('*p') || cond.endsWith('a[0]')
+        ? 'a check reads through a pointer the original did not evaluate unconditionally' : 'a check has a side effect or can fault';
       const r = run([
         'int F(int* p, int n) {',
         `  if (${cond}) { <NEG 1> <NEG 2>`,
@@ -229,7 +232,7 @@ describe('paramCheckBlockPlugin', () => {
         '}',
       ]);
       assert.strictEqual(r.out, r.before, cond);
-      assert.deepStrictEqual(r.left, ['a check has a side effect or can fault'], cond);
+      assert.deepStrictEqual(r.left, [why], cond);
     }
   });
 
@@ -304,5 +307,38 @@ describe('paramCheckBlockPlugin', () => {
       }
       printf("%d\\n", bad);`;
     assert.strictEqual(compileAndRun(prelude, main).trim(), '0');
+  });
+
+  // SRegDeleteValue 00414d90: `*pszSubKey` is read before `pszSubKey` is tested, all four masked.
+  const SREG = [
+    'int SRegDeleteValue(char* k, char* v, unsigned int f) {',
+    '  if (*k == 0 || !k || !v || *v == 0) { <NEG 15> <NEG 11> <NEG 27> <NEG 36>',
+    '    SErr::SErrSetLastError(0x57);',
+    '    return 0;',
+    '  }',
+    '  return g(f, k, v);',
+    '}',
+  ];
+  const site = (at: number, pos: string, use: string) =>
+    ['0', '==', 'INT_EQUAL', '4', '1', '0', 'e', 'c:0', (0x00414d90 + at).toString(16).padStart(8, '0'),
+      '-', '-', '-', '-', '0', '-', '-', '-', '0', pos, use, '-', '0'].join('\t');
+
+  it('takes a check that reads through a pointer when the original materialised it (SRegDeleteValue 00414d90)', () => {
+    const rows = [site(15, 'b', 'c'), site(11, 'b', 'c'), site(27, 'b', 'c'), site(36, 'b', 'c')].join('\n');
+    const { out } = run(SREG, { compareSites: rows, entry: '00414d90' });
+    assert.strictEqual(out, flat(`int SRegDeleteValue(char* k, char* v, unsigned int f) {
+      D2_CHECKS_BEGIN; D2_CHECK(k); D2_CHECK(*k != 0); D2_CHECK(v); D2_CHECK(*v != 0);
+      D2_CHECKS_END(SErr::SErrSetLastError(0x57), 0); return g(f, k, v); }`));
+  });
+
+  it('leaves a dereferencing check without a row, or with one that says it branched', () => {
+    const { out, before, left } = run(SREG);
+    assert.strictEqual(out, before);
+    assert.match(left[0], /reads through a pointer/);
+    const jumped = [site(15, 'b', 'j'), site(11, 'b', 'c'), site(27, 'b', 'c'), site(36, 'b', 'c')].join('\n');
+    assert.strictEqual(run(SREG, { compareSites: jumped, entry: '00414d90' }).out, before);
+    // a call in the check is never taken
+    const call = SREG.map(l => l.replace('*v == 0', '*h(v) == 0'));
+    assert.match(run(call, { compareSites: jumped, entry: '00414d90' }).left[0], /side effect/);
   });
 });

@@ -34,6 +34,33 @@
  *           or a register the block zeroed by XOR/SUB r,r or MOV r,0), `r` register, `m`
  *           memory, `bit` a TEST of two different operands
  *   pair    1 when the op sits on the setter or the user: the tie is only trusted then
+ *   pos     `b` when the decompiler's op reaches a CBRANCH (through BOOL_NEGATE, BOOL_AND,
+ *           BOOL_OR, COPY or INT_ZEXT): it printed the comparison as (part of) a branch
+ *           condition; `v` otherwise, a value (stored, returned, passed, or joined into a
+ *           variable)
+ *   use     how the compiled code consumes the flags: from the op's own instruction (a
+ *           flags setter: CMP, TEST, SUB, AND, OR, XOR, ADD, NEG, INC, DEC, BT) forward
+ *           over MOV, LEA, PUSH, POP, MOVZX, MOVSX, NOP and through unconditional JMPs,
+ *           the first flags reader: `j` a conditional jump (the comparison was branched
+ *           on), `s` a SETcc, `c` an SBB/ADC (both: materialised as a value), `-` none
+ *           found within 12 instructions, or a first jump or SETcc that reads none of the
+ *           flags the op is computed from (an inlined strcmp's JNZ before the SBB of its
+ *           `<`; not checked after NEG, whose C is `x != 0`)
+ *   arm     for `j`, the jump's fall-through path: `t` it reaches the jump's target
+ *           (one arm: `v = 0; if (c) v = 1;`), `d` it leaves by JMP (two arms), `r` by
+ *           RET, `-` otherwise or not a jump
+ *   alen    the instructions on that fall-through path before it reaches the target or
+ *           leaves (0 when `arm` is `-`)
+ *   om      the mnemonic at the op's own address: CMP or TEST for a comparison the source
+ *           wrote, SUB/DEC for a case of a switch's subtraction chain, NEG for a mask
+ *   sz      for `use` `s`: `1` when the SETcc's register was zeroed whole before it on the
+ *           op's fall-through run (an int: `xor eax, eax; cmp; sete al`), `0` when not (a
+ *           bool, a byte); `-` for any other reader
+ *   f0/f1   each input's structure field when it is read through a pointer (`p->a.b` gives
+ *           `b`, the innermost field at the offset), else `-`
+ *   ic      for a comparison whose value is a call's argument: the CALL instructions
+ *           between the op and that call (`0` when the original tested it next to the
+ *           call), else `-`
  *
  * Read-only: execute_script per batch, no transaction. A failure leaves the field unset,
  * which is also what an older snapshot looks like; the pass then changes nothing.
@@ -61,6 +88,16 @@ export interface CompareSite {
   bKind: string;
   bValue?: bigint;
   onPair: boolean;
+  /** Absent in rows of an older script: see `pos`, `use`, `arm`, `alen` above. */
+  pos?: 'b' | 'v';
+  use?: 'j' | 's' | 'c' | '-';
+  arm?: 't' | 'd' | 'r' | '-';
+  armLength?: number;
+  /** Absent in rows of an older script: see `om`, `sz`, `f0`, `f1`, `ic` above. */
+  opMnemonic?: string;
+  setZeroed?: boolean;
+  fields?: [string, string];
+  interveningCalls?: number;
 }
 
 /** The bounded flags walk, shared verbatim with its executable Java regression harness. */
@@ -95,9 +132,233 @@ class CompareSetter {
 CompareSetter compareSetter = new CompareSetter();
 `;
 
+/**
+ * How the compiled code consumes a comparison's flags (the `pos use arm alen` columns),
+ * shared verbatim by both scripts.
+ */
+export const COMPARE_USE_JAVA = `
+class CompareUse {
+  java.util.Set<String> setters = new java.util.HashSet<>(java.util.Arrays.asList(
+      "CMP", "TEST", "SUB", "AND", "OR", "XOR", "ADD", "NEG", "INC", "DEC", "BT"));
+  // The flags a comparison op is computed from, and the flags a reader reads: Z, C, S, O, P.
+  String opFlags(String opcode) {
+    switch (opcode) {
+      case "INT_EQUAL": case "INT_NOTEQUAL": return "Z";
+      case "INT_LESS": return "C";
+      case "INT_LESSEQUAL": return "CZ";
+      case "INT_SLESS": return "SO";
+      case "INT_SLESSEQUAL": return "SOZ";
+      default: return null;
+    }
+  }
+  String readFlags(String cc) {
+    switch (cc) {
+      case "Z": case "NZ": case "E": case "NE": return "Z";
+      case "C": case "NC": case "B": case "NB": case "AE": case "NAE": return "C";
+      case "BE": case "A": case "NBE": case "NA": return "CZ";
+      case "L": case "GE": case "NL": case "NGE": return "SO";
+      case "LE": case "G": case "NLE": case "NG": return "SOZ";
+      case "S": case "NS": return "S";
+      case "O": case "NO": return "O";
+      case "P": case "NP": case "PE": case "PO": return "P";
+      default: return "";
+    }
+  }
+  boolean reads(String flags, String want) {
+    if (want == null) return true;
+    for (int i = 0; i < flags.length(); i++) if (want.indexOf(flags.charAt(i)) >= 0) return true;
+    return false;
+  }
+  // Whether the op's value reaches a CBRANCH through BOOL_NEGATE, BOOL_AND, BOOL_OR, COPY
+  // or INT_ZEXT: the decompiler printed it as (part of) a branch condition.
+  boolean branches(ghidra.program.model.pcode.PcodeOp op) {
+    java.util.List<ghidra.program.model.pcode.Varnode> front = new java.util.ArrayList<>();
+    if (op.getOutput() != null) front.add(op.getOutput());
+    for (int h = 0; h < 6 && !front.isEmpty(); h++) {
+      java.util.List<ghidra.program.model.pcode.Varnode> next = new java.util.ArrayList<>();
+      for (ghidra.program.model.pcode.Varnode v : front) {
+        java.util.Iterator<ghidra.program.model.pcode.PcodeOp> it = v.getDescendants();
+        while (it.hasNext()) {
+          ghidra.program.model.pcode.PcodeOp d = it.next();
+          int dc = d.getOpcode();
+          if (dc == ghidra.program.model.pcode.PcodeOp.CBRANCH) return true;
+          if ((dc == ghidra.program.model.pcode.PcodeOp.BOOL_NEGATE || dc == ghidra.program.model.pcode.PcodeOp.BOOL_AND
+              || dc == ghidra.program.model.pcode.PcodeOp.BOOL_OR || dc == ghidra.program.model.pcode.PcodeOp.COPY
+              || dc == ghidra.program.model.pcode.PcodeOp.INT_ZEXT) && d.getOutput() != null) next.add(d.getOutput());
+        }
+      }
+      front = next;
+    }
+    return false;
+  }
+  String of(ghidra.program.model.pcode.PcodeOp op, boolean toBranch,
+      ghidra.program.model.listing.Listing listing, java.util.Set<String> passive) {
+    String use = "-", arm = "-";
+    int alen = 0;
+    ghidra.program.model.listing.Instruction q = listing.getInstructionAt(op.getSeqnum().getTarget());
+    String want = q != null && q.getMnemonicString().equals("NEG") ? null : opFlags(op.getMnemonic());
+    for (int s = 0; s < 12 && q != null; s++) {
+      String m = q.getMnemonicString();
+      if (m.startsWith("SET")) { if (reads(readFlags(m.substring(3)), want)) use = "s"; break; }
+      // SBB/ADC right after the setter is a materialised value whatever the op's flag: VC8's
+      // \`!x\` is NEG (C = x != 0); SBB, and \`x == 0\` can be CMP x, 1; SBB.
+      if (m.equals("SBB") || m.equals("ADC")) { use = "c"; break; }
+      if (m.equals("JMP")) {
+        if (s == 0) break;
+        ghidra.program.model.address.Address[] fl = q.getFlows();
+        if (fl == null || fl.length != 1) break;
+        q = listing.getInstructionAt(fl[0]);
+        continue;
+      }
+      if (m.startsWith("J")) {
+        if (!q.getFlowType().isConditional() || !q.getFlowType().isJump() || !reads(readFlags(m.substring(1)), want)) break;
+        use = "j";
+        ghidra.program.model.address.Address[] fl = q.getFlows();
+        ghidra.program.model.address.Address ft = q.getFallThrough();
+        if (fl == null || fl.length != 1 || ft == null) break;
+        ghidra.program.model.listing.Instruction p = listing.getInstructionAt(ft);
+        for (int k = 0; k < 8 && p != null; k++) {
+          if (p.getAddress().equals(fl[0])) { arm = "t"; alen = k; break; }
+          String pm = p.getMnemonicString();
+          if (pm.equals("JMP")) { arm = "d"; alen = k; break; }
+          if (pm.equals("RET")) { arm = "r"; alen = k; break; }
+          if (p.getFlowType().isConditional() || p.getFlowType().isCall() || p.getFlowType().isTerminal()) break;
+          ghidra.program.model.address.Address pf = p.getFallThrough();
+          p = pf == null ? null : listing.getInstructionAt(pf);
+        }
+        break;
+      }
+      if (s == 0 ? !setters.contains(m) : !passive.contains(m)) break;
+      ghidra.program.model.address.Address ft = q.getFallThrough();
+      q = ft == null ? null : listing.getInstructionAt(ft);
+    }
+    return (toBranch ? "b" : "v") + "\\t" + use + "\\t" + arm + "\\t" + alen;
+  }
+}
+CompareUse compareUse = new CompareUse();
+`;
+
+/**
+ * What else the original shows about a comparison (the `om sz f0 f1 ic` columns), shared
+ * verbatim by both scripts. Reads Ghidra's pcode and data types, so it is not run by the
+ * stub harnesses; the generator treats every column it cannot read as absent.
+ */
+export const COMPARE_MORE_JAVA = `
+class CompareMore {
+  // The instruction at the op's own address: CMP/TEST for a source comparison, SUB/DEC
+  // for a case of a switch's subtraction chain, NEG for a mask.
+  String om(ghidra.program.model.pcode.PcodeOp op, ghidra.program.model.listing.Listing listing) {
+    ghidra.program.model.listing.Instruction q = listing.getInstructionAt(op.getSeqnum().getTarget());
+    return q == null ? "-" : q.getMnemonicString();
+  }
+  // For a SETcc reader: 1 when the register it sets was zeroed whole before it on the
+  // op's fall-through run (an int local: xor eax, eax; cmp; sete al), 0 when not (a bool
+  // or a byte store), - when the first flags reader is not a SETcc.
+  String sz(ghidra.program.model.pcode.PcodeOp op, ghidra.program.model.listing.Listing listing, java.util.Set<String> passive) {
+    ghidra.program.model.listing.Instruction q = listing.getInstructionAt(op.getSeqnum().getTarget());
+    ghidra.program.model.listing.Instruction st = null;
+    for (int s = 0; s < 12 && q != null; s++) {
+      String m = q.getMnemonicString();
+      if (m.startsWith("SET")) { st = q; break; }
+      if (m.startsWith("J") || m.equals("SBB") || m.equals("ADC")) break;
+      if (s > 0 && !passive.contains(m) && !m.equals("CMP") && !m.equals("TEST") && !m.equals("XOR")) break;
+      ghidra.program.model.address.Address ft = q.getFallThrough();
+      q = ft == null ? null : listing.getInstructionAt(ft);
+    }
+    if (st == null) return "-";
+    ghidra.program.model.lang.Register r = st.getRegister(0);
+    if (r == null) return "0";
+    ghidra.program.model.lang.Register full = r.getBaseRegister();
+    ghidra.program.model.listing.Instruction p = st;
+    for (int s = 0; s < 8; s++) {
+      ghidra.program.model.listing.Instruction b = listing.getInstructionBefore(p.getAddress());
+      if (b == null || b.getFallThrough() == null || !b.getFallThrough().equals(p.getAddress())) return "0";
+      boolean writes = false;
+      for (Object ro : b.getResultObjects()) if (ro instanceof ghidra.program.model.lang.Register && ((ghidra.program.model.lang.Register) ro).getBaseRegister().equals(full)) writes = true;
+      if (writes) {
+        String bm = b.getMnemonicString();
+        ghidra.program.model.lang.Register d = b.getRegister(0);
+        boolean whole = d != null && d.equals(full);
+        if ((bm.equals("XOR") || bm.equals("SUB")) && whole && d.equals(b.getRegister(1))) return "1";
+        if (bm.equals("MOV") && whole && b.getScalar(1) != null && b.getScalar(1).getValue() == 0) return "1";
+        return "0";
+      }
+      p = b;
+    }
+    return "0";
+  }
+  // An operand read from a structure field through a pointer: the innermost field's name.
+  String field(ghidra.program.model.pcode.Varnode v) {
+    try {
+      for (int h = 0; h < 3 && v != null && v.getDef() != null && v.getDef().getOpcode() == ghidra.program.model.pcode.PcodeOp.CAST; h++) v = v.getDef().getInput(0);
+      if (v == null || v.getDef() == null || v.getDef().getOpcode() != ghidra.program.model.pcode.PcodeOp.LOAD) return "-";
+      ghidra.program.model.pcode.Varnode a = v.getDef().getInput(1);
+      ghidra.program.model.pcode.PcodeOp ad = a.getDef();
+      if (ad != null && ad.getOpcode() == ghidra.program.model.pcode.PcodeOp.CAST) { a = ad.getInput(0); ad = a.getDef(); }
+      if (ad == null || ad.getOpcode() != ghidra.program.model.pcode.PcodeOp.PTRSUB) return "-";
+      ghidra.program.model.pcode.Varnode base = ad.getInput(0);
+      long off = ad.getInput(1).getOffset();
+      ghidra.program.model.data.DataType dt = base.getHigh() == null ? null : base.getHigh().getDataType();
+      if (dt instanceof ghidra.program.model.data.TypeDef) dt = ((ghidra.program.model.data.TypeDef) dt).getBaseDataType();
+      if (!(dt instanceof ghidra.program.model.data.Pointer)) return "-";
+      dt = ((ghidra.program.model.data.Pointer) dt).getDataType();
+      String name = null;
+      for (int h = 0; h < 8; h++) {
+        if (dt instanceof ghidra.program.model.data.TypeDef) dt = ((ghidra.program.model.data.TypeDef) dt).getBaseDataType();
+        if (!(dt instanceof ghidra.program.model.data.Structure)) break;
+        ghidra.program.model.data.DataTypeComponent c = ((ghidra.program.model.data.Structure) dt).getComponentContaining((int) off);
+        if (c == null || c.getFieldName() == null) break;
+        name = c.getFieldName();
+        off -= c.getOffset();
+        dt = c.getDataType();
+      }
+      return name == null || name.indexOf('\\t') >= 0 ? "-" : name;
+    } catch (Exception e) { return "-"; }
+  }
+  // A value passed to a call: the CALL instructions between the op and that call. The
+  // decompiler prints the comparison inside the argument, where the original may have
+  // tested it before another call ran.
+  String ic(ghidra.program.model.pcode.PcodeOp op, ghidra.program.model.listing.Listing listing) {
+    java.util.List<ghidra.program.model.pcode.Varnode> front = new java.util.ArrayList<>();
+    if (op.getOutput() != null) front.add(op.getOutput());
+    ghidra.program.model.address.Address call = null;
+    for (int h = 0; h < 4 && call == null && !front.isEmpty(); h++) {
+      java.util.List<ghidra.program.model.pcode.Varnode> next = new java.util.ArrayList<>();
+      for (ghidra.program.model.pcode.Varnode v : front) {
+        java.util.Iterator<ghidra.program.model.pcode.PcodeOp> it = v.getDescendants();
+        while (it.hasNext()) {
+          ghidra.program.model.pcode.PcodeOp d = it.next();
+          int dc = d.getOpcode();
+          if ((dc == ghidra.program.model.pcode.PcodeOp.CALL || dc == ghidra.program.model.pcode.PcodeOp.CALLIND) && d.getSlot(v) >= 1) { call = d.getSeqnum().getTarget(); break; }
+          if ((dc == ghidra.program.model.pcode.PcodeOp.COPY || dc == ghidra.program.model.pcode.PcodeOp.INT_ZEXT || dc == ghidra.program.model.pcode.PcodeOp.CAST
+              || dc == ghidra.program.model.pcode.PcodeOp.BOOL_NEGATE) && d.getOutput() != null) next.add(d.getOutput());
+        }
+        if (call != null) break;
+      }
+      front = next;
+    }
+    ghidra.program.model.address.Address at = op.getSeqnum().getTarget();
+    if (call == null || call.compareTo(at) <= 0) return "-";
+    int n = 0;
+    ghidra.program.model.listing.Instruction q = listing.getInstructionAfter(at);
+    for (int s = 0; s < 400 && q != null && q.getAddress().compareTo(call) < 0; s++) {
+      if (q.getFlowType().isCall()) n++;
+      q = listing.getInstructionAfter(q.getAddress());
+    }
+    return Integer.toString(n);
+  }
+  String of(ghidra.program.model.pcode.PcodeOp op, ghidra.program.model.listing.Listing listing, java.util.Set<String> passive) {
+    return om(op, listing) + "\\t" + sz(op, listing, passive) + "\\t" + field(op.getInput(0)) + "\\t" + field(op.getInput(1)) + "\\t" + ic(op, listing);
+  }
+}
+CompareMore compareMore = new CompareMore();
+`;
+
 /** The script body (Java, runs inside GhidraScript.run()); `__ITEMS__` is `addr;addr;...`. */
 export const COMPARE_SITES_SCRIPT = `
 ${COMPARE_SETTER_JAVA}
+${COMPARE_USE_JAVA}
+${COMPARE_MORE_JAVA}
 String items = "__ITEMS__";
 ghidra.app.decompiler.DecompInterface di = new ghidra.app.decompiler.DecompInterface();
 ghidra.app.decompiler.DecompileOptions o = new ghidra.app.decompiler.DecompileOptions();
@@ -248,7 +509,9 @@ for (String a : items.split(";")) {
       .append('\\t').append(user == null ? "-" : user.getAddress().toString()).append('\\t').append(user == null ? "-" : user.getMnemonicString())
       .append('\\t').append(setter == null ? "-" : setter.getAddress().toString()).append('\\t').append(setter == null ? "-" : setter.getMnemonicString())
       .append('\\t').append(w).append('\\t').append(aKind).append('\\t').append(bKind).append('\\t').append(bVal)
-      .append('\\t').append(onPair ? 1 : 0).append('\\n');
+      .append('\\t').append(onPair ? 1 : 0)
+      .append('\\t').append(compareUse.of(op, compareUse.branches(op), L, passive))
+      .append('\\t').append(compareMore.of(op, L, passive)).append('\\n');
   }
 }
 di.dispose();
@@ -335,6 +598,18 @@ export function compareSiteRows(rows: string | undefined): CompareSite[] {
       ...(c[11] !== '-' ? { setter: { at: normalize(c[11]), mnemonic: c[12] } } : {}),
       width: Number(c[13]), aKind: c[14], bKind: c[15], bValue: hex(c[16]),
       onPair: c[17] === '1',
+      ...(c.length >= 22 && (c[18] === 'b' || c[18] === 'v') ? {
+        pos: c[18] as 'b' | 'v',
+        use: (['j', 's', 'c'].includes(c[19]) ? c[19] : '-') as 'j' | 's' | 'c' | '-',
+        arm: (['t', 'd', 'r'].includes(c[20]) ? c[20] : '-') as 't' | 'd' | 'r' | '-',
+        armLength: Number(c[21]) || 0,
+      } : {}),
+      ...(c.length >= 27 ? {
+        opMnemonic: c[22],
+        ...(c[23] === '1' || c[23] === '0' ? { setZeroed: c[23] === '1' } : {}),
+        fields: [c[24], c[25]] as [string, string],
+        ...(/^\d+$/.test(c[26]) ? { interveningCalls: Number(c[26]) } : {}),
+      } : {}),
     });
   }
   return out;

@@ -4040,6 +4040,9 @@ function transformDecompiledCode(
           branchLayout: layout,
           errorSetter: 'SErrSetLastError',
           errorCode: 0x57,
+          // A check that reads through a pointer is taken where the original materialised it.
+          compareSites: enclosing?.compareSites,
+          entry: funcAddress,
           ...(process.env.GHIDRA_BRANCH_LAYOUT_REPORT ? {
             onSite: (e: { line: number; checks: number; form: string }) =>
               console.warn(`[param-check] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.checks} check${e.checks === 1 ? '' : 's'} (${e.form}) at line ${e.line}`),
@@ -4157,6 +4160,20 @@ function transformDecompiledCode(
     // neg/sbb selects the generator folds.
     if (enclosing?.compareSites) {
       perPluginOptions['bool-select-form'] = { compareSites: enclosing.compareSites, decompile: decompiled };
+      // A value-position comparison the original branched on (compare-branch-form.ts): the
+      // rows give where the decompiler printed it and how the original read its flags.
+      perPluginOptions['compare-branch-form'] = {
+        compareSites: enclosing.compareSites,
+        onSite: (e: { kind: string; text: string }) =>
+          console.warn(`[compare-branch-form] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.kind} ${e.text}`),
+      };
+      // A comparison the original computed as a value: one compare printed as several tests
+      // goes into one local, a mask it made with SBB into a select (compare-value-form.ts).
+      perPluginOptions['compare-value-form'] = {
+        compareSites: enclosing.compareSites,
+        onSite: (e: { kind: string; text: string }) =>
+          console.warn(`[compare-value-form] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.kind} ${e.text}`),
+      };
     }
     // Two stores of one lvalue whose constant the original stores from the register of a
     // merged value become one store of a select (register-store-select.ts).
