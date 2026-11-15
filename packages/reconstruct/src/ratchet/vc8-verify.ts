@@ -36,6 +36,48 @@ export interface Vc8Options {
 
 const hex8 = (n: number) => n.toString(16).padStart(8, '0');
 
+/**
+ * The wine drive link the oracle compiles through (`<prefix>/dosdevices/<letter>:`) and the
+ * checkout it must map, as the oracle's own scripts/env.sh computes them.
+ */
+export function oracleDrive(root: string): { link: string; repo: string } {
+  const env = path.join(root, 'scripts', 'env.sh');
+  const p = spawnSync('bash', ['-c', '. "$1" && printf \'%s\\t%s\' "$WINEPREFIX/dosdevices/${ORACLE_DRIVE}:" "$REPO_ROOT"', 'oracle-drive', env], { encoding: 'utf8' });
+  if (p.status !== 0) throw new Error(`${env} did not load: ${p.stderr.trim()}`);
+  const [link, repo] = p.stdout.split('\t');
+  if (!link || !repo) throw new Error(`${env} names no drive`);
+  return { link, repo };
+}
+
+/**
+ * Map the drive link to the checkout before any trial compiles, or throw when it maps another
+ * tree. vc8.sh maps it too (env.sh map_drive), but by a test and then `ln -s`: while the letter
+ * is unmapped, the parallel compiles of one trial round race there, and every loser's `ln`
+ * follows the winner's new link into the checkout and fails, so its batch leaves no object
+ * (deploy 1175 kept 12 members for that, and left a self-link in the checkout). Mapped here
+ * once, every compile finds the link in place.
+ */
+export function mapDrive(link: string, repo: string): void {
+  const want = fs.realpathSync(repo);
+  for (let attempt = 0; ; attempt++) {
+    let st: fs.Stats | undefined;
+    try { st = fs.lstatSync(link); } catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e; }
+    if (st) {
+      let at: string | undefined;
+      try { at = fs.realpathSync(link); } catch { /* dangling */ }
+      if (st.isSymbolicLink() && at === want) return;
+      throw new Error(`wine drive ${path.basename(link)} maps ${at ?? fs.readlinkSync(link)}, not ${want}: the trials would compile another tree`);
+    }
+    try {
+      fs.symlinkSync(repo, link);
+      return;
+    } catch (e) {
+      // Mapped meanwhile by another compile: judge what is there now.
+      if ((e as NodeJS.ErrnoException).code !== 'EEXIST' || attempt > 0) throw e;
+    }
+  }
+}
+
 /** Text as the vc8 tree reads it (latin1 code units for bytes). */
 const asLatin1 = (s: string) => Buffer.from(s, 'utf8').toString('latin1');
 
@@ -82,6 +124,8 @@ export class Vc8TrialCompiler implements TrialCompiler {
 
   private async start(): Promise<void> {
     if (this.judgeProc) return;
+    const drive = oracleDrive(this.root);
+    mapDrive(drive.link, drive.repo);
     const [key, build] = this.run(['trial', '--root', this.root, '--state']).split('\t');
     this.key = key.trim();
     this.build = build.trim();
