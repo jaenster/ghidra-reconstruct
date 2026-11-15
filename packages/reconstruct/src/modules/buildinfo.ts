@@ -124,6 +124,7 @@ export const FUNCTION_HASH_FIELDS = {
   truncatingRounds: 'hashed',
   registerStores: 'hashed',
   rotateSites: 'hashed',
+  arithSites: 'hashed',
   storeBases: 'hashed',
   callDivides: 'hashed',
   shadowedGlobals: 'hashed',

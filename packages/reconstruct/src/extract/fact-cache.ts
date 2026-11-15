@@ -35,6 +35,7 @@ import type { SignedDivideFacts } from './signed-divides.js';
 import type { TruncatingRoundFacts } from './truncating-rounds.js';
 import type { RegisterStoreFacts } from './register-stores.js';
 import type { RotateSiteFacts } from './rotate-sites.js';
+import type { ArithSiteFacts } from './arith-sites.js';
 import type { StoreBaseFacts } from './store-bases.js';
 import type { CallDivideFacts } from './call-divides.js';
 import type { ShadowedGlobalFacts } from './shadowed-globals.js';
@@ -58,6 +59,7 @@ export interface CachedFacts {
   truncatingRounds?: TruncatingRoundFacts;
   registerStores?: RegisterStoreFacts;
   rotateSites?: RotateSiteFacts;
+  arithSites?: ArithSiteFacts;
   storeBases?: StoreBaseFacts;
   callDivides?: CallDivideFacts;
   shadowedGlobals?: ShadowedGlobalFacts;

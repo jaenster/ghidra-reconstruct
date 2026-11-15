@@ -16,6 +16,7 @@
  *   zextSites     zext-sites.ts      (behind the compare-sites text-hash gate)
  *   registerStores register-stores.ts
  *   rotateSites   rotate-sites.ts
+ *   arithSites    arith-sites.ts
  *   storeBases    store-bases.ts
  *   callDivides   call-divides.ts
  *   signedDivides signed-divides.ts  (behind the compare-sites text-hash gate)
@@ -55,6 +56,7 @@ import { SIGNED_DIVIDES_JAVA, printsCastDividend, parseSignedDivideRow } from '.
 import { TRUNCATING_ROUNDS_JAVA, printsRound, parseTruncatingRoundRow } from './truncating-rounds.js';
 import { REGISTER_STORES_JAVA, printsConstantStore, parseRegisterStoreRow } from './register-stores.js';
 import { ROTATE_SITES_DECL_JAVA, ROTATE_SITES_LINE_JAVA, printsShiftPair, parseRotateSiteRow } from './rotate-sites.js';
+import { ARITH_SITES_DECL_JAVA, ARITH_SITES_LINE_DECL_JAVA, ARITH_SITES_TOKEN_JAVA, ARITH_SITES_LINE_JAVA, printsArithSite, parseArithSiteRow } from './arith-sites.js';
 import { STORE_BASES_DECL_JAVA, STORE_BASES_LINE_DECL_JAVA, STORE_BASES_TOKEN_JAVA, STORE_BASES_LINE_JAVA, printsMemberAddress, parseStoreBaseRow } from './store-bases.js';
 import { CALL_DIVIDES_DECL_JAVA, CALL_DIVIDES_LINE_DECL_JAVA, CALL_DIVIDES_TOKEN_JAVA, CALL_DIVIDES_LINE_JAVA, printsHalvedValue, parseCallDivideRow } from './call-divides.js';
 import { SHADOWED_GLOBALS_DECL_JAVA, SHADOWED_GLOBALS_LINE_DECL_JAVA, SHADOWED_GLOBALS_TOKEN_JAVA, SHADOWED_GLOBALS_LINE_JAVA, parseShadowedGlobalRow } from './shadowed-globals.js';
@@ -82,6 +84,7 @@ import { ZERO_REGISTER_TEST_JAVA, EQUALITY_TEST_DELTA_JAVA } from './zero-regist
  *   U  ...   ROUND tokens whose native FISTP explicitly selects x87 RC=truncate
  *   K  ...   the register-stores row (register-stores.ts), when a constant is stored from a register
  *   Q  ...   the rotate-sites row (rotate-sites.ts), when a line's instructions rotate by an immediate
+ *   G  ...   the arith-sites row (arith-sites.ts), when a line prints a `*`, `+` or CONCAT it records
  *   W  ...   the store-bases row (store-bases.ts), when a store or an LEA has an `=` of its own
  *   V  ...   the call-divides row (call-divides.ts), when a call's result is divided right after it
  *   D  id,full,shape;...   the types the markup named
@@ -253,16 +256,16 @@ ${ZERO_REGISTER_TEST_JAVA}
           // branch-layout and call-order, over the same lines
           StringBuilder ls = new StringBuilder(), is = new StringBuilder(), es = new StringBuilder(), cs = new StringBuilder();
           StringBuilder argRow = new StringBuilder(), storeRow = new StringBuilder();
-${ROTATE_SITES_DECL_JAVA}${STORE_BASES_DECL_JAVA}${CALL_DIVIDES_DECL_JAVA}${SHADOWED_GLOBALS_DECL_JAVA}          int count = 0;
+${ROTATE_SITES_DECL_JAVA}${ARITH_SITES_DECL_JAVA}${STORE_BASES_DECL_JAVA}${CALL_DIVIDES_DECL_JAVA}${SHADOWED_GLOBALS_DECL_JAVA}          int count = 0;
 ${IF_OPERANDS_DECL_JAVA}${EDGES_DECL_JAVA}          for (ghidra.app.decompiler.ClangLine l : ghidra.app.decompiler.component.DecompilerUtils.toLines(r.getCCodeMarkup())) {
             count++;
             java.util.TreeSet<Long> offs = new java.util.TreeSet<>();
             StringBuilder one = new StringBuilder();
             StringBuilder oneArg = new StringBuilder(), oneSt = new StringBuilder();
-${CALL_DIVIDES_LINE_DECL_JAVA}${SHADOWED_GLOBALS_LINE_DECL_JAVA}            int storeOrd = 0;
+${CALL_DIVIDES_LINE_DECL_JAVA}${SHADOWED_GLOBALS_LINE_DECL_JAVA}${ARITH_SITES_LINE_DECL_JAVA}            int storeOrd = 0;
 ${STORE_BASES_LINE_DECL_JAVA}            for (ghidra.app.decompiler.ClangToken t : l.getAllTokens()) {
               if (t instanceof ghidra.app.decompiler.ClangCommentToken) continue;
-${IF_OPERANDS_TOKEN_JAVA}${EDGES_TOKEN_JAVA}${ACCESS_ORDER_TOKEN_JAVA}${STORE_BASES_TOKEN_JAVA}${CALL_DIVIDES_TOKEN_JAVA}${SHADOWED_GLOBALS_TOKEN_JAVA}              ghidra.program.model.address.Address x = t.getMinAddress();
+${IF_OPERANDS_TOKEN_JAVA}${EDGES_TOKEN_JAVA}${ACCESS_ORDER_TOKEN_JAVA}${STORE_BASES_TOKEN_JAVA}${CALL_DIVIDES_TOKEN_JAVA}${SHADOWED_GLOBALS_TOKEN_JAVA}${ARITH_SITES_TOKEN_JAVA}              ghidra.program.model.address.Address x = t.getMinAddress();
               if (x != null) {
                 long off = x.getOffset() - base;
                 offs.add(off);
@@ -333,7 +336,7 @@ ${EQUALITY_TEST_DELTA_JAVA}
             if (one.length() > 0) cs.append(cs.length() > 0 ? ";" : "").append(l.getLineNumber()).append(':').append(one);
             if (oneArg.length() > 0) argRow.append(argRow.length() > 0 ? ";" : "").append(l.getLineNumber()).append(':').append(oneArg);
             if (oneSt.length() > 0) storeRow.append(storeRow.length() > 0 ? ";" : "").append(l.getLineNumber()).append(':').append(oneSt);
-${CALL_DIVIDES_LINE_JAVA}${SHADOWED_GLOBALS_LINE_JAVA}${ROTATE_SITES_LINE_JAVA}${STORE_BASES_LINE_JAVA}            if (offs.isEmpty()) continue;
+${CALL_DIVIDES_LINE_JAVA}${SHADOWED_GLOBALS_LINE_JAVA}${ROTATE_SITES_LINE_JAVA}${ARITH_SITES_LINE_JAVA}${STORE_BASES_LINE_JAVA}            if (offs.isEmpty()) continue;
             ls.append(ls.length() > 0 ? ";" : "").append(l.getLineNumber()).append(':');
             boolean first = true;
             for (Long off : offs) {
@@ -458,6 +461,7 @@ ${TRUNCATING_ROUNDS_JAVA}${REGISTER_STORES_JAVA}          // the types the marku
           out.append("B\\t").append(a).append('\\t').append(count).append('\\t').append(ls).append('\\t').append(is).append('\\t').append(es).append('\\t').append(opsRow).append('\\t').append(retRow).append('\\t').append(edgeRow).append('\\t').append(pushRow).append('\\n');
           out.append("O\\t").append(a).append('\\t').append(count).append('\\t').append(cs).append('\\n');
           out.append("A\\t").append(a).append('\\t').append(count).append('\\t').append(argRow).append('\\t').append(storeRow).append('\\n');
+          if (prow.length() > 0) out.append("G\\t").append(a).append('\\t').append(count).append('\\t').append(prow).append('\\n');
           if (qrow.length() > 0) out.append("Q\\t").append(a).append('\\t').append(count).append('\\t').append(qrow).append('\\n');
           if (wrow.length() > 0) out.append("W\\t").append(a).append('\\t').append(count).append('\\t').append(wrow).append('\\n');
           if (vrow.length() > 0) out.append("V\\t").append(a).append('\\t').append(count).append('\\t').append(vrow).append('\\n');
@@ -542,6 +546,8 @@ export interface FunctionFactRow {
   storeRow?: string;
   /** The rotate-sites row, untagged and without the entry. */
   rotateRow?: string;
+  /** The arith-sites row, untagged and without the entry. */
+  arithRow?: string;
   /** The store-bases row, untagged and without the entry. */
   baseRow?: string;
   /** The call-divides row, untagged and without the entry. */
@@ -619,6 +625,7 @@ export function parseFunctionFacts(output: string): FunctionFactOutput {
     else if (tag === 'U') cur.truncatingRoundRow = rest.slice(rest.indexOf('\t') + 1);
     else if (tag === 'K') cur.storeRow = rest.slice(rest.indexOf('\t') + 1);
     else if (tag === 'Q') cur.rotateRow = rest.slice(rest.indexOf('\t') + 1);
+    else if (tag === 'G') cur.arithRow = rest.slice(rest.indexOf('\t') + 1);
     else if (tag === 'W') cur.baseRow = rest.slice(rest.indexOf('\t') + 1);
     else if (tag === 'V') cur.divideRow = rest.slice(rest.indexOf('\t') + 1);
     else if (tag === 'N') cur.shadowRow = rest.slice(rest.indexOf('\t') + 1);
@@ -709,6 +716,10 @@ export function selectFacts(text: string, entry: string, row: FunctionFactRow, c
     const q = parseRotateSiteRow(row.rotateRow);
     if (q) facts.rotateSites = q;
   }
+  if (printsArithSite(text) && row.arithRow) {
+    const p = parseArithSiteRow(row.arithRow);
+    if (p) facts.arithSites = p;
+  }
   if (printsMemberAddress(text) && row.baseRow) {
     const w = parseStoreBaseRow(row.baseRow);
     if (w) facts.storeBases = w;
@@ -756,7 +767,7 @@ export interface FunctionFactStats {
   labelMs: number;
 }
 
-export const FACT_KEYS = ['compareSites', 'branchLayout', 'callOrder', 'accessOrder', 'haltLines', 'stringOps', 'jumpTables', 'zeroStores', 'constantStores', 'maskSites', 'zextSites', 'registerStores', 'rotateSites', 'storeBases', 'callDivides', 'signedDivides', 'truncatingRounds', 'shadowedGlobals', 'labelFlow'] as const;
+export const FACT_KEYS = ['compareSites', 'branchLayout', 'callOrder', 'accessOrder', 'haltLines', 'stringOps', 'jumpTables', 'zeroStores', 'constantStores', 'maskSites', 'zextSites', 'registerStores', 'rotateSites', 'arithSites', 'storeBases', 'callDivides', 'signedDivides', 'truncatingRounds', 'shadowedGlobals', 'labelFlow'] as const;
 
 /**
  * Attach every per-function fact to the decompiled functions, from the cache where the
@@ -780,7 +791,7 @@ export async function extractFunctionFacts(
     if (!(printsComparison(f.decompiled) || printsBranch(f.decompiled) || printsCallTemporary(f.decompiled)
         || printsAccess(f.decompiled) || printsHaltOrProbe(f.decompiled) || printsRepLoop(f.decompiled)
         || printsSwitch(f.decompiled) || printsMemberStore(f.decompiled) || printsByteWordMask(f.decompiled) || printsZextCast(f.decompiled)
-        || printsConstantStore(f.decompiled) || printsShiftPair(f.decompiled) || printsMemberAddress(f.decompiled) || printsHalvedValue(f.decompiled) || printsCastDividend(f.decompiled)
+        || printsConstantStore(f.decompiled) || printsShiftPair(f.decompiled) || printsArithSite(f.decompiled) || printsMemberAddress(f.decompiled) || printsHalvedValue(f.decompiled) || printsCastDividend(f.decompiled)
         || labelsOf(f.decompiled).length > 0)) continue;
     byEntry.set(normalizeEntry(f.address), f);
   }
@@ -933,6 +944,7 @@ function attach(f: ExtractedFunction, facts: CachedFacts): void {
   if (facts.zextSites !== undefined) f.zextSites = facts.zextSites;
   if (facts.registerStores !== undefined) f.registerStores = facts.registerStores;
   if (facts.rotateSites !== undefined) f.rotateSites = facts.rotateSites;
+  if (facts.arithSites !== undefined) f.arithSites = facts.arithSites;
   if (facts.storeBases !== undefined) f.storeBases = facts.storeBases;
   if (facts.callDivides !== undefined) f.callDivides = facts.callDivides;
   if (facts.shadowedGlobals !== undefined) f.shadowedGlobals = facts.shadowedGlobals;
