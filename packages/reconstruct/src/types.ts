@@ -424,6 +424,12 @@ export interface AnalyzedDataSymbol extends ExtractedGlobal {
    * never a file-local, never homed in a data run; the globals units define it.
    */
   definedElsewhere?: boolean;
+  /**
+   * A VC8 compile proved the TU that uses it defines it with external linkage
+   * (vc8-data-linkage.ts): never the TU's `static`, defined in its data run when it has
+   * one, else by the globals units.
+   */
+  externalLinkage?: boolean;
   /** Structured initialized data (arrays, structs, pointers resolved to symbols) */
   initializedData?: DataValue;
   /** If struct-colocated, the struct type that owns it (e.g., "D2GameStrc") */
