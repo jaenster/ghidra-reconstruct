@@ -1,0 +1,735 @@
+{
+  "source": "dd289669c82a03e993a928b2b0f2c724a1cc731d",
+  "ghidraVersion": 2109,
+  "functions": [
+    {
+      "name": "Q33_OnPresetObjectLoad1",
+      "address": "0058ad80",
+      "entryPoint": "0058ad80",
+      "signature": "void Q33_OnPresetObjectLoad1(void * this, D2MapAIStrc * pMapAI)",
+      "returnType": "void",
+      "callingConvention": "__thiscall",
+      "size": 134,
+      "isThunk": false,
+      "isExternal": false,
+      "hasVarArgs": false,
+      "namespace": "D2Game::Quests::QUESTS::A5Q3",
+      "comment": "@function Q33_OnPresetObjectLoad1\n@address Game.exe.ram:0058ad80\n@date 2026.06.13\n@params\n  this: ECX:4 (auto) (void *)\n  pPresetUnit: Stack[0x4]:4 (D2PresetUnitStrc *)\n@calling __thiscall\n@description Q33_OnPresetObjectLoad1 (PrisonOfIce): on preset-unit load, copies the preset object list into pA5Q3->pDrlgMap; if the\nfrozen Anya is already spawned and present, hands the DRLG map file over to its monster map AI (once). Restores ice-Anya\nvisuals/AI when the level region (re)loads.",
+      "sourceFile": null,
+      "sourceLine": null,
+      "sourceInfo": null,
+      "parameters": [
+        {
+          "name": "this",
+          "dataType": "void *",
+          "size": 4,
+          "ordinal": 0,
+          "storage": "ECX:4 (auto)",
+          "stackOffset": null,
+          "resolvedType": null
+        },
+        {
+          "name": "pMapAI",
+          "dataType": "D2MapAIStrc *",
+          "size": 4,
+          "ordinal": 1,
+          "storage": "Stack[0x4]:4",
+          "stackOffset": 4,
+          "resolvedType": null
+        }
+      ],
+      "localVariables": [
+        {
+          "name": "pQuestData",
+          "dataType": "D2QuestDataStrc *",
+          "size": 4,
+          "storage": "EAX:4",
+          "stackOffset": null,
+          "resolvedType": "D2QuestDataStrc *"
+        },
+        {
+          "name": "pCopiedPreset",
+          "dataType": "D2MapAIStrc *",
+          "size": 4,
+          "storage": "EAX:4",
+          "stackOffset": null,
+          "resolvedType": "D2MapAIStrc *"
+        },
+        {
+          "name": "pFrozenAnya",
+          "dataType": "D2UnitStrc *",
+          "size": 4,
+          "storage": "EAX:4",
+          "stackOffset": null,
+          "resolvedType": "D2UnitStrc *"
+        },
+        {
+          "name": "ppMonsterMapAi",
+          "dataType": "D2MapAIStrc * *",
+          "size": 4,
+          "storage": "EAX:4",
+          "stackOffset": null,
+          "resolvedType": "D2MapAIStrc * *"
+        },
+        {
+          "name": "pQuestSpecificData",
+          "dataType": "D2QuestDataA5Q3Strc *",
+          "size": 4,
+          "storage": "HASH:5f642c8948:4",
+          "stackOffset": null,
+          "resolvedType": "D2QuestDataA5Q3Strc *"
+        },
+        {
+          "name": "ppDrlgMap",
+          "dataType": "D2MapAIStrc * *",
+          "size": 4,
+          "storage": "HASH:613a6cb86d:4",
+          "stackOffset": null,
+          "resolvedType": null
+        }
+      ],
+      "tags": [
+        {
+          "type": "llm-typed"
+        }
+      ],
+      "decompiled": "\n/* WARNING: Enum \"eCollisionFlags\": Some values do not have unique names */\n/* WARNING: Enum \"eD2TimerType\": Some values do not have unique names */\n/* WARNING: Enum \"eD2TimerTypeDWORD\": Some values do not have unique names */\n/* @function Q33_OnPresetObjectLoad1\n   @address Game.exe.ram:0058ad80\n   @date 2026.06.13\n   @params\n     this: ECX:4 (auto) (void *)\n     pPresetUnit: Stack[0x4]:4 (D2PresetUnitStrc *)\n   @calling __thiscall\n   @description Q33_OnPresetObjectLoad1 (PrisonOfIce): on preset-unit load, copies the preset object\n   list into pA5Q3->pDrlgMap; if the\n   frozen Anya is already spawned and present, hands the DRLG map file over to its monster map AI\n   (once). Restores ice-Anya\n   visuals/AI when the level region (re)loads. */\n\nvoid __thiscall\nD2Game::Quests::QUESTS::A5Q3::Q33_OnPresetObjectLoad1(void *this,D2MapAIStrc *pMapAI)\n\n{\n  D2QuestDataStrc *pQuestData;\n  D2MapAIStrc *pCopiedPreset;\n  D2UnitStrc *pFrozenAnya;\n  D2MapAIStrc **ppMonsterMapAi;\n  D2MapAIStrc **ppDrlgMap;\n  D2QuestDataA5Q3Strc *pQuestSpecificData;\n  \n  pQuestData = D2Game::Quests::QUESTS::GetQuestDataByQuestNoInternal(this,QUESTINT_PrisonOfIce);\n  if ((pQuestData != (D2QuestDataStrc *)0x0) &&\n     (pQuestSpecificData = (pQuestData->pQuestSpecificData).pA5Q3, pMapAI != (D2MapAIStrc *)0x0)) {\n    ppDrlgMap = &pQuestSpecificData->pDrlgMap;\n    pCopiedPreset =\n         D2Common::Drlg::Preset::DRLGPRESET_CopyMapAI(pQuestData->pGame->pMemoryPool,pMapAI);\n    *ppDrlgMap = pCopiedPreset;\n    if (((pQuestSpecificData->bFrozenAnyaSpawned != 0) &&\n        (((pFrozenAnya = D2Game::UNIT::SUnit::FindUnitFromTable\n                                   (pQuestData->pGame,UNIT_MONSTER,\n                                    pQuestSpecificData->nFrozenAnyaGUID),\n          pFrozenAnya != (D2UnitStrc *)0x0 && (*ppDrlgMap != (D2MapAIStrc *)0x0)) &&\n         ((*ppDrlgMap)->pPosition != (D2PathPosStrc *)0x0)))) &&\n       (pQuestSpecificData->bDrlgMapTaken == 0)) {\n      ppMonsterMapAi = D2Game::Ai::AiGeneral::GetMonsterMapAi(pFrozenAnya);\n      D2Common::Drlg::Preset::DRLGPRESET_TransferMapAI(ppDrlgMap,ppMonsterMapAi);\n      pQuestSpecificData->bDrlgMapTaken = 1;\n    }\n  }\n  return;\n}\n\n"
+    },
+    {
+      "name": "Q33_OnPresetObjectLoad2",
+      "address": "0058ae10",
+      "entryPoint": "0058ae10",
+      "signature": "void Q33_OnPresetObjectLoad2(void * this, D2MapAIStrc * pMapAI)",
+      "returnType": "void",
+      "callingConvention": "__thiscall",
+      "size": 134,
+      "isThunk": false,
+      "isExternal": false,
+      "hasVarArgs": false,
+      "namespace": "D2Game::Quests::QUESTS::A5Q3",
+      "comment": "@function Q33_OnPresetObjectLoad2\n@address Game.exe.ram:0058ae10\n@date 2026.06.13\n@params\n  this: ECX:4 (auto) (void *)\n  pPresetUnit: Stack[0x4]:4 (D2PresetUnitStrc *)\n@calling __thiscall\n@description Q33_OnPresetObjectLoad2 (PrisonOfIce): same as Load1 but for the rescued-Anya monster (field_0x108 map) \u00e2\u20ac\u201d copies the\npreset list and transfers the DRLG map file to the Anya monster's AI once it is alive. Restores rescued-Anya on reload.",
+      "sourceFile": null,
+      "sourceLine": null,
+      "sourceInfo": null,
+      "parameters": [
+        {
+          "name": "this",
+          "dataType": "void *",
+          "size": 4,
+          "ordinal": 0,
+          "storage": "ECX:4 (auto)",
+          "stackOffset": null,
+          "resolvedType": null
+        },
+        {
+          "name": "pMapAI",
+          "dataType": "D2MapAIStrc *",
+          "size": 4,
+          "ordinal": 1,
+          "storage": "Stack[0x4]:4",
+          "stackOffset": 4,
+          "resolvedType": null
+        }
+      ],
+      "localVariables": [
+        {
+          "name": "pQuestData",
+          "dataType": "D2QuestDataStrc *",
+          "size": 4,
+          "storage": "EAX:4",
+          "stackOffset": null,
+          "resolvedType": "D2QuestDataStrc *"
+        },
+        {
+          "name": "pCopiedPreset",
+          "dataType": "D2MapAIStrc *",
+          "size": 4,
+          "storage": "EAX:4",
+          "stackOffset": null,
+          "resolvedType": "D2MapAIStrc *"
+        },
+        {
+          "name": "pAnyaCorpse",
+          "dataType": "D2UnitStrc *",
+          "size": 4,
+          "storage": "EAX:4",
+          "stackOffset": null,
+          "resolvedType": "D2UnitStrc *"
+        },
+        {
+          "name": "ppMonsterMapAi",
+          "dataType": "D2MapAIStrc * *",
+          "size": 4,
+          "storage": "EAX:4",
+          "stackOffset": null,
+          "resolvedType": "D2MapAIStrc * *"
+        },
+        {
+          "name": "pQuestSpecificData",
+          "dataType": "D2QuestDataA5Q3Strc *",
+          "size": 4,
+          "storage": "HASH:5ff72eca02:4",
+          "stackOffset": null,
+          "resolvedType": "D2QuestDataA5Q3Strc *"
+        },
+        {
+          "name": "pDrlgMapField",
+          "dataType": "D2MapAIStrc * *",
+          "size": 4,
+          "storage": "HASH:61eb8cacad:4",
+          "stackOffset": null,
+          "resolvedType": null
+        }
+      ],
+      "tags": [
+        {
+          "type": "llm-typed"
+        },
+        {
+          "type": "vc8form",
+          "data": "fold(pDrlgMapField);ev=a1d8e61b71;bh=134-481fcf9a;dh=cfb00aaa"
+        }
+      ],
+      "decompiled": "\n/* WARNING: Enum \"eCollisionFlags\": Some values do not have unique names */\n/* WARNING: Enum \"eD2TimerType\": Some values do not have unique names */\n/* WARNING: Enum \"eD2TimerTypeDWORD\": Some values do not have unique names */\n/* @function Q33_OnPresetObjectLoad2\n   @address Game.exe.ram:0058ae10\n   @date 2026.06.13\n   @params\n     this: ECX:4 (auto) (void *)\n     pPresetUnit: Stack[0x4]:4 (D2PresetUnitStrc *)\n   @calling __thiscall\n   @description Q33_OnPresetObjectLoad2 (PrisonOfIce): same as Load1 but for the rescued-Anya\n   monster (field_0x108 map) \u00e2\u20ac\u201d copies the\n   preset list and transfers the DRLG map file to the Anya monster's AI once it is alive. Restores\n   rescued-Anya on reload. */\n\nvoid __thiscall\nD2Game::Quests::QUESTS::A5Q3::Q33_OnPresetObjectLoad2(void *this,D2MapAIStrc *pMapAI)\n\n{\n  D2QuestDataStrc *pQuestData;\n  D2MapAIStrc *pCopiedPreset;\n  D2UnitStrc *pAnyaCorpse;\n  D2MapAIStrc **ppMonsterMapAi;\n  D2MapAIStrc **pDrlgMapField;\n  D2QuestDataA5Q3Strc *pQuestSpecificData;\n  \n  pQuestData = D2Game::Quests::QUESTS::GetQuestDataByQuestNoInternal(this,QUESTINT_PrisonOfIce);\n  if ((pQuestData != (D2QuestDataStrc *)0x0) && (pMapAI != (D2MapAIStrc *)0x0)) {\n    pQuestSpecificData = (pQuestData->pQuestSpecificData).pA5Q3;\n    pDrlgMapField = &pQuestSpecificData->pAnyaRescuedDrlgMap;\n    pCopiedPreset =\n         D2Common::Drlg::Preset::DRLGPRESET_CopyMapAI(pQuestData->pGame->pMemoryPool,pMapAI);\n    *pDrlgMapField = pCopiedPreset;\n    if (((pQuestSpecificData->bAnyaMonsterAlive != 0) &&\n        (((pAnyaCorpse = D2Game::UNIT::SUnit::FindUnitFromTable\n                                   (pQuestData->pGame,UNIT_MONSTER,\n                                    pQuestSpecificData->nAnyaCorpseGUID),\n          pAnyaCorpse != (D2UnitStrc *)0x0 && (*pDrlgMapField != (D2MapAIStrc *)0x0)) &&\n         ((*pDrlgMapField)->pPosition != (D2PathPosStrc *)0x0)))) &&\n       (pQuestSpecificData->bAnyaRescuedMapTaken == 0)) {\n      ppMonsterMapAi = D2Game::Ai::AiGeneral::GetMonsterMapAi(pAnyaCorpse);\n      D2Common::Drlg::Preset::DRLGPRESET_TransferMapAI(pDrlgMapField,ppMonsterMapAi);\n      pQuestSpecificData->bAnyaRescuedMapTaken = 1;\n    }\n  }\n  return;\n}\n\n"
+    }
+  ],
+  "types": [
+    {
+      "name": "D2UnitStrc",
+      "kind": "STRUCTURE"
+    },
+    {
+      "name": "SGAMEDATA",
+      "kind": "STRUCTURE"
+    },
+    {
+      "name": "D2QuestDataStrc",
+      "kind": "STRUCTURE"
+    },
+    {
+      "name": "D2MapAIStrc",
+      "kind": "STRUCTURE"
+    },
+    {
+      "name": "D2QuestDataA5Q3Strc",
+      "kind": "STRUCTURE"
+    }
+  ],
+  "tables": {
+    "functionReturnTypes": {
+      "GetQuestDataByQuestNoInternal": "D2QuestDataStrc *",
+      "D2Game::Quests::QUESTS::GetQuestDataByQuestNoInternal": "D2QuestDataStrc *",
+      "DRLGPRESET_CopyMapAI": "D2MapAIStrc *",
+      "D2Common::Drlg::Preset::DRLGPRESET_CopyMapAI": "D2MapAIStrc *",
+      "FindUnitFromTable": "D2UnitStrc *",
+      "D2Game::UNIT::SUnit::FindUnitFromTable": "D2UnitStrc *",
+      "GetMonsterMapAi": "D2MapAIStrc * *",
+      "D2Game::Ai::AiGeneral::GetMonsterMapAi": "D2MapAIStrc * *",
+      "DRLGPRESET_TransferMapAI": "D2MapAIStrc *",
+      "D2Common::Drlg::Preset::DRLGPRESET_TransferMapAI": "D2MapAIStrc *"
+    },
+    "functionParamTypes": {
+      "GetQuestDataByQuestNoInternal": [
+        "SGAMEDATA *",
+        "eD2QuestsInternal"
+      ],
+      "D2Game::Quests::QUESTS::GetQuestDataByQuestNoInternal": [
+        "SGAMEDATA *",
+        "eD2QuestsInternal"
+      ],
+      "DRLGPRESET_CopyMapAI": [
+        "D2PoolManagerStrc *",
+        "D2MapAIStrc *"
+      ],
+      "D2Common::Drlg::Preset::DRLGPRESET_CopyMapAI": [
+        "D2PoolManagerStrc *",
+        "D2MapAIStrc *"
+      ],
+      "FindUnitFromTable": [
+        "SGAMEDATA *",
+        "eD2UnitType",
+        "uint32_t"
+      ],
+      "D2Game::UNIT::SUnit::FindUnitFromTable": [
+        "SGAMEDATA *",
+        "eD2UnitType",
+        "uint32_t"
+      ],
+      "GetMonsterMapAi": [
+        "D2UnitStrc *"
+      ],
+      "D2Game::Ai::AiGeneral::GetMonsterMapAi": [
+        "D2UnitStrc *"
+      ],
+      "DRLGPRESET_TransferMapAI": [
+        "D2MapAIStrc * *",
+        "D2MapAIStrc * *"
+      ],
+      "D2Common::Drlg::Preset::DRLGPRESET_TransferMapAI": [
+        "D2MapAIStrc * *",
+        "D2MapAIStrc * *"
+      ]
+    },
+    "structFields": {
+      "D2QuestDataA5Q3Strc": {
+        "sQuestGUID": "D2QuestGUIDStrc",
+        "nAnyaState": "int32_t",
+        "nAnyaStateExtra": "int32_t",
+        "nTransformStep": "int32_t",
+        "bAnyaTransformed": "byte",
+        "bFrozenAnyaSpawned": "byte",
+        "bNihlathakSpawned": "byte",
+        "bAnyaMonsterAlive": "byte",
+        "nFrozenAnyaGUID": "int32_t",
+        "nAnyaMonsterGUID": "int32_t",
+        "nAnyaCorpseGUID": "int32_t",
+        "nNihlathakGUID": "int32_t",
+        "bFrozenAnyaSpawning": "uint8_t",
+        "nFrozenAnyaObjectGUID": "int32_t",
+        "bMalachaiTalked": "byte",
+        "bAnyaReachable": "byte",
+        "bAnyaCanRun": "byte",
+        "bAnyaInTown": "byte",
+        "field_0xB0": "byte",
+        "bAnyaPositionStored": "byte",
+        "bPortalSpawned": "byte",
+        "field_0xB3": "byte",
+        "nPortalGUID": "int32_t",
+        "nPortalSpawnX": "int32_t",
+        "nPortalSpawnY": "int32_t",
+        "nAnyaPortalGUID": "int32_t",
+        "sAnyaPosition": "POINT",
+        "field_0xCC": "int32_t",
+        "field_0xD0": "int32_t",
+        "field_0xD4": "int32_t",
+        "nIceItemCount": "int32_t",
+        "nWalkTickCount": "int32_t",
+        "bAnyaPositionValid": "byte",
+        "bObjectPresetLoaded": "byte",
+        "bScrollOfResistanceFound": "byte",
+        "bFrozenAnyaDespawned": "byte",
+        "nPresetObjectGUID": "int32_t",
+        "field_0xE8": "int32_t",
+        "field_0xEC": "int32_t",
+        "nTransformX": "int32_t",
+        "nTransformY": "int32_t",
+        "nAnyaStartObjectGUID": "int32_t",
+        "nPresetObjectUnit": "int32_t",
+        "bTransformComplete": "byte",
+        "bIceScrollCollected": "byte",
+        "bScrollOfResistanceUsed": "byte",
+        "field_0x103": "byte",
+        "pDrlgMap": "D2MapAIStrc *",
+        "pAnyaRescuedDrlgMap": "D2MapAIStrc *",
+        "bDrlgMapTaken": "byte",
+        "bAnyaRescuedMapTaken": "byte",
+        "field_0x10E": "byte",
+        "field_0x10F": "byte",
+        "nNihlathakObjectGUID": "int32_t"
+      }
+    },
+    "structFieldOffsets": {
+      "D2QuestDataA5Q3Strc": {
+        "sQuestGUID": 0,
+        "nAnyaState": 132,
+        "nAnyaStateExtra": 136,
+        "nTransformStep": 140,
+        "bAnyaTransformed": 144,
+        "bFrozenAnyaSpawned": 145,
+        "bNihlathakSpawned": 146,
+        "bAnyaMonsterAlive": 147,
+        "nFrozenAnyaGUID": 148,
+        "nAnyaMonsterGUID": 152,
+        "nAnyaCorpseGUID": 156,
+        "nNihlathakGUID": 160,
+        "bFrozenAnyaSpawning": 164,
+        "nFrozenAnyaObjectGUID": 168,
+        "bMalachaiTalked": 172,
+        "bAnyaReachable": 173,
+        "bAnyaCanRun": 174,
+        "bAnyaInTown": 175,
+        "field_0xB0": 176,
+        "bAnyaPositionStored": 177,
+        "bPortalSpawned": 178,
+        "field_0xB3": 179,
+        "nPortalGUID": 180,
+        "nPortalSpawnX": 184,
+        "nPortalSpawnY": 188,
+        "nAnyaPortalGUID": 192,
+        "sAnyaPosition": 196,
+        "field_0xCC": 204,
+        "field_0xD0": 208,
+        "field_0xD4": 212,
+        "nIceItemCount": 216,
+        "nWalkTickCount": 220,
+        "bAnyaPositionValid": 224,
+        "bObjectPresetLoaded": 225,
+        "bScrollOfResistanceFound": 226,
+        "bFrozenAnyaDespawned": 227,
+        "nPresetObjectGUID": 228,
+        "field_0xE8": 232,
+        "field_0xEC": 236,
+        "nTransformX": 240,
+        "nTransformY": 244,
+        "nAnyaStartObjectGUID": 248,
+        "nPresetObjectUnit": 252,
+        "bTransformComplete": 256,
+        "bIceScrollCollected": 257,
+        "bScrollOfResistanceUsed": 258,
+        "field_0x103": 259,
+        "pDrlgMap": 260,
+        "pAnyaRescuedDrlgMap": 264,
+        "bDrlgMapTaken": 268,
+        "bAnyaRescuedMapTaken": 269,
+        "field_0x10E": 270,
+        "field_0x10F": 271,
+        "nNihlathakObjectGUID": 272
+      }
+    },
+    "structLayouts": {
+      "D2QuestDataA5Q3Strc": [
+        {
+          "name": "sQuestGUID",
+          "type": "D2QuestGUIDStrc",
+          "offset": 0,
+          "size": 132
+        },
+        {
+          "name": "nAnyaState",
+          "type": "int32_t",
+          "offset": 132,
+          "size": 4
+        },
+        {
+          "name": "nAnyaStateExtra",
+          "type": "int32_t",
+          "offset": 136,
+          "size": 4
+        },
+        {
+          "name": "nTransformStep",
+          "type": "int32_t",
+          "offset": 140,
+          "size": 4
+        },
+        {
+          "name": "bAnyaTransformed",
+          "type": "byte",
+          "offset": 144,
+          "size": 1
+        },
+        {
+          "name": "bFrozenAnyaSpawned",
+          "type": "byte",
+          "offset": 145,
+          "size": 1
+        },
+        {
+          "name": "bNihlathakSpawned",
+          "type": "byte",
+          "offset": 146,
+          "size": 1
+        },
+        {
+          "name": "bAnyaMonsterAlive",
+          "type": "byte",
+          "offset": 147,
+          "size": 1
+        },
+        {
+          "name": "nFrozenAnyaGUID",
+          "type": "int32_t",
+          "offset": 148,
+          "size": 4
+        },
+        {
+          "name": "nAnyaMonsterGUID",
+          "type": "int32_t",
+          "offset": 152,
+          "size": 4
+        },
+        {
+          "name": "nAnyaCorpseGUID",
+          "type": "int32_t",
+          "offset": 156,
+          "size": 4
+        },
+        {
+          "name": "nNihlathakGUID",
+          "type": "int32_t",
+          "offset": 160,
+          "size": 4
+        },
+        {
+          "name": "bFrozenAnyaSpawning",
+          "type": "uint8_t",
+          "offset": 164,
+          "size": 1
+        },
+        {
+          "name": "nFrozenAnyaObjectGUID",
+          "type": "int32_t",
+          "offset": 168,
+          "size": 4
+        },
+        {
+          "name": "bMalachaiTalked",
+          "type": "byte",
+          "offset": 172,
+          "size": 1
+        },
+        {
+          "name": "bAnyaReachable",
+          "type": "byte",
+          "offset": 173,
+          "size": 1
+        },
+        {
+          "name": "bAnyaCanRun",
+          "type": "byte",
+          "offset": 174,
+          "size": 1
+        },
+        {
+          "name": "bAnyaInTown",
+          "type": "byte",
+          "offset": 175,
+          "size": 1
+        },
+        {
+          "name": "field_0xB0",
+          "type": "byte",
+          "offset": 176,
+          "size": 1
+        },
+        {
+          "name": "bAnyaPositionStored",
+          "type": "byte",
+          "offset": 177,
+          "size": 1
+        },
+        {
+          "name": "bPortalSpawned",
+          "type": "byte",
+          "offset": 178,
+          "size": 1
+        },
+        {
+          "name": "field_0xB3",
+          "type": "byte",
+          "offset": 179,
+          "size": 1
+        },
+        {
+          "name": "nPortalGUID",
+          "type": "int32_t",
+          "offset": 180,
+          "size": 4
+        },
+        {
+          "name": "nPortalSpawnX",
+          "type": "int32_t",
+          "offset": 184,
+          "size": 4
+        },
+        {
+          "name": "nPortalSpawnY",
+          "type": "int32_t",
+          "offset": 188,
+          "size": 4
+        },
+        {
+          "name": "nAnyaPortalGUID",
+          "type": "int32_t",
+          "offset": 192,
+          "size": 4
+        },
+        {
+          "name": "sAnyaPosition",
+          "type": "POINT",
+          "offset": 196,
+          "size": 8
+        },
+        {
+          "name": "field_0xCC",
+          "type": "int32_t",
+          "offset": 204,
+          "size": 4
+        },
+        {
+          "name": "field_0xD0",
+          "type": "int32_t",
+          "offset": 208,
+          "size": 4
+        },
+        {
+          "name": "field_0xD4",
+          "type": "int32_t",
+          "offset": 212,
+          "size": 4
+        },
+        {
+          "name": "nIceItemCount",
+          "type": "int32_t",
+          "offset": 216,
+          "size": 4
+        },
+        {
+          "name": "nWalkTickCount",
+          "type": "int32_t",
+          "offset": 220,
+          "size": 4
+        },
+        {
+          "name": "bAnyaPositionValid",
+          "type": "byte",
+          "offset": 224,
+          "size": 1
+        },
+        {
+          "name": "bObjectPresetLoaded",
+          "type": "byte",
+          "offset": 225,
+          "size": 1
+        },
+        {
+          "name": "bScrollOfResistanceFound",
+          "type": "byte",
+          "offset": 226,
+          "size": 1
+        },
+        {
+          "name": "bFrozenAnyaDespawned",
+          "type": "byte",
+          "offset": 227,
+          "size": 1
+        },
+        {
+          "name": "nPresetObjectGUID",
+          "type": "int32_t",
+          "offset": 228,
+          "size": 4
+        },
+        {
+          "name": "field_0xE8",
+          "type": "int32_t",
+          "offset": 232,
+          "size": 4
+        },
+        {
+          "name": "field_0xEC",
+          "type": "int32_t",
+          "offset": 236,
+          "size": 4
+        },
+        {
+          "name": "nTransformX",
+          "type": "int32_t",
+          "offset": 240,
+          "size": 4
+        },
+        {
+          "name": "nTransformY",
+          "type": "int32_t",
+          "offset": 244,
+          "size": 4
+        },
+        {
+          "name": "nAnyaStartObjectGUID",
+          "type": "int32_t",
+          "offset": 248,
+          "size": 4
+        },
+        {
+          "name": "nPresetObjectUnit",
+          "type": "int32_t",
+          "offset": 252,
+          "size": 4
+        },
+        {
+          "name": "bTransformComplete",
+          "type": "byte",
+          "offset": 256,
+          "size": 1
+        },
+        {
+          "name": "bIceScrollCollected",
+          "type": "byte",
+          "offset": 257,
+          "size": 1
+        },
+        {
+          "name": "bScrollOfResistanceUsed",
+          "type": "byte",
+          "offset": 258,
+          "size": 1
+        },
+        {
+          "name": "field_0x103",
+          "type": "byte",
+          "offset": 259,
+          "size": 1
+        },
+        {
+          "name": "pDrlgMap",
+          "type": "D2MapAIStrc *",
+          "offset": 260,
+          "size": 4
+        },
+        {
+          "name": "pAnyaRescuedDrlgMap",
+          "type": "D2MapAIStrc *",
+          "offset": 264,
+          "size": 4
+        },
+        {
+          "name": "bDrlgMapTaken",
+          "type": "byte",
+          "offset": 268,
+          "size": 1
+        },
+        {
+          "name": "bAnyaRescuedMapTaken",
+          "type": "byte",
+          "offset": 269,
+          "size": 1
+        },
+        {
+          "name": "field_0x10E",
+          "type": "byte",
+          "offset": 270,
+          "size": 1
+        },
+        {
+          "name": "field_0x10F",
+          "type": "byte",
+          "offset": 271,
+          "size": 1
+        },
+        {
+          "name": "nNihlathakObjectGUID",
+          "type": "int32_t",
+          "offset": 272,
+          "size": 4
+        }
+      ]
+    },
+    "aggregateSizes": {
+      "D2QuestDataA5Q3Strc": 276
+    },
+    "unionNames": [
+      "D2QuestSpecificDataUnion"
+    ]
+  },
+  "options": {
+    "outputDir": "./out",
+    "format": "cpp",
+    "organization": "namespace",
+    "generateCMake": false,
+    "generateSourceMaps": false,
+    "transformPreset": "full",
+    "includeAddressComments": false,
+    "promoteStaticGlobals": false
+  },
+  "scope": "Current live function metadata and decompiles; narrow field/callee context from the frozen v2108 fixture, checked against byte-identical dd289 headers in the separate native validation. Not an owning extraction."
+}
