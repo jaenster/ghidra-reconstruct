@@ -443,6 +443,16 @@ export {
 } from './builtins/tail-walk-reread.js';
 
 export {
+  twinStepCoalescePlugin,
+  type TwinStepCoalesceOptions,
+} from './builtins/twin-step-coalesce.js';
+
+export {
+  dyingAccumulatorPlugin,
+  type DyingAccumulatorOptions,
+} from './builtins/dying-accumulator.js';
+
+export {
   rotatedStepWhilePlugin,
   type RotatedStepWhileOptions,
 } from './builtins/rotated-step-while.js';
@@ -1002,6 +1012,8 @@ import { selectArgumentPlugin } from './builtins/select-argument.js';
 import { inPlaceOperandPlugin } from './builtins/in-place-operand.js';
 import { loopCompareDifferencePlugin } from './builtins/loop-compare-difference.js';
 import { tailWalkRereadPlugin } from './builtins/tail-walk-reread.js';
+import { dyingAccumulatorPlugin } from './builtins/dying-accumulator.js';
+import { twinStepCoalescePlugin } from './builtins/twin-step-coalesce.js';
 import { rotatedStepWhilePlugin } from './builtins/rotated-step-while.js';
 import { copiedTestWhilePlugin } from './builtins/copied-test-while.js';
 import { decidedBoolReturnPlugin } from './builtins/decided-bool-return.js';
@@ -1299,6 +1311,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   paramLoadOrderPlugin,       // Matching: field copies out of a parameter struct in the original's source order (priority 976)
   searchLoopExitPlugin,       // Matching: a search loop with its not-found exit printed twice loops on the pointer (priority 989.85)
   tailWalkRereadPlugin,       // Matching: a walk to a list's last node tests the link in memory, not a copy (priority 989.86)
+  twinStepCoalescePlugin,     // Matching: two variables given one stepped value back to back are one, on a dataflow proof (priority 989.8645)
   rotatedStepWhilePlugin,     // Matching: a guarded do-while testing the copy its pointer is stepped to loops on the pointer (priority 989.865)
   copiedTestWhilePlugin,      // Matching: a loop testing a value of x through two copies tests and stores the value itself (priority 989.866)
   decidedBoolReturnPlugin,    // Matching: a bool `return v != 0;` a guard on v decided is the constant (priority 989.867)
@@ -1307,6 +1320,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   accumulateSumPlugin,        // Matching: a sum of two single-use values accumulates into the first with += (priority 989.95)
   inPlaceOperandPlugin,       // Matching: a value worked on once before its one use is worked on in place, x OP= e (priority 989.951)
   loopCompareDifferencePlugin, // Matching: share a comparison loop's exit subtraction with its signed result (priority 989.952)
+  dyingAccumulatorPlugin,     // Matching: a sum into a local that dies with its use updates the local, A op= E (priority 989.955)
   shortLocalWidenPlugin,      // Matching: a short local read only as an index is an int (priority 989.96)
   guardNullNestPlugin,        // Matching: a compound guard and a later null test of one return become one null-initialised test (priority 989.97)
   returnCopySplitPlugin,      // Matching: an else-if chain whose first arm falls into a constant return writes the return in that arm (priority 989.975)
