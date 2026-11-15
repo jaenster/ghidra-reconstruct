@@ -1396,3 +1396,44 @@ describe('branchLayoutPlugin - chain', () => {
     assert.ok(!sites.includes('chain'), sites.join(','));
   });
 });
+
+describe('branchLayoutPlugin - inlined getter tested failure first', () => {
+  // UNITSND_GetFootstepSound 004caeb0: the guard's jump lands on the copy after the value's test.
+  const guard = [
+    'int f(int t, U* u) {',
+    '  S* p;',
+    '[if 0x48 0x45,0x48] if (t != 1) {',
+    '[0x57,0x5a] return 0;',
+    '}',
+    '[0x4c] p = Get(u);',
+    '[if 0x53 0x51,0x53] if (!p) {',
+    '[0x57,0x5a] return 0;',
+    '}',
+    '[0x5b] return p->n;',
+    '}',
+  ];
+  const edges = (fall: number) => [
+    { line: 3, ord: 0, keyword: 'if' as const, jcc: 0x48, target: 0x55, fall: 0x4a, fallLines: [6, 7], takenLines: [4] },
+    { line: 7, ord: 0, keyword: 'if' as const, jcc: 0x53, target: 0x5b, fall, fallLines: [8], takenLines: [10] },
+  ];
+  const runE = (fall: number) => {
+    const { code, ev } = fixture(guard);
+    const sites: string[] = [];
+    const t = branchLayoutPlugin.createTransformer({
+      branchLayout: { ...ev, edges: edges(fall), returns: [{ start: 0x55, ret: 0x5a, insns: ['XOR/EAX', 'POP/ESI', 'RET'], fallsIn: true, jumpsIn: [0x48] }] },
+      onSite: e => sites.push(e.rule),
+    });
+    return { out: flat(emit(t(parse(code)) as AnyNode)), sites };
+  };
+
+  it('selects the value under the guard and tests it once', () => {
+    const { out, sites } = runE(0x55);
+    assert.ok(sites.includes('getter'), sites.join());
+    assert.ok(out.includes('p = !(t != 1) ? Get(u) : 0; if (!p) { return 0; } return p->n;') || out.includes('p = t == 1 ? Get(u) : 0; if (!p) { return 0; } return p->n;'), out);
+  });
+
+  it('leaves the guards when the value\'s test does not fall into the tail', () => {
+    const { sites } = runE(0x60);
+    assert.ok(!sites.includes('getter'), sites.join());
+  });
+});

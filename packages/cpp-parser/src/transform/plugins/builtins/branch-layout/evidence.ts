@@ -398,6 +398,16 @@ export class LayoutReader {
   }
 
   /**
+   * Per leaf operand of the decompile condition on `line`, the offsets of the conditional
+   * branches it feeds, whatever ifs the passes made of it (a branch offset is the
+   * instruction's own, so a line the pieces all claim still places them); null without facts.
+   */
+  lineOperands(line: number): readonly (readonly number[])[] | null {
+    if (!this.ev.operands) return null;
+    return this.ev.operands.get(line) ?? null;
+  }
+
+  /**
    * The conditional branch of the first if a pass split off a short-circuit condition:
    * the last branch its own leading operands feed. Null unless `operandBranches` gives
    * them, each with a branch.
