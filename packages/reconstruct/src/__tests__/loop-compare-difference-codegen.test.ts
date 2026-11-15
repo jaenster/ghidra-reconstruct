@@ -22,7 +22,8 @@ describe('loop comparison difference through full function codegen', () => {
     const code = generateFunctionImplementation(model, undefined, fixture.options, {});
     assert.equal(getParseErrorCount(), before);
     assert.equal(code, row.candidate);
-    assert.ok(code.includes('nComparison = nUpper1 - nUpper2;'), code);
+    assert.ok(code.includes('nUpper1 -= toupper((int)*szText2);'), code);
+    assert.ok(code.includes('nComparison = nUpper1;'), code);
     assert.ok(code.includes('(nComparison > 0)'), code);
   });
 });
