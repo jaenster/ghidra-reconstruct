@@ -1,0 +1,504 @@
+{
+  "source": "7b70696f8b22e033a09b47cdfc24c37b5dad0c09",
+  "generator": "81079e23c65bf570fded257ad0fd76627385b14c",
+  "fn": {
+    "name": "SOUND_ApplyEAXEnvironment",
+    "address": "00513c50",
+    "entryPoint": "00513c50",
+    "signature": "void SOUND_ApplyEAXEnvironment(D2SoundEaxEnvironStrc * pEnviron)",
+    "returnType": "void",
+    "callingConvention": "__fastcall",
+    "size": 631,
+    "isThunk": false,
+    "isExternal": false,
+    "hasVarArgs": false,
+    "namespace": "D2Sound::Sound",
+    "comment": "@function SOUND_ApplyEAXEnvironment\n@address Game.exe.ram:00513c50\n@date 2026.06.09\n@calling __fastcall\n@description Applies EAX environment parameters to gpDirectSoundEAXInterface. Two modes: gnSoundQualityMode==1 (simple: vol/distance/flags), ==2 (full: 14 reverb properties including decay, reflections, room size). Calls Set() on EAX property GUIDs for each param.",
+    "sourceFile": null,
+    "sourceLine": null,
+    "sourceInfo": null,
+    "parameters": [
+      {
+        "name": "pEnviron",
+        "dataType": "D2SoundEaxEnvironStrc *",
+        "size": 4,
+        "ordinal": 0,
+        "storage": "ECX:4",
+        "stackOffset": null,
+        "resolvedType": null
+      }
+    ],
+    "localVariables": [
+      {
+        "name": "fVar1",
+        "dataType": "undefined1[10]",
+        "size": 10,
+        "storage": "register:00001000:10",
+        "stackOffset": null,
+        "resolvedType": null
+      },
+      {
+        "name": "fAttenuation",
+        "dataType": "D2FloatIntUnion",
+        "size": 4,
+        "storage": "Stack[-0x8]:4",
+        "stackOffset": -8,
+        "resolvedType": null
+      },
+      {
+        "name": "fDiffusion",
+        "dataType": "undefined4",
+        "size": 4,
+        "storage": "Stack[-0x10]:4",
+        "stackOffset": -16,
+        "resolvedType": null
+      },
+      {
+        "name": "unionfacet2_513cfb",
+        "dataType": "D2FloatIntUnion",
+        "size": 4,
+        "storage": "HASH:403fe918ea4d:4",
+        "stackOffset": null,
+        "resolvedType": null
+      }
+    ],
+    "tags": [
+      {
+        "type": "llm-artifact-fix"
+      },
+      {
+        "type": "verified-2026-10-25"
+      }
+    ],
+    "decompiled": "\n/* @function SOUND_ApplyEAXEnvironment\n   @address Game.exe.ram:00513c50\n   @date 2026.06.09\n   @calling __fastcall\n   @description Applies EAX environment parameters to gpDirectSoundEAXInterface. Two modes:\n   gnSoundQualityMode==1 (simple: vol/distance/flags), ==2 (full: 14 reverb properties including\n   decay, reflections, room size). Calls Set() on EAX property GUIDs for each param. */\n\nvoid __fastcall D2Sound::Sound::SOUND_ApplyEAXEnvironment(D2SoundEaxEnvironStrc *pEnviron)\n\n{\n  D2FloatIntUnion fAttenuation;\n  \n  if ((gbSound3DEnabled != 0) &&\n     (D2Sound::Sound::gpDirectSoundEAXInterface != (IKsPropertySet *)0x0)) {\n    if (gnSoundQualityMode == 1) {\n      fAttenuation = (D2FloatIntUnion)pEnviron;\n      fAttenuation.fValue =\n           D2Sound::Src::D2SoundSmp::SOUNDSMP_ClampAttenuation((float)pEnviron->nRoom);\n      (*D2Sound::Sound::gpDirectSoundEAXInterface->lpVtbl->Set)\n                (D2Sound::Sound::gpDirectSoundEAXInterface,gEAXPropertyGuid_Reserved1,1,(void *)0x0,\n                 0,pEnviron,4);\n      (*D2Sound::Sound::gpDirectSoundEAXInterface->lpVtbl->Set)\n                (D2Sound::Sound::gpDirectSoundEAXInterface,gEAXPropertyGuid_Reserved1,2,(void *)0x0,\n                 0,&fAttenuation,4);\n      (*D2Sound::Sound::gpDirectSoundEAXInterface->lpVtbl->Set)\n                (D2Sound::Sound::gpDirectSoundEAXInterface,gEAXPropertyGuid_Reserved1,3,(void *)0x0,\n                 0,&pEnviron->fDecayTime,4);\n    }\n    if (gnSoundQualityMode == 2) {\n      fAttenuation.nValue = 0x20;\n      (*D2Sound::Sound::gpDirectSoundEAXInterface->lpVtbl->Set)\n                (D2Sound::Sound::gpDirectSoundEAXInterface,\n                 D2Sound::Sound::gEAXPropertyGuid_Reserved2,0xb,(void *)0x0,0,pEnviron,4);\n      (*D2Sound::Sound::gpDirectSoundEAXInterface->lpVtbl->Set)\n                (D2Sound::Sound::gpDirectSoundEAXInterface,\n                 D2Sound::Sound::gEAXPropertyGuid_Reserved2,0xf,(void *)0x0,0,&fAttenuation,4);\n      (*D2Sound::Sound::gpDirectSoundEAXInterface->lpVtbl->Set)\n                (D2Sound::Sound::gpDirectSoundEAXInterface,\n                 D2Sound::Sound::gEAXPropertyGuid_Reserved2,0xb,(void *)0x0,0,pEnviron,4);\n      (*D2Sound::Sound::gpDirectSoundEAXInterface->lpVtbl->Set)\n                (D2Sound::Sound::gpDirectSoundEAXInterface,\n                 D2Sound::Sound::gEAXPropertyGuid_Reserved2,0xc,(void *)0x0,0,&pEnviron->fEnvSize,4)\n      ;\n      (*D2Sound::Sound::gpDirectSoundEAXInterface->lpVtbl->Set)\n                (D2Sound::Sound::gpDirectSoundEAXInterface,\n                 D2Sound::Sound::gEAXPropertyGuid_Reserved2,0xd,(void *)0x0,0,\n                 &pEnviron->fEnvDiffusion,4);\n      (*D2Sound::Sound::gpDirectSoundEAXInterface->lpVtbl->Set)\n                (D2Sound::Sound::gpDirectSoundEAXInterface,\n                 D2Sound::Sound::gEAXPropertyGuid_Reserved2,2,(void *)0x0,0,&pEnviron->nRoom,4);\n      (*D2Sound::Sound::gpDirectSoundEAXInterface->lpVtbl->Set)\n                (D2Sound::Sound::gpDirectSoundEAXInterface,\n                 D2Sound::Sound::gEAXPropertyGuid_Reserved2,3,(void *)0x0,0,&pEnviron->nRoomHF,4);\n      (*D2Sound::Sound::gpDirectSoundEAXInterface->lpVtbl->Set)\n                (D2Sound::Sound::gpDirectSoundEAXInterface,\n                 D2Sound::Sound::gEAXPropertyGuid_Reserved2,5,(void *)0x0,0,&pEnviron->fDecayTime,4)\n      ;\n      (*D2Sound::Sound::gpDirectSoundEAXInterface->lpVtbl->Set)\n                (D2Sound::Sound::gpDirectSoundEAXInterface,\n                 D2Sound::Sound::gEAXPropertyGuid_Reserved2,6,(void *)0x0,0,&pEnviron->fDecayHFRatio\n                 ,4);\n      (*D2Sound::Sound::gpDirectSoundEAXInterface->lpVtbl->Set)\n                (D2Sound::Sound::gpDirectSoundEAXInterface,\n                 D2Sound::Sound::gEAXPropertyGuid_Reserved2,7,(void *)0x0,0,&pEnviron->nReflections,\n                 4);\n      (*D2Sound::Sound::gpDirectSoundEAXInterface->lpVtbl->Set)\n                (D2Sound::Sound::gpDirectSoundEAXInterface,\n                 D2Sound::Sound::gEAXPropertyGuid_Reserved2,8,(void *)0x0,0,\n                 &pEnviron->fReflectionsDelay,4);\n      (*D2Sound::Sound::gpDirectSoundEAXInterface->lpVtbl->Set)\n                (D2Sound::Sound::gpDirectSoundEAXInterface,\n                 D2Sound::Sound::gEAXPropertyGuid_Reserved2,9,(void *)0x0,0,&pEnviron->nReverb,4);\n      (*D2Sound::Sound::gpDirectSoundEAXInterface->lpVtbl->Set)\n                (D2Sound::Sound::gpDirectSoundEAXInterface,\n                 D2Sound::Sound::gEAXPropertyGuid_Reserved2,10,(void *)0x0,0,&pEnviron->fReverbDelay\n                 ,4);\n      (*D2Sound::Sound::gpDirectSoundEAXInterface->lpVtbl->Set)\n                (D2Sound::Sound::gpDirectSoundEAXInterface,\n                 D2Sound::Sound::gEAXPropertyGuid_Reserved2,4,(void *)0x0,0,&pEnviron->fRoomRolloff,\n                 4);\n      (*D2Sound::Sound::gpDirectSoundEAXInterface->lpVtbl->Set)\n                (D2Sound::Sound::gpDirectSoundEAXInterface,\n                 D2Sound::Sound::gEAXPropertyGuid_Reserved2,0xe,(void *)0x0,0,\n                 &pEnviron->fAirAbsorptionHF,4);\n    }\n    g_bEAXEnabled = (uint)(pEnviron->nRoom == -10000);\n  }\n  return;\n}\n\n",
+    "pushSlots": [
+      {
+        "offset": -8,
+        "reg": "ECX"
+      }
+    ]
+  },
+  "dh": "1d650014",
+  "normalizedPointerSpellings": 1,
+  "context": {
+    "targetPointerSize": 4,
+    "targetLanguageId": "x86:LE:32:default",
+    "funcPtrArgCasts": {
+      "structFields": {
+        "D2FloatIntUnion": {
+          "fValue": "float",
+          "nValue": "int"
+        },
+        "D2SoundEaxEnvironStrc": {
+          "nEnvironment": "int32_t",
+          "fEnvSize": "float",
+          "fEnvDiffusion": "float",
+          "nRoom": "int32_t",
+          "nRoomHF": "int32_t",
+          "fDecayTime": "float",
+          "fDecayHFRatio": "float",
+          "nReflections": "int32_t",
+          "fReflectionsDelay": "float",
+          "nReverb": "int32_t",
+          "fReverbDelay": "float",
+          "fRoomRolloff": "float",
+          "fAirAbsorptionHF": "float"
+        }
+      },
+      "structLayouts": {
+        "D2FloatIntUnion": [
+          {
+            "name": "fValue",
+            "type": "float",
+            "offset": 0,
+            "size": 4
+          },
+          {
+            "name": "nValue",
+            "type": "int",
+            "offset": 0,
+            "size": 4
+          }
+        ],
+        "D2SoundEaxEnvironStrc": [
+          {
+            "name": "nEnvironment",
+            "type": "int32_t",
+            "offset": 0,
+            "size": 4
+          },
+          {
+            "name": "fEnvSize",
+            "type": "float",
+            "offset": 4,
+            "size": 4
+          },
+          {
+            "name": "fEnvDiffusion",
+            "type": "float",
+            "offset": 8,
+            "size": 4
+          },
+          {
+            "name": "nRoom",
+            "type": "int32_t",
+            "offset": 12,
+            "size": 4
+          },
+          {
+            "name": "nRoomHF",
+            "type": "int32_t",
+            "offset": 16,
+            "size": 4
+          },
+          {
+            "name": "fDecayTime",
+            "type": "float",
+            "offset": 20,
+            "size": 4
+          },
+          {
+            "name": "fDecayHFRatio",
+            "type": "float",
+            "offset": 24,
+            "size": 4
+          },
+          {
+            "name": "nReflections",
+            "type": "int32_t",
+            "offset": 28,
+            "size": 4
+          },
+          {
+            "name": "fReflectionsDelay",
+            "type": "float",
+            "offset": 32,
+            "size": 4
+          },
+          {
+            "name": "nReverb",
+            "type": "int32_t",
+            "offset": 36,
+            "size": 4
+          },
+          {
+            "name": "fReverbDelay",
+            "type": "float",
+            "offset": 40,
+            "size": 4
+          },
+          {
+            "name": "fRoomRolloff",
+            "type": "float",
+            "offset": 44,
+            "size": 4
+          },
+          {
+            "name": "fAirAbsorptionHF",
+            "type": "float",
+            "offset": 48,
+            "size": 4
+          }
+        ]
+      },
+      "aggregateMembers": {
+        "D2FloatIntUnion": [
+          "fValue",
+          "nValue"
+        ],
+        "D2SoundEaxEnvironStrc": [
+          "nEnvironment",
+          "fEnvSize",
+          "fEnvDiffusion",
+          "nRoom",
+          "nRoomHF",
+          "fDecayTime",
+          "fDecayHFRatio",
+          "nReflections",
+          "fReflectionsDelay",
+          "nReverb",
+          "fReverbDelay",
+          "fRoomRolloff",
+          "fAirAbsorptionHF"
+        ]
+      },
+      "unionNames": [
+        "D2FloatIntUnion"
+      ],
+      "aggregateSizes": {
+        "D2FloatIntUnion": 4,
+        "D2SoundEaxEnvironStrc": 52
+      },
+      "functionReturnTypes": {
+        "SOUNDSMP_ClampAttenuation": "float",
+        "D2Sound::Src::D2SoundSmp::SOUNDSMP_ClampAttenuation": "float"
+      },
+      "functionParamTypes": {
+        "SOUNDSMP_ClampAttenuation": [
+          "float"
+        ],
+        "D2Sound::Src::D2SoundSmp::SOUNDSMP_ClampAttenuation": [
+          "float"
+        ]
+      },
+      "globalTypes": {
+        "gbSound3DEnabled": "BOOL",
+        "gnSoundQualityMode": "int",
+        "gpDirectSoundEAXInterface": "IKsPropertySet*",
+        "g_bEAXEnabled": "uint32_t",
+        "gEAXPropertyGuid_Reserved1": "uint8_t[16]",
+        "gEAXPropertyGuid_Reserved2": "uint8_t[16]"
+      }
+    }
+  },
+  "oracleInputs": {
+    "typeModels": [
+      {
+        "name": "D2FloatIntUnion",
+        "category": "/",
+        "size": 4,
+        "description": "",
+        "alignment": 1,
+        "type": "union",
+        "fields": [
+          {
+            "name": "fValue",
+            "dataType": "float",
+            "offset": 0,
+            "size": 4,
+            "comment": null,
+            "bitOffset": null,
+            "bitSize": null
+          },
+          {
+            "name": "nValue",
+            "dataType": "int",
+            "offset": 0,
+            "size": 4,
+            "comment": null,
+            "bitOffset": null,
+            "bitSize": null
+          }
+        ],
+        "values": null,
+        "underlyingType": null,
+        "returnType": null,
+        "parameters": null,
+        "callingConvention": null,
+        "effectiveCallingConvention": null,
+        "hasUnknownCallingConvention": null,
+        "hasVarArgs": false,
+        "kind": "UNION"
+      },
+      {
+        "name": "D2SoundEaxEnvironStrc",
+        "category": "/Diablo2/Sound",
+        "size": 52,
+        "description": "",
+        "alignment": 1,
+        "type": "structure",
+        "fields": [
+          {
+            "name": "nEnvironment",
+            "dataType": "int32_t",
+            "offset": 0,
+            "size": 4,
+            "comment": null,
+            "bitOffset": null,
+            "bitSize": null
+          },
+          {
+            "name": "fEnvSize",
+            "dataType": "float",
+            "offset": 4,
+            "size": 4,
+            "comment": null,
+            "bitOffset": null,
+            "bitSize": null
+          },
+          {
+            "name": "fEnvDiffusion",
+            "dataType": "float",
+            "offset": 8,
+            "size": 4,
+            "comment": null,
+            "bitOffset": null,
+            "bitSize": null
+          },
+          {
+            "name": "nRoom",
+            "dataType": "int32_t",
+            "offset": 12,
+            "size": 4,
+            "comment": null,
+            "bitOffset": null,
+            "bitSize": null
+          },
+          {
+            "name": "nRoomHF",
+            "dataType": "int32_t",
+            "offset": 16,
+            "size": 4,
+            "comment": null,
+            "bitOffset": null,
+            "bitSize": null
+          },
+          {
+            "name": "fDecayTime",
+            "dataType": "float",
+            "offset": 20,
+            "size": 4,
+            "comment": null,
+            "bitOffset": null,
+            "bitSize": null
+          },
+          {
+            "name": "fDecayHFRatio",
+            "dataType": "float",
+            "offset": 24,
+            "size": 4,
+            "comment": null,
+            "bitOffset": null,
+            "bitSize": null
+          },
+          {
+            "name": "nReflections",
+            "dataType": "int32_t",
+            "offset": 28,
+            "size": 4,
+            "comment": null,
+            "bitOffset": null,
+            "bitSize": null
+          },
+          {
+            "name": "fReflectionsDelay",
+            "dataType": "float",
+            "offset": 32,
+            "size": 4,
+            "comment": null,
+            "bitOffset": null,
+            "bitSize": null
+          },
+          {
+            "name": "nReverb",
+            "dataType": "int32_t",
+            "offset": 36,
+            "size": 4,
+            "comment": null,
+            "bitOffset": null,
+            "bitSize": null
+          },
+          {
+            "name": "fReverbDelay",
+            "dataType": "float",
+            "offset": 40,
+            "size": 4,
+            "comment": null,
+            "bitOffset": null,
+            "bitSize": null
+          },
+          {
+            "name": "fRoomRolloff",
+            "dataType": "float",
+            "offset": 44,
+            "size": 4,
+            "comment": null,
+            "bitOffset": null,
+            "bitSize": null
+          },
+          {
+            "name": "fAirAbsorptionHF",
+            "dataType": "float",
+            "offset": 48,
+            "size": 4,
+            "comment": null,
+            "bitOffset": null,
+            "bitSize": null
+          }
+        ],
+        "values": null,
+        "underlyingType": null,
+        "returnType": null,
+        "parameters": null,
+        "callingConvention": null,
+        "effectiveCallingConvention": null,
+        "hasUnknownCallingConvention": null,
+        "hasVarArgs": false,
+        "kind": "STRUCTURE"
+      }
+    ],
+    "calleeModel": {
+      "name": "SOUNDSMP_ClampAttenuation",
+      "address": "00516670",
+      "entryPoint": "00516670",
+      "signature": "float SOUNDSMP_ClampAttenuation(float fMillibels)",
+      "returnType": "float",
+      "callingConvention": "__stdcall",
+      "size": 93,
+      "isThunk": false,
+      "isExternal": false,
+      "hasVarArgs": false,
+      "namespace": "D2Sound::Src::D2SoundSmp",
+      "comment": "@function SOUNDSMP_ClampAttenuation\n@address Game.exe.ram:00516670\n@date 2026.06.09\n@calling __stdcall\n@description Diablo 2 1.14d reverse team\nhttps://blizzhackers.dev",
+      "sourceFile": null,
+      "sourceLine": null,
+      "sourceInfo": null,
+      "parameters": [
+        {
+          "name": "fMillibels",
+          "dataType": "float",
+          "size": 4,
+          "ordinal": 0,
+          "storage": "Stack[0x4]:4",
+          "stackOffset": 4,
+          "resolvedType": null
+        }
+      ],
+      "localVariables": [
+        {
+          "name": "fClamped",
+          "dataType": "undefined1[10]",
+          "size": 10,
+          "storage": "register:00001000:10",
+          "stackOffset": null,
+          "resolvedType": null
+        },
+        {
+          "name": "fLinearGain",
+          "dataType": "float10",
+          "size": 10,
+          "storage": "HASH:fff7836d95:10",
+          "stackOffset": null,
+          "resolvedType": null
+        }
+      ],
+      "tags": [
+        {
+          "type": "llm-named"
+        },
+        {
+          "type": "llm-split"
+        },
+        {
+          "type": "llm-artifact-fix"
+        }
+      ],
+      "decompiled": "\n/* @function SOUNDSMP_ClampAttenuation\n   @address Game.exe.ram:00516670\n   @date 2026.06.09\n   @calling __stdcall\n   @description Diablo 2 1.14d reverse team\n   https://blizzhackers.dev */\n\nfloat D2Sound::Src::D2SoundSmp::SOUNDSMP_ClampAttenuation(float fMillibels)\n\n{\n  float10 fVar1;\n  float10 fLinearGain;\n  \n  fVar1 = (float10)fMillibels;\n  if ((float10)0.0 < fVar1 + (float10)9.999999747378752e-05) {\n    return 1.0;\n  }\n  if (fVar1 - (float10)9.999999747378752e-05 < (float10)-10000.0) {\n    return 0.0;\n  }\n  fLinearGain = compiler::CRT_CIPow((float10)10.0,fVar1 / (float10)2000.0);\n  return (float)fLinearGain;\n}\n\n"
+    }
+  },
+  "oracleResults": {
+    "unionSize": 4,
+    "clampOutParameterWidth": null
+  },
+  "options": {
+    "outputDir": "./out",
+    "format": "cpp",
+    "organization": "namespace",
+    "generateCMake": false,
+    "generateSourceMaps": false,
+    "transformPreset": "full",
+    "includeAddressComments": false,
+    "promoteStaticGlobals": false
+  },
+  "provenance": "Live read-only MCP models at source7b/Ghidrav2102; pointer-size spelling normalization applied. PUSH ECX slot attested manually from original PE and MCP disassembly, then passed through existing parsePrologueSlots/applyPrologueSlots. Not an owning extractor snapshot. Oracle must be reconstructed from oracleInputs."
+}

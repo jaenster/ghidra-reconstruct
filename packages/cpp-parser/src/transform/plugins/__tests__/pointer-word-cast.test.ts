@@ -228,7 +228,7 @@ describe('pointerWordCastPlugin', () => {
 
   it('leaves a sum whose addresses do not cancel', () => {
     const out = transform(`void f(char* a, char* b, int n) { int k; k = (int)a + (n + (int)b); }`);
-    assert.ok(squash(out).includes('k=(int)a+n+(int)b;'), out);
+    assert.ok(squash(out).includes('k=(int)a+(n+(int)b);'), out);
   });
 
   it('a value passed to a size_t parameter is a pointer-sized slot', () => {

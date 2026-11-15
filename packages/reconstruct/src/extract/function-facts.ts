@@ -40,7 +40,7 @@
 
 import type { GhidraConnection, ExtractedFunction } from '../types.js';
 import { STAMPER_JAVA, functionStampsScript, parseFunctionStamps, normalizeEntry, type TypeStamp } from './function-stamps.js';
-import { printsComparison, javaStringHash, parseCompareSiteOutput } from './compare-sites.js';
+import { printsComparison, javaStringHash, parseCompareSiteOutput, COMPARE_SETTER_JAVA } from './compare-sites.js';
 import { printsBranch, parseBranchLayout, IF_OPERANDS_DECL_JAVA, IF_OPERANDS_TOKEN_JAVA, RETURN_COPIES_JAVA, EDGES_DECL_JAVA, EDGES_TOKEN_JAVA, EDGES_AFTER_JAVA, PUSHES_JAVA } from './branch-layout.js';
 import { printsCallTemporary, parseCallOrder, CALL_PUSHES_JAVA, SEH_LINK_JAVA } from './call-order.js';
 import { ACCESS_ORDER_TOKEN_JAVA, parseAccessOrderRow, printsAccess } from './access-order.js';
@@ -48,6 +48,7 @@ import { printsHaltOrProbe, parseHaltLines, HALT_NAME, IP_NAME, PROBE_NAMES } fr
 import { STRING_OPS_JAVA, printsRepLoop, parseStringOpRow } from './string-ops.js';
 import { JUMP_TABLES_JAVA, printsSwitch, parseJumpTableRow } from './jump-tables.js';
 import { ZERO_STORES_JAVA, printsMemberStore, parseZeroStoreRow } from './zero-stores.js';
+import { parseConstantStoreRow } from './constant-stores.js';
 import { MASK_SITES_JAVA, printsByteWordMask, parseMaskSiteRow } from './mask-sites.js';
 import { ZEXT_SITES_JAVA, printsZextCast, parseZextSiteRow } from './zext-sites.js';
 import { SIGNED_DIVIDES_JAVA, printsCastDividend, parseSignedDivideRow } from './signed-divides.js';
@@ -60,6 +61,7 @@ import { SHADOWED_GLOBALS_DECL_JAVA, SHADOWED_GLOBALS_LINE_DECL_JAVA, SHADOWED_G
 import { labelsOf, labelFlowItems, labelFlowScript, parseLabelFlow, LABEL_FLOW_SCRIPT } from './label-flow.js';
 import { FactCache, type CachedFacts, type FactEntry } from './fact-cache.js';
 import { createHash } from 'node:crypto';
+import { ZERO_REGISTER_TEST_JAVA, EQUALITY_TEST_DELTA_JAVA } from './zero-register-test.js';
 
 /**
  * Java, no imports. `__ITEMS__` is `;`-separated entries, decompiled on a small thread pool,
@@ -86,6 +88,7 @@ import { createHash } from 'node:crypto';
  */
 export const FUNCTION_FACTS_SCRIPT = `
 ${STAMPER_JAVA}
+${COMPARE_SETTER_JAVA}
 final java.util.List<String> todo = new java.util.ArrayList<>();
 for (String a : "__ITEMS__".split(";")) if (a.length() > 0) todo.add(a);
 final java.util.concurrent.ConcurrentLinkedQueue<String> queue = new java.util.concurrent.ConcurrentLinkedQueue<>(todo);
@@ -126,6 +129,7 @@ ${CALL_PUSHES_JAVA}
           ghidra.app.decompiler.DecompileResults r = di.decompileFunction(fn, __TIMEOUT__, mon);
           if (r == null || r.getCCodeMarkup() == null) { rows.put(a, "F\\t" + a + "\\t" + self + "\\tfail\\n"); continue; }
           long base = fn.getEntryPoint().getOffset();
+${ZERO_REGISTER_TEST_JAVA}
           String ctext = r.decompileCompleted() && r.getDecompiledFunction() != null ? r.getDecompiledFunction().getC() : null;
           java.util.List<ghidra.app.decompiler.ClangNode> toks = new java.util.ArrayList<>();
           r.getCCodeMarkup().flatten(toks);
@@ -191,21 +195,7 @@ ${CALL_PUSHES_JAVA}
               }
               String um = user == null ? "-" : user.getMnemonicString();
               if (user != null && !(um.startsWith("J") && !um.equals("JMP")) && !um.startsWith("SET")) user = null;
-              ghidra.program.model.listing.Instruction setter = null;
-              if (user != null) {
-                ghidra.program.model.listing.Instruction q = user;
-                for (int s = 0; s < 9; s++) {
-                  boolean entered = false;
-                  for (ghidra.program.model.symbol.Reference rf : rm.getReferencesTo(q.getAddress())) if (rf.getReferenceType().isFlow()) entered = true;
-                  if (entered) break;
-                  ghidra.program.model.listing.Instruction p = L.getInstructionBefore(q.getAddress());
-                  if (p == null || p.getFallThrough() == null || !p.getFallThrough().equals(q.getAddress())) break;
-                  String pm = p.getMnemonicString();
-                  if (pm.equals("CMP") || pm.equals("TEST")) { setter = p; break; }
-                  if (!passive.contains(pm)) break;
-                  q = p;
-                }
-              }
+              ghidra.program.model.listing.Instruction setter = compareSetter.find(user, L, rm, passive);
               String bKind = "-", bVal = "-", aKind = "-";
               int w = 0;
               if (setter != null) {
@@ -283,11 +273,7 @@ ${IF_OPERANDS_TOKEN_JAVA}${EDGES_TOKEN_JAVA}${ACCESS_ORDER_TOKEN_JAVA}${STORE_BA
                     String m = in.getMnemonicString();
                     String reg = "-", d = "-", k = "-";
                     if (in.getNumOperands() >= 1 && ghidra.program.model.lang.OperandType.isRegister(in.getOperandType(0)) && in.getRegister(0) != null) reg = in.getRegister(0).getName();
-                    if ((m.equals("SUB") || m.equals("ADD")) && in.getNumOperands() == 2 && ghidra.program.model.lang.OperandType.isScalar(in.getOperandType(1)) && in.getScalar(1) != null) {
-                      long v = in.getScalar(1).getSignedValue();
-                      d = Long.toString(m.equals("SUB") ? v : -v);
-                    } else if (m.equals("DEC")) d = "1";
-                    else if (m.equals("INC")) d = "-1";
+${EQUALITY_TEST_DELTA_JAVA}
                     for (int ii = 0; ii < op.getNumInputs(); ii++) if (op.getInput(ii).isConstant()) k = Long.toString(op.getInput(ii).getOffset());
                     long ioff = in.getAddress().getOffset() - base;
                     es.append(es.length() > 0 ? ";" : "").append(l.getLineNumber()).append(':').append(t.getText()).append(',').append(m).append(',').append(reg)
@@ -514,7 +500,7 @@ println(sb.toString());
  */
 export const FACT_SCRIPT_VERSION = createHash('sha1')
   .update(FUNCTION_FACTS_SCRIPT).update(LABEL_FLOW_SCRIPT).update(functionStampsScript([], []))
-  .update('facts-16')
+  .update('facts-17')
   .digest('hex').slice(0, 16);
 
 export function functionFactsScript(batch: string[], threads = 8, timeout = 60): string {
@@ -689,6 +675,8 @@ export function selectFacts(text: string, entry: string, row: FunctionFactRow, c
   if (printsMemberStore(text) && row.zeroRow) {
     const z = parseZeroStoreRow(row.zeroRow);
     if (z.length > 0) facts.zeroStores = z;
+    const constants = parseConstantStoreRow(row.zeroRow);
+    if (constants.length > 0) facts.constantStores = constants;
   }
   // Positions in text order: only for the exact text they were read from.
   if (printsByteWordMask(text) && row.maskRow && row.textHash !== null
@@ -768,7 +756,7 @@ export interface FunctionFactStats {
   labelMs: number;
 }
 
-export const FACT_KEYS = ['compareSites', 'branchLayout', 'callOrder', 'accessOrder', 'haltLines', 'stringOps', 'jumpTables', 'zeroStores', 'maskSites', 'zextSites', 'registerStores', 'rotateSites', 'storeBases', 'callDivides', 'signedDivides', 'truncatingRounds', 'shadowedGlobals', 'labelFlow'] as const;
+export const FACT_KEYS = ['compareSites', 'branchLayout', 'callOrder', 'accessOrder', 'haltLines', 'stringOps', 'jumpTables', 'zeroStores', 'constantStores', 'maskSites', 'zextSites', 'registerStores', 'rotateSites', 'storeBases', 'callDivides', 'signedDivides', 'truncatingRounds', 'shadowedGlobals', 'labelFlow'] as const;
 
 /**
  * Attach every per-function fact to the decompiled functions, from the cache where the
@@ -940,6 +928,7 @@ function attach(f: ExtractedFunction, facts: CachedFacts): void {
   if (facts.stringOps !== undefined) f.stringOps = facts.stringOps;
   if (facts.jumpTables !== undefined) f.jumpTables = facts.jumpTables;
   if (facts.zeroStores !== undefined) f.zeroStores = facts.zeroStores;
+  if (facts.constantStores !== undefined) f.constantStores = facts.constantStores;
   if (facts.maskSites !== undefined) f.maskSites = facts.maskSites;
   if (facts.zextSites !== undefined) f.zextSites = facts.zextSites;
   if (facts.registerStores !== undefined) f.registerStores = facts.registerStores;

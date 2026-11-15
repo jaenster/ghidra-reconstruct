@@ -31,6 +31,8 @@ export interface LabelFlow {
 }
 
 export interface ExtractedFunction {
+  /** Native constant field writes overwritten later, from the existing stack trace. */
+  constantStores?: import('./extract/constant-stores.js').ConstantStoreFacts;
   /**
    * Per label of `decompiled`: how control enters it, read from the instructions. Unset in
    * snapshots older than the field (and when the script failed).

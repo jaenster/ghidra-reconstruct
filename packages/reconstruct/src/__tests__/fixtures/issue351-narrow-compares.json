@@ -1,0 +1,182 @@
+{
+  "evidence": "Live Windows decompiles, prototypes and high P-code read through MCP at source aa33ea4 / Ghidra v2088. Parameter pointer spelling *32 normalized to *. Comparison rows manually transcribed from that P-code and disassembly; these are regression inputs, not a run of the Ghidra markup extractor or an owning snapshot export. 00664b3d uses the same CMP as 00664b3b along its fall-through.",
+  "functions": [
+    {
+      "name": "TXT_BuildCharTemplateLevelIndex",
+      "address": "00664b10",
+      "signature": "void TXT_BuildCharTemplateLevelIndex(D2CharTemplateTxt * pCharTemplateTxt, int32_t nCount)",
+      "returnType": "void",
+      "callingConvention": "__stdcall",
+      "size": 102,
+      "isThunk": false,
+      "isExternal": false,
+      "hasVarArgs": false,
+      "namespace": "D2Common::DATATBLS::ArenaTbls",
+      "parameters": [
+        {
+          "name": "pCharTemplateTxt",
+          "dataType": "D2CharTemplateTxt *",
+          "size": 4,
+          "ordinal": 0,
+          "storage": "Stack[0x4]:4",
+          "stackOffset": 4,
+          "resolvedType": null
+        },
+        {
+          "name": "nCount",
+          "dataType": "int32_t",
+          "size": 4,
+          "ordinal": 1,
+          "storage": "EDI:4",
+          "stackOffset": null,
+          "resolvedType": null
+        }
+      ],
+      "localVariables": [
+        {
+          "name": "nPrevLevel",
+          "dataType": "int",
+          "size": 4,
+          "storage": "EDX:4",
+          "stackOffset": null,
+          "resolvedType": null
+        },
+        {
+          "name": "i",
+          "dataType": "undefined4",
+          "size": 4,
+          "storage": "ECX:4",
+          "stackOffset": null,
+          "resolvedType": "int"
+        },
+        {
+          "name": "pLevelField",
+          "dataType": "undefined4",
+          "size": 4,
+          "storage": "ESI:4",
+          "stackOffset": null,
+          "resolvedType": "uint8_t *"
+        },
+        {
+          "name": "nLevel",
+          "dataType": "int",
+          "size": 4,
+          "storage": "EAX:4",
+          "stackOffset": null,
+          "resolvedType": null
+        },
+        {
+          "name": "nErrorAddr",
+          "dataType": "undefined4",
+          "size": 4,
+          "storage": "EAX:4",
+          "stackOffset": null,
+          "resolvedType": "void *"
+        },
+        {
+          "name": "nLine",
+          "dataType": "undefined4",
+          "size": 4,
+          "storage": "HASH:3f286ea529:4",
+          "stackOffset": null,
+          "resolvedType": "int32_t"
+        }
+      ],
+      "tags": [
+        {
+          "type": "llm-typed"
+        },
+        {
+          "type": "llm-artifact-fix"
+        },
+        {
+          "type": "near-miss-fix"
+        },
+        {
+          "type": "halt-returns"
+        }
+      ],
+      "decompiled": "\n/* Builds sgCharTemplateLevelIndex (int[64]): for each CharTemplate level the index of its first\n   row. Rows (stride 0xf0, level byte at +0x1f) must be sorted by ascending level; halts at line\n   0x5c otherwise. */\n\nvoid D2Common::DATATBLS::ArenaTbls::TXT_BuildCharTemplateLevelIndex\n               (D2CharTemplateTxt *pCharTemplateTxt,int32_t nCount)\n\n{\n  int nLevel;\n  void *nErrorAddr;\n  int i;\n  int nPrevLevel;\n  uint8_t *pLevelField;\n  int32_t nLine;\n  \n  compiler::memset(sgCharTemplateLevelIndex,0,0x100);\n  nPrevLevel = 0;\n  i = 0;\n  if (0 < nCount) {\n    pLevelField = &pCharTemplateTxt->level;\n    do {\n      nLevel = (int)*pLevelField;\n      if ((uint)nLevel < (uint)nPrevLevel) {\n        nLine = 0x5c;\n        nErrorAddr = Fog::Src::ErrorManager::GetInstructionPointer();\n        Fog::Src::ErrorManager::ERROR_UnrecoverableInternalError_Halt(\"\",nErrorAddr,nLine);\n                    /* WARNING: Subroutine does not return */\n        compiler::exit(-1);\n      }\n      if ((uint)nPrevLevel < (uint)nLevel) {\n        sgCharTemplateLevelIndex[nLevel] = i;\n        nPrevLevel = nLevel;\n      }\n      i = i + 1;\n      pLevelField = pLevelField + 0xf0;\n    } while (i < nCount);\n  }\n  return;\n}\n\n",
+      "compareSites": "0\t<\tINT_SLESS\t4\t0\t0\tc:0\tv:nCount\t00664b2d\t00664b2d\tJLE\t00664b2b\tTEST\t4\tr\tz\t0\t1\n1\t<\tINT_LESS\t4\t-1\t-\tv:nLevel\tv:nPrevLevel\t00664b3b\t00664b3b\tJL\t00664b39\tCMP\t4\tr\tr\t-\t1\n2\t<\tINT_LESS\t4\t-1\t-\tv:nPrevLevel\tv:nLevel\t00664b3d\t00664b3d\tJLE\t00664b39\tCMP\t4\tr\tr\t-\t1\n3\t<\tINT_SLESS\t4\t-1\t-\tv:i\tv:nCount\t00664b53\t00664b53\tJL\t00664b51\tCMP\t4\tr\tr\t-\t1"
+    },
+    {
+      "name": "AddRoomDataActual",
+      "address": "0061b490",
+      "signature": "void AddRoomDataActual(D2RoomExStrc * pRoomEx, byte nInitDepth)",
+      "returnType": "void",
+      "callingConvention": "__cdecl",
+      "size": 84,
+      "isThunk": false,
+      "isExternal": false,
+      "hasVarArgs": false,
+      "namespace": "D2Common::DUNGEON::Dungeon",
+      "parameters": [
+        {
+          "name": "pRoomEx",
+          "dataType": "D2RoomExStrc *",
+          "size": 4,
+          "ordinal": 0,
+          "storage": "EDI:4",
+          "stackOffset": null,
+          "resolvedType": null
+        },
+        {
+          "name": "nInitDepth",
+          "dataType": "byte",
+          "size": 1,
+          "ordinal": 1,
+          "storage": "BL:1",
+          "stackOffset": null,
+          "resolvedType": null
+        }
+      ],
+      "localVariables": [
+        {
+          "name": "nDepth",
+          "dataType": "int",
+          "size": 4,
+          "storage": "ESI:4",
+          "stackOffset": null,
+          "resolvedType": null
+        },
+        {
+          "name": "nRefCheckIndex",
+          "dataType": "undefined4",
+          "size": 4,
+          "storage": "EAX:4",
+          "stackOffset": null,
+          "resolvedType": "int"
+        },
+        {
+          "name": "pnRefCount",
+          "dataType": "undefined4",
+          "size": 4,
+          "storage": "ECX:4",
+          "stackOffset": null,
+          "resolvedType": "uint16_t *"
+        },
+        {
+          "name": "pAct",
+          "dataType": "D2DrlgStrc *",
+          "size": 4,
+          "storage": "HASH:5ff8ef073b:4",
+          "stackOffset": null,
+          "resolvedType": null
+        }
+      ],
+      "tags": [
+        {
+          "type": "llm-artifact-fix"
+        },
+        {
+          "type": "callee-signature-changed"
+        },
+        {
+          "type": "round4"
+        }
+      ],
+      "decompiled": "\n/* WARNING: Enum \"eCollisionFlags\": Some values do not have unique names */\n/* WARNING: Enum \"eD2TimerType\": Some values do not have unique names */\n/* WARNING: Enum \"eD2TimerTypeDWORD\": Some values do not have unique names */\n/* @function AddRoomDataActual\n   @address Game.exe.ram:0061b490\n   @date 2026.06.10\n   @params\n     pRoomEx: EDI:4 (D2RoomExStrc *)\n     nInitDepth: BL:1 (byte)\n   @description Initializes room data for the given room extension at the specified recursion depth.\n   Allocates near rooms and populates tile data via preset/outdoor/maze handlers. */\n\nvoid __cdecl D2Common::DUNGEON::Dungeon::AddRoomDataActual(D2RoomExStrc *pRoomEx,byte nInitDepth)\n\n{\n  int nRefCheckIndex;\n  uint16_t *pnRefCount;\n  int nDepth;\n  D2DrlgStrc *pAct;\n  \n  D2Common::DUNGEON::Dungeon::InitNearRooms\n            (pRoomEx->pLevel->pDrlg->pMemoryPool,pRoomEx,nInitDepth + 1);\n  nDepth = (int)nInitDepth;\n  if ((uint)nDepth <= (uint)pRoomEx->fRoomStatus) {\n    nRefCheckIndex = 0;\n    if (true) {\n      pnRefCount = pRoomEx->awRoomsInList;\n      do {\n        if (*pnRefCount != 0) goto count_reference;\n        nRefCheckIndex = nRefCheckIndex + 1;\n        pnRefCount = pnRefCount + 1;\n      } while (nRefCheckIndex <= nDepth);\n    }\n    (*gaRoomExActivationHandlers[nDepth])(pRoomEx);\n  }\ncount_reference:\n  pRoomEx->awRoomsInList[nDepth] = pRoomEx->awRoomsInList[nDepth] + 1;\n  return;\n}\n\n",
+      "compareSites": "0\t<=\tINT_LESSEQUAL\t4\t-1\t-\tv:nDepth\te\t0061b4b6\t0061b4b6\tJL\t0061b4b4\tCMP\t4\tr\tr\t-\t1\n1\t!=\tINT_NOTEQUAL\t2\t1\t0\te\tc:0\t0061b4c1\t0061b4c5\tJNZ\t0061b4c1\tCMP\t2\tm\ti\t0\t1\n2\t<=\tINT_SLESSEQUAL\t4\t-1\t-\tv:nRefCheckIndex\tv:nDepth\t0061b4cf\t0061b4cf\tJLE\t0061b4cd\tCMP\t4\tr\tr\t-\t1"
+    }
+  ]
+}

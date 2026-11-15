@@ -49,7 +49,7 @@
 
 import { NodeKind } from '../../../ast/kinds.js';
 import type {
-  ASTNode, AnyNode, AssignExpr, BinaryExpr, CompoundStmt, CStyleCastExpr, DeclStmt, Expression, ExprStmt,
+  ASTNode, AnyNode, AssignExpr, BinaryExpr, CompoundStmt, ConditionalExpr, CStyleCastExpr, DeclStmt, Expression, ExprStmt,
   FunctionDecl, Identifier, IfStmt, MemberExpr, ParenExpr, QualifiedId, ReturnStmt, Statement, TypeNode, UnaryExpr,
   VariableDecl,
 } from '../../../ast/nodes.js';
@@ -58,12 +58,18 @@ import { emit } from '../../../emit/index.js';
 import { createTransformer, updateNode, cloneNode, type Transformer } from '../../transformer.js';
 import { Expr, Stmt } from '../../../ast/factory.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
+import { createFunctionRanges } from './value-range.js';
+import { createExprShape } from './expr-shape.js';
+import { localTypesOf } from './compare-form.js';
+import { shapeOfNode } from './call-arg-cast.js';
 
 export interface RegisterStoreRow { name: string; size: number; value: number; register: boolean }
 
 export interface RegisterStoreSelectOptions extends PluginOptions {
   /** The function's register-store rows (extract/register-stores.ts). */
   registerStores?: ReadonlyArray<RegisterStoreRow>;
+  structFields?: Record<string, Record<string, string>>;
+  typedefTargets?: Record<string, string>;
   onSite?: (e: { function: string; kind: 'guard' | 'else' | 'nested'; name: string }) => void;
 }
 
@@ -201,8 +207,97 @@ function armsQualify(a: Store, b: Store, reg: Map<ASTNode, boolean>): boolean {
   return true;
 }
 
-function select(left: Expression, cond: Expression, a: Expression, b: Expression): Statement {
-  return Stmt.expr(Expr.assign(cloneNode(left), Expr.conditional(cloneNode(cond), cloneNode(a), cloneNode(b))));
+function select(left: Expression, cond: Expression, a: Expression, b: Expression, made: Set<AssignExpr>): Statement {
+  const assignment = Expr.assign(cloneNode(left), Expr.conditional(cloneNode(cond), cloneNode(a), cloneNode(b)));
+  made.add(assignment);
+  return Stmt.expr(assignment);
+}
+
+const INTEGER_RANGES: Record<string, readonly [number, number]> = {
+  char: [-128, 127], 'signed char': [-128, 127], 'unsigned char': [0, 255],
+  short: [-32768, 32767], 'unsigned short': [0, 65535],
+  int: [-2147483648, 2147483647], long: [-2147483648, 2147483647],
+  'unsigned int': [0, 4294967295], 'unsigned long': [0, 4294967295],
+};
+
+/**
+ * After joining stores, a narrow arm cast may unnecessarily materialise a sign extension
+ * before the word store (SetAnimationSpeed 00621780). Drop it only at a same-typed integer
+ * destination, with the operand and other arm proven representable. This keeps their
+ * mathematical values through the conditional's usual conversions. In particular, a new
+ * unsigned arm must not turn a negative other arm into unsigned int.
+ */
+function dropProvenArmCasts(fn: FunctionDecl, made: Set<AssignExpr>, opts: RegisterStoreSelectOptions): FunctionDecl {
+  const resolve = (name: string) => opts.typedefTargets?.[name];
+  if (![...made].some(n => {
+    const c = unwrap(n.right) as ConditionalExpr;
+    return [c.thenExpr, c.elseExpr].some(e => {
+      const a = unwrap(e);
+      if (a.kind !== NodeKind.CStyleCastExpr) return false;
+      const t = shapeOfNode((a as CStyleCastExpr).type, 0, resolve);
+      return t?.stars === 0 && (INTEGER_RANGES[t.base]?.[1] ?? Infinity) <= 65535;
+    });
+  })) return fn;
+  for (const n of traverseAST(fn.body!)) if (n.kind === NodeKind.LabelStmt || n.kind === NodeKind.GotoStmt) return fn;
+  const locals = localTypesOf(fn), names = new Set<string>();
+  const declarations = [...fn.parameters, ...[...traverseAST(fn.body!)].filter(n => n.kind === NodeKind.VariableDecl)];
+  for (const declaration of declarations) {
+    const d = declaration as VariableDecl;
+    if (!d.name) continue;
+    if (names.has(d.name.name)) return fn; // no type/flow proof through a shadowed binding
+    names.add(d.name.name);
+    const pending = [emit(d.type as AnyNode)], seen = new Set<string>();
+    while (pending.length) {
+      const spelling = pending.pop()!;
+      if (/\bvolatile\b/.test(spelling)) return fn;
+      for (const token of spelling.match(/[A-Za-z_]\w*/g) ?? []) {
+        if (!seen.has(token) && opts.typedefTargets?.[token]) {
+          seen.add(token); pending.push(opts.typedefTargets[token]);
+        }
+      }
+    }
+  }
+  const tables = { structFields: opts.structFields, resolve };
+  const ranges = createFunctionRanges(fn, tables), shape = createExprShape(locals, tables);
+  const fits = (e: Expression, bounds: readonly [number, number]) => {
+    const r = ranges.rangeAt(e);
+    return !!r && r.lo >= bounds[0] && r.hi <= bounds[1];
+  };
+  const replacements = new Map<AssignExpr, Expression>();
+  const simplify = (node: AssignExpr): void => {
+    const c = unwrap(node.right);
+    if (c.kind !== NodeKind.ConditionalExpr) return;
+    const destination = shape(node.left);
+    const bounds = destination?.stars === 0 ? INTEGER_RANGES[destination.base] : undefined;
+    if (!bounds || bounds[1] > 65535) return;
+    // A signed reading of an unrestricted unsigned value is not a range proof:
+    // `(int)u < 32767` also accepts u >= 2^31. Every condition cast must itself
+    // preserve its operand's value before the arm's test constraints are used.
+    for (const n of traverseAST((c as ConditionalExpr).condition)) {
+      if (n.kind !== NodeKind.CStyleCastExpr && n.kind !== NodeKind.StaticCastExpr) continue;
+      const cast = n as CStyleCastExpr, s = shapeOfNode(cast.type, 0, tables.resolve);
+      const b = s?.stars === 0 ? INTEGER_RANGES[s.base] : undefined;
+      if (!b || !fits(cast.expression, b)) return;
+    }
+    const select = c as ConditionalExpr;
+    const changes: Partial<ConditionalExpr> = {};
+    for (const side of ['thenExpr', 'elseExpr'] as const) {
+      const arm = unwrap(select[side]);
+      if (arm.kind !== NodeKind.CStyleCastExpr) continue;
+      const cast = arm as CStyleCastExpr, type = shapeOfNode(cast.type, 0, tables.resolve);
+      const other = select[side === 'thenExpr' ? 'elseExpr' : 'thenExpr'];
+      if (type?.stars !== 0 || type.base !== destination!.base || !fits(cast.expression, bounds) || !fits(other, bounds)) continue;
+      const value = ranges.rangeAt(cast.expression), opposite = ranges.rangeAt(other);
+      if (value?.unsigned && opposite && opposite.lo < 0) continue;
+      changes[side] = cloneNode(cast.expression);
+    }
+    if (Object.keys(changes).length) replacements.set(node, updateNode(select, changes));
+  };
+  // Range analysis is keyed by node identity. These assignments were newly made in the
+  // cloned body, so apply replacements there only after every proof has read that body.
+  for (const n of traverseAST(fn.body!)) if (made.has(n as AssignExpr)) simplify(n as AssignExpr);
+  for (const [node, right] of replacements) node.right = right;
+  return fn;
 }
 
 const INT32 = /^(int|unsigned|unsigned int|signed|signed int|long|unsigned long|BOOL|DWORD|UINT|INT|LONG|ULONG|u?int32_t)$/;
@@ -268,7 +363,7 @@ function nestedInner(l: readonly Statement[]): { cond: Expression; st: Store } |
 interface Hit { kind: 'guard' | 'else' | 'nested'; name: string }
 
 /** One rewrite in `l`, a block in tail position when `tail`. */
-function rewriteBlock(l: Statement[], tail: boolean, isVoid: boolean, reg: Map<ASTNode, boolean>): Hit | null {
+function rewriteBlock(l: Statement[], tail: boolean, isVoid: boolean, reg: Map<ASTNode, boolean>, made: Set<AssignExpr>): Hit | null {
   for (let i = 0; i < l.length; i++) {
     const g = plainIf(l[i]);
     if (!g) continue;
@@ -280,7 +375,7 @@ function rewriteBlock(l: Statement[], tail: boolean, isVoid: boolean, reg: Map<A
         if (sa && sb && text(sa.left) === text(sb.left)) {
           const name = lvalueName(sa.left);
           if (name && armsQualify(sa, sb, reg)) {
-            l.splice(i, 1, select(sa.left, g.condition, sa.right, sb.right));
+            l.splice(i, 1, select(sa.left, g.condition, sa.right, sb.right, made));
             return { kind: 'else', name };
           }
         }
@@ -296,14 +391,14 @@ function rewriteBlock(l: Statement[], tail: boolean, isVoid: boolean, reg: Map<A
     // guard
     const sa = storeReturn(g.thenBranch);
     if (sa && text(sa.left) === text(final.left) && armsQualify(sa, final, reg)) {
-      l.splice(i, 2, select(final.left, g.condition, sa.right, final.right));
+      l.splice(i, 2, select(final.left, g.condition, sa.right, final.right, made));
       return { kind: 'guard', name };
     }
     // nested
     const n = nestedInner(body(g.thenBranch));
     if (n && text(n.st.left) === text(final.left) && armsQualify(n.st, final, reg)) {
       const cond = Expr.binary(cloneNode(g.condition), '&&', n.cond);
-      l.splice(i, 2, select(final.left, cond, n.st.right, final.right));
+      l.splice(i, 2, select(final.left, cond, n.st.right, final.right, made));
       return { kind: 'nested', name };
     }
   }
@@ -332,6 +427,7 @@ function rewriteFunction(fn: FunctionDecl, opts: RegisterStoreSelectOptions): Fu
   const b = cloneNode(fn.body) as CompoundStmt;
   // Tied once, on the body as printed: the rewrites only replace the stores they join.
   const reg = registerStores(b, opts.registerStores);
+  const made = new Set<AssignExpr>();
   let changed = false;
   for (let round = 0; round < 16; round++) {
     const tails = new Set<ASTNode>();
@@ -339,14 +435,14 @@ function rewriteFunction(fn: FunctionDecl, opts: RegisterStoreSelectOptions): Fu
     let hit: Hit | null = null;
     for (const n of traverseAST(b)) {
       if (n.kind !== NodeKind.CompoundStmt) continue;
-      hit = rewriteBlock((n as CompoundStmt).statements as Statement[], tails.has(n), isVoid, reg);
+      hit = rewriteBlock((n as CompoundStmt).statements as Statement[], tails.has(n), isVoid, reg, made);
       if (hit) break;
     }
     if (!hit) break;
     changed = true;
     opts.onSite?.({ function: fname, ...hit });
   }
-  return changed ? updateNode(fn, { body: b } as Partial<FunctionDecl>) : undefined;
+  return changed ? dropProvenArmCasts(updateNode(fn, { body: b } as Partial<FunctionDecl>), made, opts) : undefined;
 }
 
 export const registerStoreSelectPlugin: TransformPlugin = {

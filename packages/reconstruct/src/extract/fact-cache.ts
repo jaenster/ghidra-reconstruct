@@ -28,6 +28,7 @@ import type { HaltLineFacts } from './halt-lines.js';
 import type { StringOpFacts } from './string-ops.js';
 import type { JumpTableFacts } from './jump-tables.js';
 import type { ZeroStoreFacts } from './zero-stores.js';
+import type { ConstantStoreFacts } from './constant-stores.js';
 import type { MaskSiteFacts } from './mask-sites.js';
 import type { ZextSiteFacts } from './zext-sites.js';
 import type { SignedDivideFacts } from './signed-divides.js';
@@ -50,6 +51,7 @@ export interface CachedFacts {
   stringOps?: StringOpFacts;
   jumpTables?: JumpTableFacts;
   zeroStores?: ZeroStoreFacts;
+  constantStores?: ConstantStoreFacts;
   maskSites?: MaskSiteFacts;
   zextSites?: ZextSiteFacts;
   signedDivides?: SignedDivideFacts;
