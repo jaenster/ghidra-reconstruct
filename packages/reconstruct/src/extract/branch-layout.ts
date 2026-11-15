@@ -52,6 +52,7 @@
  */
 
 import type { GhidraConnection, ExtractedFunction } from '../types.js';
+import { ZERO_REGISTER_TEST_JAVA, EQUALITY_TEST_DELTA_JAVA } from './zero-register-test.js';
 
 export interface BranchLayoutFacts {
   /** Number of lines the decompiler printed (the decompile text has the same count). */
@@ -127,7 +128,7 @@ export interface EqualityTest {
   mnemonic: string;
   /** The instruction's first operand when it is a register, else `-`. */
   reg: string;
-  /** What a SUB/ADD/DEC/INC takes off the register (ADD/INC negated); absent for others. */
+  /** What SUB/ADD/DEC/INC takes off the register; includes a same-block proven zero register. */
   delta?: number;
   /** The constant the op compares against, as an unsigned `size`-byte value. */
   k?: number;
@@ -399,6 +400,7 @@ for (int ti = 0; ti < nThreads; ti++) {
           ghidra.app.decompiler.DecompileResults r = di.decompileFunction(fn, __TIMEOUT__, mon);
           if (r == null || r.getCCodeMarkup() == null) continue;
           long base = fn.getEntryPoint().getOffset();
+${ZERO_REGISTER_TEST_JAVA}
           StringBuilder ls = new StringBuilder(), is = new StringBuilder(), cs = new StringBuilder();
           int count = 0;
 ${IF_OPERANDS_DECL_JAVA}${EDGES_DECL_JAVA}          for (ghidra.app.decompiler.ClangLine l : ghidra.app.decompiler.component.DecompilerUtils.toLines(r.getCCodeMarkup())) {
@@ -417,11 +419,7 @@ ${IF_OPERANDS_TOKEN_JAVA}${EDGES_TOKEN_JAVA}              ghidra.program.model.a
                   String m = in.getMnemonicString();
                   String reg = "-", d = "-", k = "-";
                   if (in.getNumOperands() >= 1 && ghidra.program.model.lang.OperandType.isRegister(in.getOperandType(0)) && in.getRegister(0) != null) reg = in.getRegister(0).getName();
-                  if ((m.equals("SUB") || m.equals("ADD")) && in.getNumOperands() == 2 && ghidra.program.model.lang.OperandType.isScalar(in.getOperandType(1)) && in.getScalar(1) != null) {
-                    long v = in.getScalar(1).getSignedValue();
-                    d = Long.toString(m.equals("SUB") ? v : -v);
-                  } else if (m.equals("DEC")) d = "1";
-                  else if (m.equals("INC")) d = "-1";
+${EQUALITY_TEST_DELTA_JAVA}
                   for (int ii = 0; ii < op.getNumInputs(); ii++) if (op.getInput(ii).isConstant()) k = Long.toString(op.getInput(ii).getOffset());
                   long ioff = in.getAddress().getOffset() - base;
                   cs.append(cs.length() > 0 ? ";" : "").append(l.getLineNumber()).append(':').append(t.getText()).append(',').append(m).append(',').append(reg)

@@ -60,6 +60,7 @@ import { SHADOWED_GLOBALS_DECL_JAVA, SHADOWED_GLOBALS_LINE_DECL_JAVA, SHADOWED_G
 import { labelsOf, labelFlowItems, labelFlowScript, parseLabelFlow, LABEL_FLOW_SCRIPT } from './label-flow.js';
 import { FactCache, type CachedFacts, type FactEntry } from './fact-cache.js';
 import { createHash } from 'node:crypto';
+import { ZERO_REGISTER_TEST_JAVA, EQUALITY_TEST_DELTA_JAVA } from './zero-register-test.js';
 
 /**
  * Java, no imports. `__ITEMS__` is `;`-separated entries, decompiled on a small thread pool,
@@ -126,6 +127,7 @@ ${CALL_PUSHES_JAVA}
           ghidra.app.decompiler.DecompileResults r = di.decompileFunction(fn, __TIMEOUT__, mon);
           if (r == null || r.getCCodeMarkup() == null) { rows.put(a, "F\\t" + a + "\\t" + self + "\\tfail\\n"); continue; }
           long base = fn.getEntryPoint().getOffset();
+${ZERO_REGISTER_TEST_JAVA}
           String ctext = r.decompileCompleted() && r.getDecompiledFunction() != null ? r.getDecompiledFunction().getC() : null;
           java.util.List<ghidra.app.decompiler.ClangNode> toks = new java.util.ArrayList<>();
           r.getCCodeMarkup().flatten(toks);
@@ -283,11 +285,7 @@ ${IF_OPERANDS_TOKEN_JAVA}${EDGES_TOKEN_JAVA}${ACCESS_ORDER_TOKEN_JAVA}${STORE_BA
                     String m = in.getMnemonicString();
                     String reg = "-", d = "-", k = "-";
                     if (in.getNumOperands() >= 1 && ghidra.program.model.lang.OperandType.isRegister(in.getOperandType(0)) && in.getRegister(0) != null) reg = in.getRegister(0).getName();
-                    if ((m.equals("SUB") || m.equals("ADD")) && in.getNumOperands() == 2 && ghidra.program.model.lang.OperandType.isScalar(in.getOperandType(1)) && in.getScalar(1) != null) {
-                      long v = in.getScalar(1).getSignedValue();
-                      d = Long.toString(m.equals("SUB") ? v : -v);
-                    } else if (m.equals("DEC")) d = "1";
-                    else if (m.equals("INC")) d = "-1";
+${EQUALITY_TEST_DELTA_JAVA}
                     for (int ii = 0; ii < op.getNumInputs(); ii++) if (op.getInput(ii).isConstant()) k = Long.toString(op.getInput(ii).getOffset());
                     long ioff = in.getAddress().getOffset() - base;
                     es.append(es.length() > 0 ? ";" : "").append(l.getLineNumber()).append(':').append(t.getText()).append(',').append(m).append(',').append(reg)

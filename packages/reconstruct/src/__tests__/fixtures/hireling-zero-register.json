@@ -1,0 +1,806 @@
+{
+  "source": "c10da2561c82f135a9dd1242a6a6d70ded175b08",
+  "generatorMain": "ece9b518720e96393e8db5ab3cb5614e20efa1cc",
+  "ghidraVersion": 2105,
+  "types": [
+    {
+      "name": "eD2GSGameType",
+      "category": "/",
+      "size": 4,
+      "description": "",
+      "alignment": 4,
+      "type": "enum",
+      "fields": null,
+      "values": [
+        {
+          "name": "GAMETYPE_SINGLEPLAYER",
+          "value": 0
+        },
+        {
+          "name": "GAMETYPE_SINGLEPLAYER_UNCAPPED",
+          "value": 1
+        },
+        {
+          "name": "GAMETYPE_BNET_BETA",
+          "value": 2
+        },
+        {
+          "name": "GAMETYPE_BNET",
+          "value": 3
+        },
+        {
+          "name": "GAMETYPE_BNET_INTERNAL",
+          "value": 4
+        },
+        {
+          "name": "GAMETYPE_BNET_UNUSED",
+          "value": 5
+        },
+        {
+          "name": "GAMETYPE_OBNET_HOST",
+          "value": 6
+        },
+        {
+          "name": "GAMETYPE_OBNET_JOIN",
+          "value": 7
+        },
+        {
+          "name": "GAMETYPE_LAN_HOST",
+          "value": 8
+        },
+        {
+          "name": "GAMETYPE_LAN_JOIN",
+          "value": 9
+        },
+        {
+          "name": "GAMETYPE_COUNT",
+          "value": 10
+        }
+      ],
+      "underlyingType": null,
+      "returnType": null,
+      "parameters": null,
+      "callingConvention": null,
+      "effectiveCallingConvention": null,
+      "hasUnknownCallingConvention": null,
+      "hasVarArgs": false,
+      "enumValues": {
+        "GAMETYPE_SINGLEPLAYER": 0,
+        "GAMETYPE_SINGLEPLAYER_UNCAPPED": 1,
+        "GAMETYPE_BNET_BETA": 2,
+        "GAMETYPE_BNET": 3,
+        "GAMETYPE_BNET_INTERNAL": 4,
+        "GAMETYPE_BNET_UNUSED": 5,
+        "GAMETYPE_OBNET_HOST": 6,
+        "GAMETYPE_OBNET_JOIN": 7,
+        "GAMETYPE_LAN_HOST": 8,
+        "GAMETYPE_LAN_JOIN": 9,
+        "GAMETYPE_COUNT": 10
+      },
+      "kind": "ENUM"
+    },
+    {
+      "name": "eD2UIvars",
+      "category": "/Diablo2",
+      "size": 4,
+      "description": "",
+      "alignment": 4,
+      "type": "enum",
+      "fields": null,
+      "values": [
+        {
+          "name": "UI_GAME",
+          "value": 0
+        },
+        {
+          "name": "UI_INVENTORY",
+          "value": 1
+        },
+        {
+          "name": "UI_STATSCREEN",
+          "value": 2
+        },
+        {
+          "name": "UI_SKILLSELECT",
+          "value": 3
+        },
+        {
+          "name": "UI_SKILLTREE",
+          "value": 4
+        },
+        {
+          "name": "UI_CHATBOX",
+          "value": 5
+        },
+        {
+          "name": "UI_NEWSTATS",
+          "value": 6
+        },
+        {
+          "name": "UI_NEWSKILLS",
+          "value": 7
+        },
+        {
+          "name": "UI_NPCMENU",
+          "value": 8
+        },
+        {
+          "name": "UI_ESCMENU",
+          "value": 9
+        },
+        {
+          "name": "UI_AUTOMAP",
+          "value": 10
+        },
+        {
+          "name": "UI_CONFIG",
+          "value": 11
+        },
+        {
+          "name": "UI_NPCSHOP",
+          "value": 12
+        },
+        {
+          "name": "UI_HOLDALT",
+          "value": 13
+        },
+        {
+          "name": "UI_ANVIL",
+          "value": 14
+        },
+        {
+          "name": "UI_QUESTSCREEN",
+          "value": 15
+        },
+        {
+          "name": "UI_QUESTSCROLL",
+          "value": 16
+        },
+        {
+          "name": "UI_QUESTLOG",
+          "value": 17
+        },
+        {
+          "name": "UI_NODRAW",
+          "value": 18
+        },
+        {
+          "name": "UI_HIREABLES",
+          "value": 19
+        },
+        {
+          "name": "UI_WAYPOINT",
+          "value": 20
+        },
+        {
+          "name": "UI_MINIPANEL",
+          "value": 21
+        },
+        {
+          "name": "UI_PARTYSCREEN",
+          "value": 22
+        },
+        {
+          "name": "UI_MPTRADE",
+          "value": 23
+        },
+        {
+          "name": "UI_MSGLOG",
+          "value": 24
+        },
+        {
+          "name": "UI_STASH",
+          "value": 25
+        },
+        {
+          "name": "UI_CUBE",
+          "value": 26
+        },
+        {
+          "name": "UI_STEEGSTONE",
+          "value": 27
+        },
+        {
+          "name": "UI_GUILDVAULT",
+          "value": 28
+        },
+        {
+          "name": "UI_0x1D",
+          "value": 29
+        },
+        {
+          "name": "UI_BELTROWS",
+          "value": 31
+        },
+        {
+          "name": "UI_0x20",
+          "value": 32
+        },
+        {
+          "name": "UI_HELPSCREEN",
+          "value": 33
+        },
+        {
+          "name": "UI_HELPSCREENBTN",
+          "value": 34
+        },
+        {
+          "name": "UI_HIREICONS",
+          "value": 35
+        },
+        {
+          "name": "UI_MERCINV",
+          "value": 36
+        },
+        {
+          "name": "UI_RECIPESCROLL",
+          "value": 37
+        }
+      ],
+      "underlyingType": null,
+      "returnType": null,
+      "parameters": null,
+      "callingConvention": null,
+      "effectiveCallingConvention": null,
+      "hasUnknownCallingConvention": null,
+      "hasVarArgs": false,
+      "enumValues": {
+        "UI_GAME": 0,
+        "UI_INVENTORY": 1,
+        "UI_STATSCREEN": 2,
+        "UI_SKILLSELECT": 3,
+        "UI_SKILLTREE": 4,
+        "UI_CHATBOX": 5,
+        "UI_NEWSTATS": 6,
+        "UI_NEWSKILLS": 7,
+        "UI_NPCMENU": 8,
+        "UI_ESCMENU": 9,
+        "UI_AUTOMAP": 10,
+        "UI_CONFIG": 11,
+        "UI_NPCSHOP": 12,
+        "UI_HOLDALT": 13,
+        "UI_ANVIL": 14,
+        "UI_QUESTSCREEN": 15,
+        "UI_QUESTSCROLL": 16,
+        "UI_QUESTLOG": 17,
+        "UI_NODRAW": 18,
+        "UI_HIREABLES": 19,
+        "UI_WAYPOINT": 20,
+        "UI_MINIPANEL": 21,
+        "UI_PARTYSCREEN": 22,
+        "UI_MPTRADE": 23,
+        "UI_MSGLOG": 24,
+        "UI_STASH": 25,
+        "UI_CUBE": 26,
+        "UI_STEEGSTONE": 27,
+        "UI_GUILDVAULT": 28,
+        "UI_0x1D": 29,
+        "UI_BELTROWS": 31,
+        "UI_0x20": 32,
+        "UI_HELPSCREEN": 33,
+        "UI_HELPSCREENBTN": 34,
+        "UI_HIREICONS": 35,
+        "UI_MERCINV": 36,
+        "UI_RECIPESCROLL": 37
+      },
+      "kind": "ENUM"
+    },
+    {
+      "name": "eD2UIvarsSetType",
+      "category": "/Diablo2",
+      "size": 4,
+      "description": "",
+      "alignment": 4,
+      "type": "enum",
+      "fields": null,
+      "values": [
+        {
+          "name": "UI_SET",
+          "value": 0
+        },
+        {
+          "name": "UI_RESET",
+          "value": 1
+        },
+        {
+          "name": "UI_TOGGLE",
+          "value": 2
+        }
+      ],
+      "underlyingType": null,
+      "returnType": null,
+      "parameters": null,
+      "callingConvention": null,
+      "effectiveCallingConvention": null,
+      "hasUnknownCallingConvention": null,
+      "hasVarArgs": false,
+      "enumValues": {
+        "UI_SET": 0,
+        "UI_RESET": 1,
+        "UI_TOGGLE": 2
+      },
+      "kind": "ENUM"
+    }
+  ],
+  "options": {
+    "outputDir": "./out",
+    "format": "cpp",
+    "organization": "namespace",
+    "generateCMake": false,
+    "generateSourceMaps": false,
+    "transformPreset": "full",
+    "includeAddressComments": false,
+    "promoteStaticGlobals": false
+  },
+  "tables": {
+    "functionReturnTypes": {
+      "CLIENT_GetD2GSGameType": "eD2GSGameType",
+      "D2Client::GAME::Game::CLIENT_GetD2GSGameType": "eD2GSGameType",
+      "SetUIFlag": "DWORD",
+      "D2Client::UI::ui::SetUIFlag": "DWORD"
+    },
+    "functionParamTypes": {
+      "CLIENT_GetD2GSGameType": [],
+      "D2Client::GAME::Game::CLIENT_GetD2GSGameType": [],
+      "SetUIFlag": [
+        "eD2UIvars",
+        "eD2UIvarsSetType",
+        "DWORD"
+      ],
+      "D2Client::UI::ui::SetUIFlag": [
+        "eD2UIvars",
+        "eD2UIvarsSetType",
+        "DWORD"
+      ]
+    },
+    "globalTypes": {
+      "gnHireDisplayMode": "uint32_t",
+      "gnHireIconHoverIndex": "uint32_t"
+    },
+    "enumTypes": [
+      "eD2GSGameType",
+      "eD2UIvars",
+      "eD2UIvarsSetType"
+    ],
+    "enumValues": {
+      "GAMETYPE_SINGLEPLAYER": 0,
+      "GAMETYPE_SINGLEPLAYER_UNCAPPED": 1,
+      "GAMETYPE_BNET_BETA": 2,
+      "GAMETYPE_BNET": 3,
+      "GAMETYPE_BNET_INTERNAL": 4,
+      "GAMETYPE_BNET_UNUSED": 5,
+      "GAMETYPE_OBNET_HOST": 6,
+      "GAMETYPE_OBNET_JOIN": 7,
+      "GAMETYPE_LAN_HOST": 8,
+      "GAMETYPE_LAN_JOIN": 9,
+      "GAMETYPE_COUNT": 10,
+      "UI_GAME": 0,
+      "UI_INVENTORY": 1,
+      "UI_STATSCREEN": 2,
+      "UI_SKILLSELECT": 3,
+      "UI_SKILLTREE": 4,
+      "UI_CHATBOX": 5,
+      "UI_NEWSTATS": 6,
+      "UI_NEWSKILLS": 7,
+      "UI_NPCMENU": 8,
+      "UI_ESCMENU": 9,
+      "UI_AUTOMAP": 10,
+      "UI_CONFIG": 11,
+      "UI_NPCSHOP": 12,
+      "UI_HOLDALT": 13,
+      "UI_ANVIL": 14,
+      "UI_QUESTSCREEN": 15,
+      "UI_QUESTSCROLL": 16,
+      "UI_QUESTLOG": 17,
+      "UI_NODRAW": 18,
+      "UI_HIREABLES": 19,
+      "UI_WAYPOINT": 20,
+      "UI_MINIPANEL": 21,
+      "UI_PARTYSCREEN": 22,
+      "UI_MPTRADE": 23,
+      "UI_MSGLOG": 24,
+      "UI_STASH": 25,
+      "UI_CUBE": 26,
+      "UI_STEEGSTONE": 27,
+      "UI_GUILDVAULT": 28,
+      "UI_0x1D": 29,
+      "UI_BELTROWS": 31,
+      "UI_0x20": 32,
+      "UI_HELPSCREEN": 33,
+      "UI_HELPSCREENBTN": 34,
+      "UI_HIREICONS": 35,
+      "UI_MERCINV": 36,
+      "UI_RECIPESCROLL": 37,
+      "UI_SET": 0,
+      "UI_RESET": 1,
+      "UI_TOGGLE": 2
+    },
+    "enumConstantTypes": {
+      "GAMETYPE_SINGLEPLAYER": "eD2GSGameType",
+      "GAMETYPE_SINGLEPLAYER_UNCAPPED": "eD2GSGameType",
+      "GAMETYPE_BNET_BETA": "eD2GSGameType",
+      "GAMETYPE_BNET": "eD2GSGameType",
+      "GAMETYPE_BNET_INTERNAL": "eD2GSGameType",
+      "GAMETYPE_BNET_UNUSED": "eD2GSGameType",
+      "GAMETYPE_OBNET_HOST": "eD2GSGameType",
+      "GAMETYPE_OBNET_JOIN": "eD2GSGameType",
+      "GAMETYPE_LAN_HOST": "eD2GSGameType",
+      "GAMETYPE_LAN_JOIN": "eD2GSGameType",
+      "GAMETYPE_COUNT": "eD2GSGameType",
+      "UI_GAME": "eD2UIvars",
+      "UI_INVENTORY": "eD2UIvars",
+      "UI_STATSCREEN": "eD2UIvars",
+      "UI_SKILLSELECT": "eD2UIvars",
+      "UI_SKILLTREE": "eD2UIvars",
+      "UI_CHATBOX": "eD2UIvars",
+      "UI_NEWSTATS": "eD2UIvars",
+      "UI_NEWSKILLS": "eD2UIvars",
+      "UI_NPCMENU": "eD2UIvars",
+      "UI_ESCMENU": "eD2UIvars",
+      "UI_AUTOMAP": "eD2UIvars",
+      "UI_CONFIG": "eD2UIvars",
+      "UI_NPCSHOP": "eD2UIvars",
+      "UI_HOLDALT": "eD2UIvars",
+      "UI_ANVIL": "eD2UIvars",
+      "UI_QUESTSCREEN": "eD2UIvars",
+      "UI_QUESTSCROLL": "eD2UIvars",
+      "UI_QUESTLOG": "eD2UIvars",
+      "UI_NODRAW": "eD2UIvars",
+      "UI_HIREABLES": "eD2UIvars",
+      "UI_WAYPOINT": "eD2UIvars",
+      "UI_MINIPANEL": "eD2UIvars",
+      "UI_PARTYSCREEN": "eD2UIvars",
+      "UI_MPTRADE": "eD2UIvars",
+      "UI_MSGLOG": "eD2UIvars",
+      "UI_STASH": "eD2UIvars",
+      "UI_CUBE": "eD2UIvars",
+      "UI_STEEGSTONE": "eD2UIvars",
+      "UI_GUILDVAULT": "eD2UIvars",
+      "UI_0x1D": "eD2UIvars",
+      "UI_BELTROWS": "eD2UIvars",
+      "UI_0x20": "eD2UIvars",
+      "UI_HELPSCREEN": "eD2UIvars",
+      "UI_HELPSCREENBTN": "eD2UIvars",
+      "UI_HIREICONS": "eD2UIvars",
+      "UI_MERCINV": "eD2UIvars",
+      "UI_RECIPESCROLL": "eD2UIvars",
+      "UI_SET": "eD2UIvarsSetType",
+      "UI_RESET": "eD2UIvarsSetType",
+      "UI_TOGGLE": "eD2UIvarsSetType"
+    },
+    "typedefTargets": {
+      "DWORD": "unsigned int"
+    }
+  },
+  "fn": {
+    "name": "UI_ToggleHirelingIconsVisibility",
+    "address": "00493840",
+    "entryPoint": "00493840",
+    "signature": "void UI_ToggleHirelingIconsVisibility(void)",
+    "returnType": "void",
+    "callingConvention": "__stdcall",
+    "size": 158,
+    "isThunk": false,
+    "isExternal": false,
+    "hasVarArgs": false,
+    "namespace": "D2Client::UI::Hireables",
+    "comment": "@function UI_ToggleHirelingIconsVisibility\n@address Game.exe.ram:00493840\n@date 2026.06.06\n@calling __stdcall\n@description Diablo 2 1.14d reverse team\nhttps://blizzhackers.dev",
+    "sourceFile": null,
+    "sourceLine": null,
+    "sourceInfo": null,
+    "parameters": [],
+    "localVariables": [
+      {
+        "name": "eGameType",
+        "dataType": "undefined4",
+        "size": 4,
+        "storage": "EAX:4",
+        "stackOffset": null,
+        "resolvedType": "eD2GSGameType"
+      }
+    ],
+    "tags": null,
+    "decompiled": "\n/* @function UI_ToggleHirelingIconsVisibility\n   @address Game.exe.ram:00493840\n   @date 2026.06.06\n   @calling __stdcall\n   @description Diablo 2 1.14d reverse team\n   https://blizzhackers.dev */\n\nvoid D2Client::UI::Hireables::UI_ToggleHirelingIconsVisibility(void)\n\n{\n  eD2GSGameType eGameType;\n  \n  if (gnHireDisplayMode == 0) {\n    eGameType = D2Client::GAME::Game::CLIENT_GetD2GSGameType();\n    if (eGameType == GAMETYPE_SINGLEPLAYER) {\n      gnHireDisplayMode = 2;\n      gnHireIconHoverIndex = 0;\n      D2Client::UI::ui::SetUIFlag(UI_HIREICONS,UI_RESET,0);\n      return;\n    }\n    gnHireDisplayMode = 1;\n    D2Client::UI::ui::SetUIFlag(UI_HIREICONS,UI_SET,0);\n    return;\n  }\n  if (gnHireDisplayMode != 1) {\n    gnHireDisplayMode = 0;\n    D2Client::UI::ui::SetUIFlag(UI_HIREICONS,UI_SET,0);\n    return;\n  }\n  eGameType = D2Client::GAME::Game::CLIENT_GetD2GSGameType();\n  if (eGameType == GAMETYPE_SINGLEPLAYER) {\n    gnHireDisplayMode = 0;\n    D2Client::UI::ui::SetUIFlag(UI_HIREICONS,UI_SET,0);\n    return;\n  }\n  gnHireDisplayMode = 2;\n  gnHireIconHoverIndex = 0;\n  D2Client::UI::ui::SetUIFlag(UI_HIREICONS,UI_RESET,0);\n  return;\n}\n\n",
+    "branchLayout": {
+      "lineCount": 42,
+      "ifs": [
+        [
+          14,
+          10
+        ],
+        [
+          16,
+          101
+        ],
+        [
+          26,
+          15
+        ],
+        [
+          32,
+          49
+        ]
+      ],
+      "lines": [
+        [
+          15,
+          [
+            94
+          ]
+        ],
+        [
+          17,
+          [
+            110
+          ]
+        ],
+        [
+          18,
+          [
+            120
+          ]
+        ],
+        [
+          19,
+          [
+            126
+          ]
+        ],
+        [
+          20,
+          [
+            132
+          ]
+        ],
+        [
+          22,
+          [
+            141
+          ]
+        ],
+        [
+          23,
+          [
+            151
+          ]
+        ],
+        [
+          24,
+          [
+            157
+          ]
+        ],
+        [
+          27,
+          [
+            23
+          ]
+        ],
+        [
+          28,
+          [
+            29
+          ]
+        ],
+        [
+          29,
+          [
+            35
+          ]
+        ],
+        [
+          16,
+          [
+            36
+          ]
+        ],
+        [
+          33,
+          [
+            53
+          ]
+        ],
+        [
+          34,
+          [
+            59
+          ]
+        ],
+        [
+          35,
+          [
+            65
+          ]
+        ],
+        [
+          37,
+          [
+            71
+          ]
+        ],
+        [
+          38,
+          [
+            81
+          ]
+        ],
+        [
+          39,
+          [
+            87
+          ]
+        ],
+        [
+          40,
+          [
+            93
+          ]
+        ]
+      ],
+      "tests": [
+        [
+          14,
+          {
+            "op": "==",
+            "mnemonic": "SUB",
+            "reg": "EAX",
+            "k": 0,
+            "size": 4,
+            "at": 8
+          }
+        ],
+        [
+          16,
+          {
+            "op": "==",
+            "mnemonic": "TEST",
+            "reg": "EAX",
+            "k": 0,
+            "size": 4,
+            "at": 99
+          }
+        ],
+        [
+          26,
+          {
+            "op": "!=",
+            "mnemonic": "SUB",
+            "reg": "EAX",
+            "delta": 1,
+            "k": 1,
+            "size": 4,
+            "at": 12
+          }
+        ],
+        [
+          32,
+          {
+            "op": "==",
+            "mnemonic": "TEST",
+            "reg": "EAX",
+            "k": 0,
+            "size": 4,
+            "at": 41
+          }
+        ]
+      ],
+      "edges": [
+        {
+          "line": 14,
+          "ord": 0,
+          "keyword": "if",
+          "jcc": 10,
+          "target": 94,
+          "fall": 12,
+          "fallLines": [
+            26
+          ],
+          "takenLines": [
+            15
+          ],
+          "cc": "JZ"
+        },
+        {
+          "line": 16,
+          "ord": 0,
+          "keyword": "if",
+          "jcc": 101,
+          "target": 133,
+          "fall": 103,
+          "fallLines": [
+            17
+          ],
+          "takenLines": [
+            22
+          ],
+          "cc": "JNZ"
+        },
+        {
+          "line": 26,
+          "ord": 0,
+          "keyword": "if",
+          "jcc": 15,
+          "target": 36,
+          "fall": 17,
+          "fallLines": [
+            27
+          ],
+          "takenLines": [
+            16
+          ],
+          "cc": "JZ"
+        },
+        {
+          "line": 32,
+          "ord": 0,
+          "keyword": "if",
+          "jcc": 49,
+          "target": 66,
+          "fall": 51,
+          "fallLines": [
+            33
+          ],
+          "takenLines": [
+            37
+          ],
+          "cc": "JNZ"
+        }
+      ],
+      "returns": [
+        {
+          "start": 34,
+          "ret": 35,
+          "fallsIn": true,
+          "jumpsIn": [],
+          "insns": [
+            "POP/ESI",
+            "RET"
+          ]
+        },
+        {
+          "start": 64,
+          "ret": 65,
+          "fallsIn": true,
+          "jumpsIn": [],
+          "insns": [
+            "POP/ESI",
+            "RET"
+          ]
+        },
+        {
+          "start": 92,
+          "ret": 93,
+          "fallsIn": true,
+          "jumpsIn": [],
+          "insns": [
+            "POP/ESI",
+            "RET"
+          ]
+        },
+        {
+          "start": 131,
+          "ret": 132,
+          "fallsIn": true,
+          "jumpsIn": [],
+          "insns": [
+            "POP/ESI",
+            "RET"
+          ]
+        },
+        {
+          "start": 156,
+          "ret": 157,
+          "fallsIn": true,
+          "jumpsIn": [],
+          "insns": [
+            "POP/ESI",
+            "RET"
+          ]
+        }
+      ]
+    }
+  },
+  "baseline": "// 1.14d: 00493840\nvoid __stdcall UI_ToggleHirelingIconsVisibility() {\n    eD2GSGameType eGameType;\n    if (gnHireDisplayMode) {\n      switch (gnHireDisplayMode) {\n        case 1:\n          {\n            eGameType = D2Client::GAME::Game::CLIENT_GetD2GSGameType();\n            if (eGameType == GAMETYPE_SINGLEPLAYER) {\n              gnHireDisplayMode = 0;\n              D2Client::UI::ui::SetUIFlag(UI_HIREICONS, UI_SET, 0);\n              return;\n            }\n\n            gnHireDisplayMode = 2;\n            gnHireIconHoverIndex = 0;\n            D2Client::UI::ui::SetUIFlag(UI_HIREICONS, UI_RESET, 0);\n            return;\n          }\n        default:\n          {\n            gnHireDisplayMode = 0;\n            D2Client::UI::ui::SetUIFlag(UI_HIREICONS, UI_SET, 0);\n            return;\n          }\n      }\n\n      return;\n    }\n\n    eGameType = D2Client::GAME::Game::CLIENT_GetD2GSGameType();\n    if (eGameType == GAMETYPE_SINGLEPLAYER) {\n      gnHireDisplayMode = 2;\n      gnHireIconHoverIndex = 0;\n      D2Client::UI::ui::SetUIFlag(UI_HIREICONS, UI_RESET, 0);\n      return;\n    }\n\n    gnHireDisplayMode = 1;\n    D2Client::UI::ui::SetUIFlag(UI_HIREICONS, UI_SET, 0);\n    return;\n}",
+  "candidate": "// 1.14d: 00493840\nvoid __stdcall UI_ToggleHirelingIconsVisibility() {\n    eD2GSGameType eGameType;\n    switch (gnHireDisplayMode) {\n      case 1:\n        {\n          eGameType = D2Client::GAME::Game::CLIENT_GetD2GSGameType();\n          if (eGameType == GAMETYPE_SINGLEPLAYER) {\n            gnHireDisplayMode = 0;\n            D2Client::UI::ui::SetUIFlag(UI_HIREICONS, UI_SET, 0);\n            return;\n          }\n\n          gnHireDisplayMode = 2;\n          gnHireIconHoverIndex = 0;\n          D2Client::UI::ui::SetUIFlag(UI_HIREICONS, UI_RESET, 0);\n          return;\n        }\n      case 0:\n        {\n          eGameType = D2Client::GAME::Game::CLIENT_GetD2GSGameType();\n          if (eGameType == GAMETYPE_SINGLEPLAYER) {\n            gnHireDisplayMode = 2;\n            gnHireIconHoverIndex = 0;\n            D2Client::UI::ui::SetUIFlag(UI_HIREICONS, UI_RESET, 0);\n            return;\n          }\n\n          gnHireDisplayMode = 1;\n          D2Client::UI::ui::SetUIFlag(UI_HIREICONS, UI_SET, 0);\n          return;\n        }\n      default:\n        {\n          gnHireDisplayMode = 0;\n          D2Client::UI::ui::SetUIFlag(UI_HIREICONS, UI_SET, 0);\n          return;\n        }\n    }\n}",
+  "scope": "Source c10da256/v2105. Native-attested branch context, not owning extraction. Candidate differs only in the first SUB delta, proved by XOR ESI,ESI at00493846. Zero delta enables existing switch reconstruction, no new source form."
+}
