@@ -1,0 +1,482 @@
+{
+  "provenance": {
+    "source": "c10da2561c82f135a9dd1242a6a6d70ded175b08",
+    "ghidraVersion": 2105,
+    "generatorMain": "ece9b518720e96393e8db5ab3cb5614e20efa1cc",
+    "scope": "Fresh complete live model with resolved native parameter/local storage and all eleven direct callee signatures. Ten 2-byte zero-store facts and one signed comparison descriptor manually attested to fresh high P-code and native instructions. Local diagnostic tag only, not submitted to the database. No owning extraction."
+  },
+  "function": {
+    "name": "INV_FormatDurabilityText",
+    "address": "00484e90",
+    "entryPoint": "00484e90",
+    "signature": "void INV_FormatDurabilityText(WCHAR * wszText, D2UnitStrc * pUnit)",
+    "returnType": "void",
+    "callingConvention": "__cdecl",
+    "size": 340,
+    "isThunk": false,
+    "isExternal": false,
+    "hasVarArgs": false,
+    "namespace": "D2Client::UI::Inv",
+    "comment": "@function INV_FormatDurabilityText\n@address Game.exe.ram:00484e90\n@date 2026.09.05\n@params\n  wszText: ESI:4 (WCHAR *)\n  pUnit: EBX:4 (D2UnitStrc *)\n@description Diablo 2 1.14d reverse team\nhttps://blizzhackers.dev\n\nFunction uses custom registers for function arguments!\n[WCHAR * wszText@ESI:4]\n[D2UnitStrc * pUnit@EBX:4]",
+    "sourceFile": null,
+    "sourceLine": null,
+    "sourceInfo": null,
+    "parameters": [
+      {
+        "name": "wszText",
+        "dataType": "WCHAR *",
+        "size": 4,
+        "ordinal": 0,
+        "storage": "ESI:4",
+        "stackOffset": null,
+        "resolvedType": null
+      },
+      {
+        "name": "pUnit",
+        "dataType": "D2UnitStrc *",
+        "size": 4,
+        "ordinal": 1,
+        "storage": "EBX:4",
+        "stackOffset": null,
+        "resolvedType": null
+      }
+    ],
+    "localVariables": [
+      {
+        "name": "extraout_var",
+        "dataType": "undefined3",
+        "size": 3,
+        "storage": "register:00000001:3",
+        "stackOffset": null,
+        "resolvedType": null
+      },
+      {
+        "name": "pwColorPrefix",
+        "dataType": "WCHAR *",
+        "size": 4,
+        "storage": "EAX:4",
+        "stackOffset": null,
+        "resolvedType": "WCHAR *"
+      },
+      {
+        "name": "pwColorSuffix",
+        "dataType": "WCHAR *",
+        "size": 4,
+        "storage": "EAX:4",
+        "stackOffset": null,
+        "resolvedType": "WCHAR *"
+      },
+      {
+        "name": "bHasDurability",
+        "dataType": "uint32_t",
+        "size": 4,
+        "storage": "EAX:4",
+        "stackOffset": null,
+        "resolvedType": "uint32_t"
+      },
+      {
+        "name": "nDurabilityBonus",
+        "dataType": "int32_t",
+        "size": 4,
+        "storage": "EAX:4",
+        "stackOffset": null,
+        "resolvedType": "int32_t"
+      },
+      {
+        "name": "bIsThrowable",
+        "dataType": "undefined1",
+        "size": 1,
+        "storage": "AL:1",
+        "stackOffset": null,
+        "resolvedType": null
+      },
+      {
+        "name": "pwLabelStr",
+        "dataType": "WCHAR *",
+        "size": 4,
+        "storage": "EAX:4",
+        "stackOffset": null,
+        "resolvedType": "WCHAR *"
+      },
+      {
+        "name": "nCurDurability",
+        "dataType": "int",
+        "size": 4,
+        "storage": "EAX:4",
+        "stackOffset": null,
+        "resolvedType": "int"
+      },
+      {
+        "name": "nMaxDurability",
+        "dataType": "WCHAR *",
+        "size": 4,
+        "storage": "EAX:4",
+        "stackOffset": null,
+        "resolvedType": "WCHAR *"
+      },
+      {
+        "name": "bHasDurabilityBonus",
+        "dataType": "int32_t",
+        "size": 4,
+        "storage": "Stack[-0x8]:4",
+        "stackOffset": -8,
+        "resolvedType": "int32_t"
+      },
+      {
+        "name": "pwDurabilitySuffix",
+        "dataType": "WCHAR *",
+        "size": 4,
+        "storage": "Stack[-0xc]:4",
+        "stackOffset": -12,
+        "resolvedType": "WCHAR *"
+      },
+      {
+        "name": "szNumBuffer",
+        "dataType": "char[12]",
+        "size": 12,
+        "storage": "Stack[-0x18]:12",
+        "stackOffset": -24,
+        "resolvedType": "char[12]"
+      },
+      {
+        "name": "local_1a",
+        "dataType": "undefined2",
+        "size": 2,
+        "storage": "Stack[-0x1a]:2",
+        "stackOffset": -26,
+        "resolvedType": null
+      },
+      {
+        "name": "local_1c",
+        "dataType": "undefined2",
+        "size": 2,
+        "storage": "Stack[-0x1c]:2",
+        "stackOffset": -28,
+        "resolvedType": null
+      },
+      {
+        "name": "local_1e",
+        "dataType": "undefined2",
+        "size": 2,
+        "storage": "Stack[-0x1e]:2",
+        "stackOffset": -30,
+        "resolvedType": null
+      },
+      {
+        "name": "local_20",
+        "dataType": "undefined2",
+        "size": 2,
+        "storage": "Stack[-0x20]:2",
+        "stackOffset": -32,
+        "resolvedType": null
+      },
+      {
+        "name": "local_22",
+        "dataType": "undefined2",
+        "size": 2,
+        "storage": "Stack[-0x22]:2",
+        "stackOffset": -34,
+        "resolvedType": null
+      },
+      {
+        "name": "local_24",
+        "dataType": "undefined2",
+        "size": 2,
+        "storage": "Stack[-0x24]:2",
+        "stackOffset": -36,
+        "resolvedType": null
+      },
+      {
+        "name": "local_26",
+        "dataType": "undefined2",
+        "size": 2,
+        "storage": "Stack[-0x26]:2",
+        "stackOffset": -38,
+        "resolvedType": null
+      },
+      {
+        "name": "local_28",
+        "dataType": "undefined2",
+        "size": 2,
+        "storage": "Stack[-0x28]:2",
+        "stackOffset": -40,
+        "resolvedType": null
+      },
+      {
+        "name": "local_2a",
+        "dataType": "undefined2",
+        "size": 2,
+        "storage": "Stack[-0x2a]:2",
+        "stackOffset": -42,
+        "resolvedType": null
+      },
+      {
+        "name": "wszNumBuf",
+        "dataType": "WCHAR[10]",
+        "size": 2,
+        "storage": "Stack[-0x2c]:2",
+        "stackOffset": -44,
+        "resolvedType": "WCHAR[10]"
+      }
+    ],
+    "tags": [
+      {
+        "type": "llm-artifact-fix"
+      },
+      {
+        "type": "callee-signature-changed"
+      }
+    ],
+    "decompiled": "\n/* WARNING: Enum \"eCollisionFlags\": Some values do not have unique names */\n/* WARNING: Enum \"eD2TimerType\": Some values do not have unique names */\n/* WARNING: Enum \"eD2TimerTypeDWORD\": Some values do not have unique names */\n/* @function INV_FormatDurabilityText\n   @address Game.exe.ram:00484e90\n   @date 2026.09.05\n   @params\n     wszText: ESI:4 (WCHAR *)\n     pUnit: EBX:4 (D2UnitStrc *)\n   @description Diablo 2 1.14d reverse team\n   https://blizzhackers.dev\n   \n   Function uses custom registers for function arguments!\n   [WCHAR * wszText@ESI:4]\n   [D2UnitStrc * pUnit@EBX:4] */\n\nvoid __cdecl D2Client::UI::Inv::INV_FormatDurabilityText(WCHAR *wszText,D2UnitStrc *pUnit)\n\n{\n  WCHAR *pwColorPrefix;\n  uint32_t bHasDurability;\n  int32_t nDurabilityBonus;\n  WCHAR *pwLabelStr;\n  int nCurDurability;\n  WCHAR wszNumBuf [10];\n  char szNumBuffer [12];\n  WCHAR *pwDurabilitySuffix;\n  int32_t bHasDurabilityBonus;\n  \n  wszNumBuf[0] = L'\\0';\n  wszNumBuf[1] = 0;\n  wszNumBuf[2] = 0;\n  wszNumBuf[3] = 0;\n  wszNumBuf[4] = 0;\n  wszNumBuf[5] = 0;\n  wszNumBuf[6] = 0;\n  wszNumBuf[7] = 0;\n  wszNumBuf[8] = 0;\n  wszNumBuf[9] = 0;\n  pwColorPrefix = D2Lang::StrTable::strtable::GetLocaleString(0xf9b);\n  pwDurabilitySuffix = D2Lang::StrTable::strtable::GetLocaleString(0xf9e);\n  bHasDurability = D2Common::ITEMS::Items::ITEM_CheckIfItemHasDurability(pUnit);\n  if (bHasDurability != 0) {\n    nDurabilityBonus = D2Common::Stats::StatsEx::STATLIST_GetMaxDurabilityFromUnit(pUnit);\n    if (0 < nDurabilityBonus) {\n      bHasDurabilityBonus = D2Common::ITEMS::Items::ITEM_GetTxtItemTypes_throwable(pUnit);\n      if (bHasDurabilityBonus == 0) {\n        nDurabilityBonus =\n             D2Common::Stats::StatsEx::STATLIST_GetStatBonusFromLists\n                       (pUnit,UNITSTAT_item_maxdurability_percent,0);\n        if (nDurabilityBonus != 0) {\n          bHasDurabilityBonus = 1;\n        }\n        pwLabelStr = D2Lang::StrTable::strtable::GetLocaleString(0xd81);\n        D2Lang::Unicode::UNISYS::STRING_CopyWideString(wszText,pwLabelStr);\n        nCurDurability =\n             D2Common::Stats::StatsEx::STATSEX_GetCurrentStat(pUnit,UNITSTAT_durability,0);\n        Storm::Source::SSTR::SStrPrintf(szNumBuffer,10,\"%i\",nCurDurability);\n        D2Lang::Unicode::UNISYS::AppendToBuffer(wszText,pwColorPrefix);\n        D2Lang::Unicode::UNISYS::STRING_CopyCharToWCharWithSetMaxSize(wszNumBuf,szNumBuffer,9);\n        D2Lang::Unicode::UNISYS::AppendToBuffer(wszText,wszNumBuf);\n        D2Lang::Unicode::UNISYS::AppendToBuffer(wszText,pwColorPrefix);\n        pwLabelStr = D2Lang::StrTable::strtable::GetLocaleString(0xd87);\n        D2Lang::Unicode::UNISYS::AppendToBuffer(wszText,pwLabelStr);\n        D2Lang::Unicode::UNISYS::AppendToBuffer(wszText,pwColorPrefix);\n        nDurabilityBonus = D2Common::Stats::StatsEx::STATLIST_GetMaxDurabilityFromUnit(pUnit);\n        Storm::Source::SSTR::SStrPrintf(szNumBuffer,10,\"%i\",nDurabilityBonus);\n        D2Lang::Unicode::UNISYS::STRING_CopyCharToWCharWithSetMaxSize(wszNumBuf,szNumBuffer,9);\n        if (bHasDurabilityBonus != 0) {\n          D2Client::UI::ui::AppendAsWideChar(wszNumBuf,3);\n        }\n        D2Lang::Unicode::UNISYS::AppendToBuffer(wszText,wszNumBuf);\n        D2Lang::Unicode::UNISYS::AppendToBuffer(wszText,pwDurabilitySuffix);\n      }\n    }\n  }\n  return;\n}\n\n",
+    "accessOrder": {
+      "lineCount": 80,
+      "args": [],
+      "stores": [
+        [
+          31,
+          [
+            {
+              "ord": 0,
+              "at": 14,
+              "size": 2,
+              "width": 2,
+              "half": null
+            }
+          ]
+        ],
+        [
+          32,
+          [
+            {
+              "ord": 0,
+              "at": 18,
+              "size": 2,
+              "width": 2,
+              "half": null
+            }
+          ]
+        ],
+        [
+          33,
+          [
+            {
+              "ord": 0,
+              "at": 22,
+              "size": 2,
+              "width": 2,
+              "half": null
+            }
+          ]
+        ],
+        [
+          34,
+          [
+            {
+              "ord": 0,
+              "at": 26,
+              "size": 2,
+              "width": 2,
+              "half": null
+            }
+          ]
+        ],
+        [
+          35,
+          [
+            {
+              "ord": 0,
+              "at": 30,
+              "size": 2,
+              "width": 2,
+              "half": null
+            }
+          ]
+        ],
+        [
+          36,
+          [
+            {
+              "ord": 0,
+              "at": 34,
+              "size": 2,
+              "width": 2,
+              "half": null
+            }
+          ]
+        ],
+        [
+          37,
+          [
+            {
+              "ord": 0,
+              "at": 38,
+              "size": 2,
+              "width": 2,
+              "half": null
+            }
+          ]
+        ],
+        [
+          38,
+          [
+            {
+              "ord": 0,
+              "at": 42,
+              "size": 2,
+              "width": 2,
+              "half": null
+            }
+          ]
+        ],
+        [
+          39,
+          [
+            {
+              "ord": 0,
+              "at": 46,
+              "size": 2,
+              "width": 2,
+              "half": null
+            }
+          ]
+        ],
+        [
+          40,
+          [
+            {
+              "ord": 0,
+              "at": 50,
+              "size": 2,
+              "width": 2,
+              "half": null
+            }
+          ]
+        ]
+      ]
+    },
+    "compareSites": "0\t!=\t-\n1\t<\tINT_SLESS\t4\t0\t0\tc:0\tv:nDurabilityBonus\t00484ef0\t00484ef0\tJLE\t00484eee\tTEST\t4\tr\tz\t0\t1\n2\t==\t-\n3\t!=\t-\n4\t!=\t-"
+  },
+  "tables": {
+    "functionReturnTypes": {
+      "SStrPrintf": "size_t",
+      "Storm::Source::SSTR::SStrPrintf": "size_t",
+      "AppendAsWideChar": "WCHAR *",
+      "D2Client::UI::ui::AppendAsWideChar": "WCHAR *",
+      "GetLocaleString": "WCHAR *",
+      "D2Lang::StrTable::strtable::GetLocaleString": "WCHAR *",
+      "AppendToBuffer": "wchar_t *",
+      "D2Lang::Unicode::UNISYS::AppendToBuffer": "wchar_t *",
+      "STRING_CopyWideString": "WCHAR *",
+      "D2Lang::Unicode::UNISYS::STRING_CopyWideString": "WCHAR *",
+      "STRING_CopyCharToWCharWithSetMaxSize": "WCHAR *32",
+      "D2Lang::Unicode::UNISYS::STRING_CopyCharToWCharWithSetMaxSize": "WCHAR *32",
+      "STATSEX_GetCurrentStat": "int",
+      "D2Common::Stats::StatsEx::STATSEX_GetCurrentStat": "int",
+      "STATLIST_GetStatBonusFromLists": "int32_t",
+      "D2Common::Stats::StatsEx::STATLIST_GetStatBonusFromLists": "int32_t",
+      "STATLIST_GetMaxDurabilityFromUnit": "int32_t",
+      "D2Common::Stats::StatsEx::STATLIST_GetMaxDurabilityFromUnit": "int32_t",
+      "ITEM_CheckIfItemHasDurability": "uint32_t",
+      "D2Common::ITEMS::Items::ITEM_CheckIfItemHasDurability": "uint32_t",
+      "ITEM_GetTxtItemTypes_throwable": "int32_t",
+      "D2Common::ITEMS::Items::ITEM_GetTxtItemTypes_throwable": "int32_t"
+    },
+    "functionParamTypes": {
+      "SStrPrintf": [
+        "char *",
+        "size_t",
+        "char *"
+      ],
+      "Storm::Source::SSTR::SStrPrintf": [
+        "char *",
+        "size_t",
+        "char *"
+      ],
+      "AppendAsWideChar": [
+        "WCHAR *",
+        "int"
+      ],
+      "D2Client::UI::ui::AppendAsWideChar": [
+        "WCHAR *",
+        "int"
+      ],
+      "GetLocaleString": [
+        "uint16_t"
+      ],
+      "D2Lang::StrTable::strtable::GetLocaleString": [
+        "uint16_t"
+      ],
+      "AppendToBuffer": [
+        "WCHAR *",
+        "WCHAR *"
+      ],
+      "D2Lang::Unicode::UNISYS::AppendToBuffer": [
+        "WCHAR *",
+        "WCHAR *"
+      ],
+      "STRING_CopyWideString": [
+        "WCHAR *",
+        "WCHAR *"
+      ],
+      "D2Lang::Unicode::UNISYS::STRING_CopyWideString": [
+        "WCHAR *",
+        "WCHAR *"
+      ],
+      "STRING_CopyCharToWCharWithSetMaxSize": [
+        "WCHAR *",
+        "char *",
+        "int32_t"
+      ],
+      "D2Lang::Unicode::UNISYS::STRING_CopyCharToWCharWithSetMaxSize": [
+        "WCHAR *",
+        "char *",
+        "int32_t"
+      ],
+      "STATSEX_GetCurrentStat": [
+        "D2UnitStrc *",
+        "eD2UnitStat",
+        "uint16_t"
+      ],
+      "D2Common::Stats::StatsEx::STATSEX_GetCurrentStat": [
+        "D2UnitStrc *",
+        "eD2UnitStat",
+        "uint16_t"
+      ],
+      "STATLIST_GetStatBonusFromLists": [
+        "D2UnitStrc *",
+        "eD2UnitStat",
+        "uint32_t"
+      ],
+      "D2Common::Stats::StatsEx::STATLIST_GetStatBonusFromLists": [
+        "D2UnitStrc *",
+        "eD2UnitStat",
+        "uint32_t"
+      ],
+      "STATLIST_GetMaxDurabilityFromUnit": [
+        "D2UnitStrc *"
+      ],
+      "D2Common::Stats::StatsEx::STATLIST_GetMaxDurabilityFromUnit": [
+        "D2UnitStrc *"
+      ],
+      "ITEM_CheckIfItemHasDurability": [
+        "D2UnitStrc *"
+      ],
+      "D2Common::ITEMS::Items::ITEM_CheckIfItemHasDurability": [
+        "D2UnitStrc *"
+      ],
+      "ITEM_GetTxtItemTypes_throwable": [
+        "D2UnitStrc *"
+      ],
+      "D2Common::ITEMS::Items::ITEM_GetTxtItemTypes_throwable": [
+        "D2UnitStrc *"
+      ]
+    },
+    "typedefTargets": {
+      "WCHAR": "uint16_t",
+      "BOOL": "int",
+      "uint": "unsigned int"
+    }
+  },
+  "baseline": "// 1.14d: 00484e90\nvoid INV_FormatDurabilityText(uint16_t * wszText, D2UnitStrc * pUnit) {\n    uint16_t wszNumBuf[10];\n    char szNumBuffer[12];\n    wszNumBuf[0] = L'\\0';\n    wszNumBuf[1] = 0;\n    wszNumBuf[2] = 0;\n    wszNumBuf[3] = 0;\n    wszNumBuf[4] = 0;\n    wszNumBuf[5] = 0;\n    wszNumBuf[6] = 0;\n    wszNumBuf[7] = 0;\n    wszNumBuf[8] = 0;\n    wszNumBuf[9] = 0;\n    uint16_t* pwColorPrefix = D2Lang::StrTable::strtable::GetLocaleString(0xf9b);\n    uint16_t* pwDurabilitySuffix = D2Lang::StrTable::strtable::GetLocaleString(0xf9e);\n    uint32_t bHasDurability = D2Common::ITEMS::Items::ITEM_CheckIfItemHasDurability(pUnit);\n    if (!bHasDurability) {\n      return;\n    }\n\n    int32_t nDurabilityBonus = D2Common::Stats::StatsEx::STATLIST_GetMaxDurabilityFromUnit(pUnit);\n    if (nDurabilityBonus <= 0) {\n      return;\n    }\n\n    int32_t bHasDurabilityBonus = D2Common::ITEMS::Items::ITEM_GetTxtItemTypes_throwable(pUnit);\n    if (bHasDurabilityBonus) {\n      return;\n    }\n\n    nDurabilityBonus = D2Common::Stats::StatsEx::STATLIST_GetStatBonusFromLists(pUnit, UNITSTAT_item_maxdurability_percent, 0);\n    if (nDurabilityBonus) {\n      bHasDurabilityBonus = 1;\n    }\n\n    uint16_t* pwLabelStr = D2Lang::StrTable::strtable::GetLocaleString(0xd81);\n    D2Lang::Unicode::UNISYS::STRING_CopyWideString(wszText, pwLabelStr);\n    int nCurDurability = D2Common::Stats::StatsEx::STATSEX_GetCurrentStat(pUnit, UNITSTAT_durability, 0);\n    Storm::Source::SSTR::SStrPrintf(szNumBuffer, 10, \"%i\", nCurDurability);\n    D2Lang::Unicode::UNISYS::AppendToBuffer(wszText, pwColorPrefix);\n    D2Lang::Unicode::UNISYS::STRING_CopyCharToWCharWithSetMaxSize(wszNumBuf, szNumBuffer, 9);\n    D2Lang::Unicode::UNISYS::AppendToBuffer(wszText, wszNumBuf);\n    D2Lang::Unicode::UNISYS::AppendToBuffer(wszText, pwColorPrefix);\n    pwLabelStr = D2Lang::StrTable::strtable::GetLocaleString(0xd87);\n    D2Lang::Unicode::UNISYS::AppendToBuffer(wszText, pwLabelStr);\n    D2Lang::Unicode::UNISYS::AppendToBuffer(wszText, pwColorPrefix);\n    nDurabilityBonus = D2Common::Stats::StatsEx::STATLIST_GetMaxDurabilityFromUnit(pUnit);\n    Storm::Source::SSTR::SStrPrintf(szNumBuffer, 10, \"%i\", nDurabilityBonus);\n    D2Lang::Unicode::UNISYS::STRING_CopyCharToWCharWithSetMaxSize(wszNumBuf, szNumBuffer, 9);\n    if (bHasDurabilityBonus) {\n      D2Client::UI::ui::AppendAsWideChar(wszNumBuf, 3);\n    }\n\n    D2Lang::Unicode::UNISYS::AppendToBuffer(wszText, wszNumBuf);\n    D2Lang::Unicode::UNISYS::AppendToBuffer(wszText, pwDurabilitySuffix);\n}",
+  "tag": "zerolife(bHasDurabilityBonus);ev=0000000000;bh=340-6d466482;dh=68716c45"
+}
