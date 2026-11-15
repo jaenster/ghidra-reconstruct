@@ -194,7 +194,7 @@ import { builtinTruthSite } from './truth-form-safety.js';
  *   decl(V,W)            the declaration of V without an initializer moves to just before
  *                        the declaration of W in its block; refused when a statement it
  *                        moves past names V.
- *   guardstore(V,N)      a typed scalar call-result store followed by an equality guard
+ *   guardstore(V,N)      a typed scalar call-result store followed by a pure equality or truth guard
  *                        returning a value uses a same-type temporary N in the test.
  *                        V is assigned from N before the original return and on the
  *                        passing path. V's storage identity and all later uses stay.
@@ -3127,19 +3127,25 @@ function doGuardstore(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'guardstore' }
     if (!store || store.operator !== '=' || !isId(unparen(store.left), f.name) || !g || g.kind !== NodeKind.IfStmt) continue;
     const guard = g as IfStmt, c = unparen(guard.condition), arm = stmtsOf(guard.thenBranch);
     if (guard.init || guard.isConstexpr || guard.elseBranch || arm.length !== 1 || arm[0].kind !== NodeKind.ReturnStmt || !(arm[0] as ReturnStmt).value) refuse('guard is not a plain single value return');
-    if (c.kind !== NodeKind.BinaryExpr || !['==', '!='].includes((c as BinaryExpr).operator)) refuse('guard is not equality');
-    const cmp = c as BinaryExpr;
-    const bound = isId(unparen(cmp.left), f.name) ? unparen(cmp.right) : isId(unparen(cmp.right), f.name) ? unparen(cmp.left) : undefined;
-    if (!bound) continue;
-    const enumName = calleeName(bound);
-    const literal = bound.kind === NodeKind.IntegerLiteral || (bound.kind === NodeKind.UnaryExpr && ['+', '-'].includes((bound as UnaryExpr).operator) && unparen((bound as UnaryExpr).operand).kind === NodeKind.IntegerLiteral);
-    if (!literal && !(enumName && !counts.has(enumName) && !counts.has(enumName.split('::').pop()!) && selectTables?.enumValues?.[enumName] !== undefined)) refuse('bound is not an unshadowed literal or enum constant');
+    const shadowed = (name: string): boolean => counts.has(name) || counts.has(name.split('::').pop()!)
+      || scopedLookup(selectTables?.globalTypes ?? {}, name, selectTables?.enclosingSegments ?? []) !== undefined
+      || scopedLookup(selectTables?.enclosingVarTypes ?? {}, name, selectTables?.enclosingSegments ?? []) !== undefined;
+    const truth = isId(c, f.name) || (c.kind === NodeKind.UnaryExpr && (c as UnaryExpr).operator === '!' && isId(unparen((c as UnaryExpr).operand), f.name));
+    if (!truth) {
+      if (c.kind !== NodeKind.BinaryExpr || !['==', '!='].includes((c as BinaryExpr).operator)) refuse('guard is not a pure equality or truth test');
+      const cmp = c as BinaryExpr;
+      const bound = isId(unparen(cmp.left), f.name) ? unparen(cmp.right) : isId(unparen(cmp.right), f.name) ? unparen(cmp.left) : undefined;
+      if (!bound) continue;
+      const enumName = calleeName(bound);
+      const literal = bound.kind === NodeKind.IntegerLiteral || (bound.kind === NodeKind.UnaryExpr && ['+', '-'].includes((bound as UnaryExpr).operator) && unparen((bound as UnaryExpr).operand).kind === NodeKind.IntegerLiteral);
+      if (!literal && !(enumName && !shadowed(enumName) && Number.isSafeInteger(selectTables?.enumValues?.[enumName]))) refuse('bound is not an unshadowed literal or enum constant');
+    }
     const type = locals.get(f.name), r = type && RANGE[key(type)];
     if (!type || !r || (r !== I32 && r !== U32)) refuse('destination is not a canonical nonvolatile 32-bit local or parameter');
     const rhs = unparen(store.right);
     if (rhs.kind !== NodeKind.CallExpr) refuse('value is not a direct call');
     const call = rhs as CallExpr, callee = calleeName(call.callee);
-    if (!callee || counts.has(callee) || counts.has(callee.split('::').pop()!)) refuse('callee is indirect or shadowed');
+    if (!callee || shadowed(callee)) refuse('callee is indirect or shadowed');
     const ret = scopedLookup(selectTables?.functionReturnTypes ?? {}, callee, selectTables?.enclosingSegments ?? []);
     const params = scopedLookup(selectTables?.functionParamTypes ?? {}, callee, selectTables?.enclosingSegments ?? []);
     if (!ret || !primitive(ret) || ret.includes('*') || !params || params.length !== call.arguments.length || !params.every(primitive)) refuse('call has unknown or nonprimitive return/parameter types');
@@ -3153,9 +3159,14 @@ function doGuardstore(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'guardstore' }
   const { k, guard, type, call } = sites[0];
   const [decl, copy] = parseStmts(`${type} ${f.temp} = 0; ${f.name} = ${f.temp};`);
   declOf(decl)!.initializer = call;
-  const cmp = unparen(guard.condition) as BinaryExpr;
-  if (isId(unparen(cmp.left), f.name)) cmp.left = parseExpr(f.temp);
-  else cmp.right = parseExpr(f.temp);
+  const condition = unparen(guard.condition);
+  if (isId(condition, f.name)) guard.condition = parseExpr(f.temp);
+  else if (condition.kind === NodeKind.UnaryExpr) guard.condition = parseExpr(`!${f.temp}`);
+  else {
+    const cmp = condition as BinaryExpr;
+    if (isId(unparen(cmp.left), f.name)) cmp.left = parseExpr(f.temp);
+    else cmp.right = parseExpr(f.temp);
+  }
   guard.thenBranch = { kind: NodeKind.CompoundStmt, statements: [cloneNode(copy), ...stmtsOf(guard.thenBranch)] } as CompoundStmt;
   st.splice(k, 2, decl, guard, copy);
 }

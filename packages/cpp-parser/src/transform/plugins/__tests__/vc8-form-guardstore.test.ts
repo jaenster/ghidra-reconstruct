@@ -29,6 +29,16 @@ describe('guardstore', () => {
     assert.match(r.out, /}\s*nSize = status;\s*Place\(game, &nSize\);\s*return nSize;/);
     assert.equal((r.out.match(/Check\(/g) ?? []).length, 1);
   });
+  for (const condition of ['nSize', '!nSize', '(nSize)', '!(nSize)']) it(`accepts the canonical scalar truth guard ${condition}`, () => {
+    const r = run(source.replace('nSize != OK', condition)); assert.ok(r.site.applied, r.site.why);
+    assert.equal((r.out.match(/nSize = status/g) ?? []).length, 2);
+    assert.match(r.out, condition.startsWith('!') ? /if \(!status\)/ : /if \(status\)/);
+  });
+  for (const table of ['globalTypes', 'enclosingVarTypes'] as const) {
+    it(`refuses an enumerator hidden by ${table}`, () => refuse(source, { ...facts, [table]: { OK: 'Watch' } }));
+    it(`refuses a namespaced enumerator hidden by ${table}`, () => refuse(source, { ...facts, [table]: { 'GameCode::OK': 'Watch' }, enclosingSegments: ['GameCode'] }));
+    it(`refuses a callable hidden by ${table}`, () => refuse(source, { ...facts, [table]: { Check: 'Callback' } }));
+  }
   it('uses the declared signed type and keeps conversion before the comparison', () => {
     const r = run('int32_t f(Game *game, int32_t nSize, uint32_t code) { nSize = Check(game, code); if (nSize == -1) return nSize; return Observe(&nSize); }');
     assert.ok(r.site.applied, r.site.why); assert.match(r.out, /int32_t status = Check/); assert.match(r.out, /if \(status == -1\)/);
@@ -67,7 +77,7 @@ describe('guardstore', () => {
   it('refuses a class argument with an implicit scalar conversion', () => refuse(source.replace('uint32_t code', 'Value code')));
   it('refuses volatile argument reads', () => refuse(source.replace('uint32_t code', 'volatile uint32_t code')));
   for (const e of ['MakeCode()', 'code + 1', 'globalCode', '(uint32_t)code']) it(`refuses argument ${e}`, () => refuse(source.replace('Check(game, code)', `Check(game, ${e})`)));
-  for (const c of ['nSize < OK', 'nSize != Read()', 'nSize != code', 'nSize != globalOK', 'nSize++ != 0']) it(`refuses guard ${c}`, () => refuse(source.replace('nSize != OK', c)));
+  for (const c of ['nSize < OK', 'nSize != Read()', 'nSize != code', 'nSize != globalOK', 'nSize++ != 0', '!!nSize', 'nSize && code', '+nSize', '!Read()']) it(`refuses guard ${c}`, () => refuse(source.replace('nSize != OK', c)));
   it('refuses a shadowed enumerator even with a matching enum-value fact', () => refuse(source.replace('uint32_t code)', 'uint32_t code, uint32_t OK)')));
   it('refuses a local callable shadowing the function table', () => refuse(source.replace('uint32_t code)', 'uint32_t code, Callback Check)')));
   it('refuses a computed wrapper callee', () => refuse(source.replace('Check(game, code)', 'Wrapper(Check)(game, code)')));
