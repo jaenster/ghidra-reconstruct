@@ -1549,9 +1549,15 @@ function doCache(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'cache' }>): void {
   };
   const declarations = [...walk(fn.body!)].filter(x => x.node.kind === NodeKind.VariableDecl && !nested(x.node))
     .map(x => x.node as VariableDecl);
-  const dependencies = identifiers(parseExpr(f.expr));
+  // A recorded tag may no longer be valid C++ (the live Shrine tag, for
+  // example, spells its subscript with braces). Refuse that form without
+  // sending the whole function through raw-decompile fallback.
+  let expression: Expression;
+  try { expression = parseExpr(f.expr); }
+  catch { refuse(`cannot parse cache expression ${f.expr}`); }
+  const dependencies = identifiers(expression);
   const localDependencies = new Set([...dependencies].filter(name => locals.has(name)));
-  if ([...walk(parseExpr(f.expr))].some(x => x.node.kind === NodeKind.QualifiedId && localDependencies.has(text(x.node))))
+  if ([...walk(expression)].some(x => x.node.kind === NodeKind.QualifiedId && localDependencies.has(text(x.node))))
     refuse(`${f.expr} has an ambiguous qualified binding`);
   for (const name of dependencies) {
     const count = declarations.filter(d => d.name.name === name).length + fn.parameters.filter(p => p.name?.name === name).length;
@@ -1576,6 +1582,12 @@ function doCache(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'cache' }>): void {
       if (owner && ((owner.kind === NodeKind.AssignExpr && slot.key === 'left') ||
           owner.kind === NodeKind.PostfixExpr || (owner.kind === NodeKind.UnaryExpr &&
           ['++', '--'].includes((owner as UnaryExpr).operator)))) refuse(`${f.expr} is stored`);
+      // Keep mutations embedded in a cached expression out: `(p++, *p)`
+      // cannot read a value saved before p advanced. A later statement in
+      // the final loop body is different: existing measured tags deliberately
+      // cache its first read across the loop (TEXT_CalculateTextHeight).
+      for (let p = parents.get(node); p && isExpression(p.kind); p = parents.get(p))
+        if (stores(p)) refuse(`${f.expr} changes within a cached read`);
       const id = { kind: NodeKind.Identifier, name: f.name } as Identifier;
       if (!byAddress) put(slot, id);
       else if (owner && owner.kind === NodeKind.MemberExpr && slot.key === 'object' && !(owner as unknown as { isArrow: boolean }).isArrow) {
@@ -1652,13 +1664,16 @@ function doCache(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'cache' }>): void {
     for (let k = 0; k < rest.length && seen < (f.count ?? Infinity); k++) { const r = reads(rest[k]); if (r > 0) { last = k; seen += r; } }
     if (last < 0) refuse(`${f.expr} is not read after the anchor`);
     if (f.count !== undefined && seen !== f.count) refuse(`the first ${f.count} reads of ${f.expr} do not end a statement`);
-    for (let k = 0; k <= last; k++) if (stores(rest[k])) refuse(`${f.expr} changes in the cached range`);
+    for (let k = 0; k < last; k++) if (stores(rest[k])) refuse(`${f.expr} changes in the cached range`);
     let n = 0;
     for (const s of rest.slice(0, last + 1)) n += replaceIn(s);
-    const decl = parse(`void __vc8f() { ${f.type} ${f.name} = ${f.expr}; }`).declarations[0] as FunctionDecl;
-    const d = decl.body!.statements[0];
+    let d: Statement;
+    try {
+      const decl = parse(`void __vc8f() { ${f.type} ${f.name} = ${f.expr}; }`).declarations[0] as FunctionDecl;
+      d = decl.body!.statements[0];
+      if (declOf(d)) (declOf(d)!).type = parseType(f.type);
+    } catch { refuse(`cannot declare ${f.type} ${f.name}`); }
     if (!declOf(d)) refuse(`cannot declare ${f.type} ${f.name}`);
-    (declOf(d)!).type = parseType(f.type);
     block!.statements.splice(at, 0, d);
     if (n === 0) refuse('nothing to read the local');
     return;

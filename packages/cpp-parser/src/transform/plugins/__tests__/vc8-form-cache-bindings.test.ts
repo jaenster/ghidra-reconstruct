@@ -50,7 +50,14 @@ it('can insert within a loop body after its initializer has declared the index',
  const r=apply('int f(int* a) { int result=0; for(int i=0;i<4;i++) { result+=a[i]; } return result; }','cache(a[i],cached,int)');
  assert.ok(r.site.applied,r.site.why);assert.match(r.after,/for \(int i = 0; i < 4; i\+\+\) \{\s*int cached = a\[i\]/);
 });
+it('preserves the measured first-character cache across a final loop pointer step',()=>{
+ const r=apply('int f(unsigned short* szBuffer,int nStrLen) { int lines=1; if(nStrLen>0) { do { if(*szBuffer==10) lines++; szBuffer++; nStrLen--; } while(nStrLen!=0); } return lines; }','cache(*szBuffer,t2_c0,uint16_t,@nStrLen > 0)');
+ assert.ok(r.site.applied,r.site.why);assert.match(r.after,/uint16_t t2_c0 = \*szBuffer;/);
+ assert.match(r.after,/if \(t2_c0 == 10\)/);assert.match(r.after,/szBuffer\+\+;/);
+});
 const refusals:Array<[string,string,string]>=[
+ ['legacy brace subscript tag','int f(Entry* table,int index) { return table[index].value; }','cache(&table{index},entry,Entry*)'],
+ ['invalid cache type','int f(int value) { return value; }','cache(value,cached,int +)'],
  ['anchor before local declaration','int f() { int marker; marker=1; int value=7; return value; }','cache(value,cached,int,@marker)'],
  ['same declaration statement dependency','int f() { int value=7,other=value; return other; }','cache(value,cached,int)'],
  ['shadowed local','int f(int value) { { int value=2; use(value); } return value; }','cache(value,cached,int)'],
@@ -60,6 +67,7 @@ const refusals:Array<[string,string,string]>=[
  ['replacement captures global name','int f(int value) { return value+cached; }','cache(value,cached,int)'],
  ['increment of cached value','int f(int value) { return value++; }','cache(value,cached,int)'],
  ['dependency increment within first read','int f(int* p) { return (p++,*p); }','cache(*p,cached,int)'],
+ ['dependency changed before the final read','int f(int* p) { use(*p); p++; return *p; }','cache(*p,cached,int)'],
 ];
 for(const[name,code,tag]of refusals)it('refuses '+name+' without mutation',()=>{
  const r=apply(code,tag);assert.equal(r.site.applied,false,r.after);assert.equal(r.after,r.before);
