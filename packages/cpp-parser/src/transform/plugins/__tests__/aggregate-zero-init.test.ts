@@ -20,13 +20,14 @@ const tables = {
     D2UIMsgLParamUnion: [f('nLParam', 0, 4, 'LPARAM'), f('sPos', 0, 4, 'D2PosShort')],
     D2PosShort: [f('nX', 0, 2, 'short'), f('nY', 2, 2, 'short')],
     D2Pair: [f('a', 0, 4, 'int'), f('b', 4, 4, 'int')],
+    D2Triple: [f('a', 0, 4, 'int'), f('b', 4, 4, 'int'), f('c', 8, 4, 'int')],
     D2Padded: [f('c', 0, 1, 'char'), f('n', 4, 4, 'int')],
     D2Bits: [f('a', 0, 4, 'int'), f('flag', 4, 1, 'int:1', 1)],
     D2Arr: [f('n', 0, 4, 'int'), f('aw', 4, 8, 'int[2]')],
     D2Pkt6: [f('id', 0, 1, 'uint8_t'), f('q', 1, 1, 'uint8_t'), f('fl', 2, 1, 'uint8_t'), f('a', 3, 1, 'uint8_t'), f('b', 4, 2, 'uint16_t')],
   },
   aggregateSizes: {
-    D2ControlMsg: 0x20, D2UIMsgLParamUnion: 4, D2PosShort: 4, D2Pair: 8, D2Padded: 8, D2Bits: 8, D2Arr: 12, D2Pkt6: 6,
+    D2ControlMsg: 0x20, D2UIMsgLParamUnion: 4, D2PosShort: 4, D2Pair: 8, D2Triple: 12, D2Padded: 8, D2Bits: 8, D2Arr: 12, D2Pkt6: 6,
   },
   typedefTargets: { D2PairAlias: 'D2Pair' },
   enumValues: { STATE_none: 0, STATE_poison: 2 },
@@ -220,6 +221,32 @@ describe('aggregateZeroInitPlugin', () => {
   it('keeps a zero store after the first other store that the opening run does not cover', () => {
     const out = run('void f(int x) { D2Pair s; s.a = x; s.b = 0; g(&s); }', { zeroStores: [{ name: 's', size: 8, zero: [[0, 4]] }] });
     assert.match(out, /D2Pair s; memset\(&s, 0, sizeof\(s\)\); s\.a = x; s\.b = 0; g\(&s\);/);
+  });
+
+  // ITEMEVENT_SlowTarget 005c0310: the original clears the argument, then stores every member
+  // but the last, eSkill among them with 0 (`SKILL_Attack`); VC8 keeps that store after the
+  // memset, so the source had it. The decompile prints it like a leftover of the clear.
+  it('keeps a zero store the original makes again after its clear', () => {
+    const code = 'void f(int x) { D2Triple s; s.c = 0; s.a = x; s.b = 0; g(&s); }';
+    const out = run(code, { zeroStores: [{ name: 's', size: 12, zero: [[0, 8]], rezero: [[4, 8]] }] });
+    assert.match(out, /D2Triple s; memset\(&s, 0, sizeof\(s\)\); s\.a = x; s\.b = 0; g\(&s\);/);
+    // Without the second store it is the leftover of the clear, and goes.
+    const left = run(code, { zeroStores: [{ name: 's', size: 12, zero: [[0, 8]] }] });
+    assert.match(left, /D2Triple s; memset\(&s, 0, sizeof\(s\)\); s\.a = x; g\(&s\);/);
+  });
+
+  // Missiles_SrvHitFunc_ApplyTimedAuraStateFiltered 005ab500: a call between the clear and the
+  // source's own `pFunction = 0` keeps the clear's store in the decompile too; only the last goes in.
+  it('keeps only the last of two printed zero stores to bytes the original stores zero again', () => {
+    const out = run('void f(int x) { D2Triple s; s.c = 0; s.a = x; s.b = h(); s.c = 0; g(&s); }',
+      { zeroStores: [{ name: 's', size: 12, zero: [[0, 12]], rezero: [[8, 12]] }] });
+    assert.match(out, /D2Triple s; memset\(&s, 0, sizeof\(s\)\); s\.a = x; s\.b = h\(\); s\.c = 0; g\(&s\);/);
+  });
+
+  it('keeps a zero store of the run the original makes again, after the initialiser', () => {
+    const out = run('void f() { D2Pair s; s.a = 0; s.b = 0; g(&s); }', { zeroStores: [{ name: 's', size: 8, zero: [[0, 8]], rezero: [[4, 8]] }] });
+    assert.match(out, /D2Pair s = \{ ?0 ?\}; s\.b = 0; g\(&s\);/);
+    assert.ok(!/s\.a = 0/.test(out), out);
   });
 
   // Q33_SendQuestStatePacket 00589070: one dword and one word store zero the six bytes, then

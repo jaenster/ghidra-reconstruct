@@ -44,7 +44,11 @@
  * to every member byte (`zeroStores`).
  *
  * The zero run is replaced by the initialised declaration; every later store is
- * kept, so each member holds the same value at its first read as before. A packet
+ * kept, so each member holds the same value at its first read as before. A printed
+ * zero store the original makes a second time, after the clear (`rezero`), is the
+ * source's own statement and stays where it is: ITEMEVENT_SlowTarget 005c0310 clears
+ * its argument and then stores `sStateArg.eSkill = SKILL_Attack` (0), and VC8 keeps
+ * that store after the memset. A packet
  * type with a converting constructor (`D2GSPacketSrv0xA5(uint64_t)`) is no aggregate
  * to `{0}`; it is cleared with the memset form only (NET_D2GS_SERVER_Send_0xA5_FORCESTOPSKILL
  * 0053c190).
@@ -80,7 +84,11 @@ export interface AggregateZeroInitOptions extends PluginOptions {
    * (reconstruct's extract/zero-stores.ts). The evidence the rewrite needs: absent, or a
    * local without an entry, changes nothing.
    */
-  zeroStores?: ReadonlyArray<{ name: string; size: number; zero: ReadonlyArray<readonly [number, number]> }>;
+  zeroStores?: ReadonlyArray<{
+    name: string; size: number; zero: ReadonlyArray<readonly [number, number]>;
+    /** Bytes the original stores zero to again after the clear: the source's own zero stores. */
+    rezero?: ReadonlyArray<readonly [number, number]>;
+  }>;
 }
 
 const MIN_RUN = 2;
@@ -134,6 +142,13 @@ function createAggregateZeroInitTransformer(options: AggregateZeroInitOptions = 
       }
       return true;
     });
+  };
+
+  /** Whether the original stores zero again, after its clear, to any byte of [from, to) of the local. */
+  const restored = (name: string, size: number, from: number, to: number): boolean => {
+    const facts = zeroStores.filter(z => z.name === name && z.size === size);
+    if (facts.length !== 1) return false;
+    return (facts[0].rezero ?? []).some(([a, e]) => from < e && a < to);
   };
 
   /** The aggregate a type spelling names, through typedefs; undefined for anything else. */
@@ -386,6 +401,19 @@ function createAggregateZeroInitTransformer(options: AggregateZeroInitOptions = 
       stretch.push({ index: k, from: p.offset, to: p.offset + p.size, zero: isZero(a.right) });
     }
     const drop = new Set<number>();
+    // The original's second zero store is the last one the decompile prints to those bytes; an
+    // earlier one is the clear's own store, which a call between them kept in the decompile
+    // (Missiles_SrvHitFunc_ApplyTimedAuraStateFiltered 005ab500 prints `pFunction = 0` twice).
+    const storedLater = (i: number, from: number, to: number): boolean => {
+      for (let j = i + 1; j < block.statements.length; j++) {
+        const a = assignOf(block.statements[j]);
+        const p = a ? placeOf(a.left, name, agg) : null;
+        if (p && p.offset < to && from < p.offset + p.size) return true;
+      }
+      return false;
+    };
+    const ownZero = (i: number, from: number, to: number): boolean =>
+      restored(name, sizes[agg], from, to) && !storedLater(i, from, to);
 
     // A type with a converting constructor takes no initialiser list, but a memset clears
     // it as it clears any other: such a local is rewritten only to the memset.
@@ -428,7 +456,7 @@ function createAggregateZeroInitTransformer(options: AggregateZeroInitOptions = 
       const written: Array<[number, number]> = [];
       for (const st of stretch) {
         const earlier = written.some(([x, e]) => st.from < e && x < st.to);
-        if (st.zero && st.index >= runEnd && !earlier && inFacts(st.from, st.to)) drop.add(st.index);
+        if (st.zero && st.index >= runEnd && !earlier && inFacts(st.from, st.to) && !ownZero(st.index, st.from, st.to)) drop.add(st.index);
         written.push([st.from, st.to]);
       }
     }
@@ -458,7 +486,15 @@ function createAggregateZeroInitTransformer(options: AggregateZeroInitOptions = 
       const p = a ? placeOf(a.left, name, agg) : null;
       return !!head && !!p && p.offset <= head[0] && p.offset + p.size >= head[1];
     };
-    const headOverwritten = !!head && (stretch.some(st => st.index >= runEnd && !drop.has(st.index) && st.from <= head[0] && st.to >= head[1])
+    // A zero store of the run the original makes again after its clear stays after the initialiser.
+    const kept = new Set<number>();
+    for (let i = start; i < runEnd; i++) {
+      const a = assignOf(block.statements[i]);
+      const p = a ? placeOf(a.left, name, agg) : null;
+      if (p && ownZero(i, p.offset, p.offset + p.size)) kept.add(i);
+    }
+    const keptStmts = [...kept].map(i => block.statements[i]);
+    const headOverwritten = !!head && (keptStmts.some(coversHead) || stretch.some(st => st.index >= runEnd && !drop.has(st.index) && st.from <= head[0] && st.to >= head[1])
       || block.statements.some((st, i) => i >= Math.max(runEnd, k) && coversHead(st)));
     const whole = headZeroed && headOverwritten;
     if (!whole && !listable) return null;
@@ -487,7 +523,7 @@ function createAggregateZeroInitTransformer(options: AggregateZeroInitOptions = 
           c.statements.forEach((st, i) => {
             if (st === declStmt) return;
             if (isTarget && i === start) out.push(...init);
-            if (isTarget && ((i >= start && i < runEnd) || drop.has(i))) return;
+            if (isTarget && ((i >= start && i < runEnd && !kept.has(i)) || drop.has(i))) return;
             out.push(isTarget ? st : rebuild(st) as Statement);
           });
           return updateNode(c, { statements: out } as Partial<CompoundStmt>);
