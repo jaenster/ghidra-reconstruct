@@ -4078,6 +4078,13 @@ function transformDecompiledCode(
             console.warn(`[flag-bit] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.getter} on line ${e.line}`),
         } : {}),
       };
+      // A trailing arm's copy of the final return whose constant VC8 hoisted above the test
+      // (hoisted-return-drop.ts).
+      perPluginOptions['hoisted-return-drop'] = {
+        branchLayout: layout,
+        onSite: (e: { line: number }) =>
+          console.warn(`[hoisted-return] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: dropped at line ${e.line}`),
+      };
       // A walk to the last node whose original re-tests the copied pointer (link-retest-for.ts).
       perPluginOptions['link-retest-for'] = {
         branchLayout: layout,

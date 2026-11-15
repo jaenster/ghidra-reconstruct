@@ -553,6 +553,11 @@ export {
 } from './builtins/record-null-fold.js';
 
 export {
+  hoistedReturnDropPlugin,
+  type HoistedReturnDropOptions,
+} from './builtins/hoisted-return-drop.js';
+
+export {
   linkRetestForPlugin,
   type LinkRetestForOptions,
 } from './builtins/link-retest-for.js';
@@ -1008,6 +1013,7 @@ import { recordNullFoldPlugin } from './builtins/record-null-fold.js';
 import { flagBitGetterPlugin } from './builtins/flag-bit-getter.js';
 import { linkSelectTailPlugin } from './builtins/link-select-tail.js';
 import { linkRetestForPlugin } from './builtins/link-retest-for.js';
+import { hoistedReturnDropPlugin } from './builtins/hoisted-return-drop.js';
 import { armConstantCallPlugin } from './builtins/arm-constant-call.js';
 import { fieldPointerFoldPlugin } from './builtins/field-pointer-fold.js';
 import { newResultTempPlugin } from './builtins/new-result-temp.js';
@@ -1234,6 +1240,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   extraoutSplicePlugin,       // Correctness: drop Ghidra's uninitialised extraout_* upper bytes (priority 41)
   sbbBranchlessPlugin,        // Cleanup: -(uint32_t)(cond) & addr → cond ? addr : nullptr (priority 42)
   branchlessSelectPlugin,     // Cleanup: (cond - 1 & mask) + off → cond ? off : off+mask (priority 43)
+  hoistedReturnDropPlugin,    // Matching: a trailing arm's copy of the final return whose constant VC8 hoisted above the test goes (priority 59.9)
   earlyReturnPlugin,          // Readability: flatten nested if(C){...}return X; → if(!C)return X; ... (priority 60)
   commaExpandPlugin,          // Readability: lower comma/short-circuit side effects into statements + guards (priority 13)
   commaExpandLatePlugin,      // Readability: the same, on what goto structuring left (priority 59)
