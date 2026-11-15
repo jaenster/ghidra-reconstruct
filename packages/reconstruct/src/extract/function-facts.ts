@@ -48,6 +48,7 @@ import { printsHaltOrProbe, parseHaltLines, HALT_NAME, IP_NAME, PROBE_NAMES } fr
 import { STRING_OPS_JAVA, printsRepLoop, parseStringOpRow } from './string-ops.js';
 import { JUMP_TABLES_JAVA, printsSwitch, parseJumpTableRow } from './jump-tables.js';
 import { ZERO_STORES_JAVA, printsMemberStore, parseZeroStoreRow } from './zero-stores.js';
+import { parseConstantStoreRow } from './constant-stores.js';
 import { MASK_SITES_JAVA, printsByteWordMask, parseMaskSiteRow } from './mask-sites.js';
 import { ZEXT_SITES_JAVA, printsZextCast, parseZextSiteRow } from './zext-sites.js';
 import { SIGNED_DIVIDES_JAVA, printsCastDividend, parseSignedDivideRow } from './signed-divides.js';
@@ -514,7 +515,7 @@ println(sb.toString());
  */
 export const FACT_SCRIPT_VERSION = createHash('sha1')
   .update(FUNCTION_FACTS_SCRIPT).update(LABEL_FLOW_SCRIPT).update(functionStampsScript([], []))
-  .update('facts-16')
+  .update('facts-17')
   .digest('hex').slice(0, 16);
 
 export function functionFactsScript(batch: string[], threads = 8, timeout = 60): string {
@@ -689,6 +690,8 @@ export function selectFacts(text: string, entry: string, row: FunctionFactRow, c
   if (printsMemberStore(text) && row.zeroRow) {
     const z = parseZeroStoreRow(row.zeroRow);
     if (z.length > 0) facts.zeroStores = z;
+    const constants = parseConstantStoreRow(row.zeroRow);
+    if (constants.length > 0) facts.constantStores = constants;
   }
   // Positions in text order: only for the exact text they were read from.
   if (printsByteWordMask(text) && row.maskRow && row.textHash !== null
@@ -768,7 +771,7 @@ export interface FunctionFactStats {
   labelMs: number;
 }
 
-export const FACT_KEYS = ['compareSites', 'branchLayout', 'callOrder', 'accessOrder', 'haltLines', 'stringOps', 'jumpTables', 'zeroStores', 'maskSites', 'zextSites', 'registerStores', 'rotateSites', 'storeBases', 'callDivides', 'signedDivides', 'truncatingRounds', 'shadowedGlobals', 'labelFlow'] as const;
+export const FACT_KEYS = ['compareSites', 'branchLayout', 'callOrder', 'accessOrder', 'haltLines', 'stringOps', 'jumpTables', 'zeroStores', 'constantStores', 'maskSites', 'zextSites', 'registerStores', 'rotateSites', 'storeBases', 'callDivides', 'signedDivides', 'truncatingRounds', 'shadowedGlobals', 'labelFlow'] as const;
 
 /**
  * Attach every per-function fact to the decompiled functions, from the cache where the
@@ -940,6 +943,7 @@ function attach(f: ExtractedFunction, facts: CachedFacts): void {
   if (facts.stringOps !== undefined) f.stringOps = facts.stringOps;
   if (facts.jumpTables !== undefined) f.jumpTables = facts.jumpTables;
   if (facts.zeroStores !== undefined) f.zeroStores = facts.zeroStores;
+  if (facts.constantStores !== undefined) f.constantStores = facts.constantStores;
   if (facts.maskSites !== undefined) f.maskSites = facts.maskSites;
   if (facts.zextSites !== undefined) f.zextSites = facts.zextSites;
   if (facts.registerStores !== undefined) f.registerStores = facts.registerStores;

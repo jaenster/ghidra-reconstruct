@@ -117,6 +117,7 @@ export const FUNCTION_HASH_FIELDS = {
   stringOps: 'hashed',
   jumpTables: 'hashed',
   zeroStores: 'hashed',
+  constantStores: 'hashed',
   maskSites: 'hashed',
   zextSites: 'hashed',
   signedDivides: 'hashed',
