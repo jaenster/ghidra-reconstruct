@@ -442,6 +442,11 @@ export {
 } from './builtins/tail-walk-reread.js';
 
 export {
+  twinStepCoalescePlugin,
+  type TwinStepCoalesceOptions,
+} from './builtins/twin-step-coalesce.js';
+
+export {
   dyingAccumulatorPlugin,
   type DyingAccumulatorOptions,
 } from './builtins/dying-accumulator.js';
@@ -981,6 +986,7 @@ import { inPlaceOperandPlugin } from './builtins/in-place-operand.js';
 import { loopCompareDifferencePlugin } from './builtins/loop-compare-difference.js';
 import { tailWalkRereadPlugin } from './builtins/tail-walk-reread.js';
 import { dyingAccumulatorPlugin } from './builtins/dying-accumulator.js';
+import { twinStepCoalescePlugin } from './builtins/twin-step-coalesce.js';
 import { rotatedStepWhilePlugin } from './builtins/rotated-step-while.js';
 import { copiedTestWhilePlugin } from './builtins/copied-test-while.js';
 import { decidedBoolReturnPlugin } from './builtins/decided-bool-return.js';
@@ -1268,6 +1274,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   paramLoadOrderPlugin,       // Matching: field copies out of a parameter struct in the original's source order (priority 976)
   searchLoopExitPlugin,       // Matching: a search loop with its not-found exit printed twice loops on the pointer (priority 989.85)
   tailWalkRereadPlugin,       // Matching: a walk to a list's last node tests the link in memory, not a copy (priority 989.86)
+  twinStepCoalescePlugin,     // Matching: two variables given one stepped value back to back are one, on a dataflow proof (priority 989.8645)
   rotatedStepWhilePlugin,     // Matching: a guarded do-while testing the copy its pointer is stepped to loops on the pointer (priority 989.865)
   copiedTestWhilePlugin,      // Matching: a loop testing a value of x through two copies tests and stores the value itself (priority 989.866)
   decidedBoolReturnPlugin,    // Matching: a bool `return v != 0;` a guard on v decided is the constant (priority 989.867)
