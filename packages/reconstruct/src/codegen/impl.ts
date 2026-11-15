@@ -4093,6 +4093,38 @@ function transformDecompiledCode(
             console.warn(`[flag-bit] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.getter} on line ${e.line}`),
         } : {}),
       };
+      // A trailing arm's copy of the final return whose constant VC8 hoisted above the test
+      // (hoisted-return-drop.ts).
+      perPluginOptions['hoisted-return-drop'] = {
+        branchLayout: layout,
+        onSite: (e: { line: number }) =>
+          console.warn(`[hoisted-return] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: dropped at line ${e.line}`),
+      };
+      // A zero return whose copy moves a register into EAX: the join VC8 tail-duplicated
+      // (join-constant-return.ts).
+      perPluginOptions['join-constant-return'] = {
+        branchLayout: layout,
+        onSite: (e: { line: number; form: string }) =>
+          console.warn(`[join-return] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.form} at line ${e.line}`),
+      };
+      // A case ending in the return after its switch, one copy in the original (case-return-break.ts).
+      perPluginOptions['case-return-break'] = {
+        branchLayout: layout,
+        onSite: (e: { line: number }) =>
+          console.warn(`[case-break] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: at line ${e.line}`),
+      };
+      // A walk to the last node whose original re-tests the copied pointer (link-retest-for.ts).
+      perPluginOptions['link-retest-for'] = {
+        branchLayout: layout,
+        onSite: (e: { line: number; form: string; pointer: string }) =>
+          console.warn(`[link-retest] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.form} on ${e.pointer} at line ${e.line}`),
+      };
+      // A TSList::Next whose two returns VC8 tail-duplicated from one link pick (link-select-tail.ts).
+      perPluginOptions['link-select-tail'] = {
+        branchLayout: layout,
+        onSite: (e: { line: number; form: string }) =>
+          console.warn(`[link-select] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.form} on line ${e.line}`),
+      };
       // A null guard before a record lookup through the pointer goes into the lookup's
       // condition where the original leaves both through one exit (record-null-fold.ts).
       perPluginOptions['record-null-fold'] = {
@@ -4225,6 +4257,7 @@ function transformDecompiledCode(
     if (context?.getterTwins && context.getterTwins.length > 0) {
       perPluginOptions['getter-twin'] = {
         twins: context.getterTwins,
+        branchLayout: layout ?? null,
         onSite: (e: { call: string; held: string | null }) =>
           console.warn(`[getter-twin] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.call}${e.held ? ` (held in ${e.held})` : ''}`),
       };

@@ -107,4 +107,28 @@ describe('getter-twin', () => {
     }`);
     assert.deepStrictEqual(sites, []);
   });
+
+  // Q05_Callback13_PlayerStartedGame 00595860: the call's argument is loaded ahead of pGame's store.
+  const ORDER = `void f(A *pArgs) {
+      G* pGame = pArgs->pGame;
+      P* pPlayerData = GetPlayerData(pArgs->pPlayer);
+      B* pBits = pPlayerData->pQuestRecord[pGame->nDifficulty];
+      Use(pBits);
+    }`;
+  const runEv = (lines: Map<number, number[]>) => {
+    const sites: string[] = [];
+    const t = getterTwinPlugin.createTransformer({ twins: [TWIN], branchLayout: { lines, ifs: new Map() }, onSite: e => sites.push(e.held ?? '-') } as never);
+    return { out: flat(emit(t(parse(ORDER)) as AnyNode)), sites };
+  };
+
+  it('keeps the held call when the original loads its argument before the index\'s store', () => {
+    const { out, sites } = runEv(new Map([[2, [3]], [3, [0, 10]], [4, [19]]]));
+    assert.deepStrictEqual(sites, []);
+    assert.ok(out.includes('P* pPlayerData = GetPlayerData(pArgs->pPlayer);'), out);
+  });
+
+  it('writes the twin when the index\'s store comes first in the original', () => {
+    const { sites } = runEv(new Map([[2, [0]], [3, [3, 10]], [4, [19]]]));
+    assert.deepStrictEqual(sites, ['pPlayerData']);
+  });
 });

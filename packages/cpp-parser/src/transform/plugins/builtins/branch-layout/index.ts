@@ -42,6 +42,13 @@
  *             whose jump lands on that same copy of R..., d was a guard of the same kind and
  *             the rewrite goes on into B2... (VC8 merges the copies into the first).
  *
+ *   getter-tail  `if (A) { P...; V = E; if (V && W...) { X... } } R...`: the getter with stores
+ *             P... ahead of the value (written `V = 0; if (A) { P...; V = E; }`) and the further
+ *             tests W... one guard each, where the decompile's one chain places R... after V's
+ *             test or a later one and every earlier test before it.
+ *   getter-guard `if (c) { R... } V = E; if (!V) { R... }`, c's jump landing on the copy of R...
+ *             V's test falls into: `V = !c ? E : 0; if (!V) { R... }`.
+ *
  * The end of a void function's body is its return: a rest there that runs off the end
  * leaves too. Moved into a block ahead of X, it gets the `return;` it ran into, so control
  * still never reaches X after it: `if (c) X; Y;` at the end of a void function becomes
@@ -67,7 +74,7 @@
 import { NodeKind } from '../../../../ast/kinds.js';
 import type {
   ASTNode, AssignExpr, CompoundStmt, ExprStmt, IfStmt, LabelStmt, GotoStmt, Statement, Expression,
-  CallExpr, UnaryExpr, BinaryExpr, ParenExpr, ReturnStmt, CStyleCastExpr, FunctionDecl, IntegerLiteralExpr,
+  CallExpr, UnaryExpr, BinaryExpr, ParenExpr, ReturnStmt, ConditionalExpr, CStyleCastExpr, FunctionDecl, IntegerLiteralExpr,
   DeclStmt, VariableDecl, Identifier, AnyNode, TypeNode,
 } from '../../../../ast/nodes.js';
 import { emit } from '../../../../emit/index.js';
@@ -533,6 +540,200 @@ function getterNestAt(stmts: readonly Statement[], i: number, ctx: Ctx, fallsOff
   return [...head, ...spliced(ifIn.thenBranch, bodyOf(ifIn.thenBranch), before, [])];
 }
 
+/** `v = e;` or `T v = e;` (one plain declarator): the pair and the declaration, else null. */
+function setOf(s: Statement): { name: string; value: Expression; decl: VariableDecl | null } | null {
+  if (s.kind === NodeKind.ExprStmt) {
+    const e = unwrapParens((s as ExprStmt).expression);
+    if (e.kind !== NodeKind.AssignExpr || (e as AssignExpr).operator !== '=') return null;
+    const l = (e as AssignExpr).left;
+    return l.kind === NodeKind.Identifier ? { name: (l as Identifier).name, value: (e as AssignExpr).right, decl: null } : null;
+  }
+  if (s.kind !== NodeKind.DeclStmt) return null;
+  const ds = (s as DeclStmt).declarations;
+  if (ds.length !== 1 || ds[0].kind !== NodeKind.VariableDecl) return null;
+  const d = ds[0] as VariableDecl;
+  if (!d.initializer || d.initializer.kind === NodeKind.InitListExpr || d.directInit || d.copyListInit || d.specifiers.length > 0) return null;
+  return { name: d.name.name, value: d.initializer as Expression, decl: d };
+}
+
+/** `T v;` (one plain declarator, no initialiser): the declaration, else null. */
+function bareDeclOf(s: Statement): VariableDecl | null {
+  if (s.kind !== NodeKind.DeclStmt) return null;
+  const ds = (s as DeclStmt).declarations;
+  if (ds.length !== 1 || ds[0].kind !== NodeKind.VariableDecl) return null;
+  const d = ds[0] as VariableDecl;
+  return !d.initializer && d.specifiers.length === 0 ? d : null;
+}
+
+/** The tests a getter's selected value makes of its own: the operands of `c ? x : 0`'s c. */
+function selectTests(e: Expression): number {
+  const u = unwrapParens(e);
+  if (u.kind !== NodeKind.ConditionalExpr) return 0;
+  const c = u as ConditionalExpr;
+  const zero = unwrapParens(c.elseExpr);
+  if (!(zero.kind === NodeKind.NullptrLiteral || (zero.kind === NodeKind.IntegerLiteral && BigInt((zero as IntegerLiteralExpr).value) === 0n))) return 0;
+  return leafCount(c.condition);
+}
+
+/** At most three statements, no declaration, loop, label or jump, few nodes: code VC8 copies and merges back. */
+function smallTail(stmts: readonly Statement[]): boolean {
+  if (stmts.length === 0 || stmts.length > 3) return false;
+  let n = 0;
+  for (const s of stmts) {
+    for (const x of traverseAST(s)) {
+      n++;
+      if (x.kind === NodeKind.DeclStmt || isLoop(x) || x.kind === NodeKind.LabelStmt || x.kind === NodeKind.GotoStmt
+        || x.kind === NodeKind.BreakStmt || x.kind === NodeKind.ContinueStmt || x.kind === NodeKind.SwitchStmt) return false;
+    }
+  }
+  return n <= 40;
+}
+
+/**
+ * getter-tail: `if (A) { P...; V = E; if (V [&& W...]) { X... } } R...`, A simple or `&&`,
+ * outside a loop, X... and R... leaving, P... declarations and stores of locals R... does
+ * not read. The decompile printed A, E's own tests, V and the W's as one `&&` chain, and the
+ * original lays R... out after V's test or a later one, every earlier test jumping forward
+ * to it: an inlined getter tested failure first, the rest one guard per test,
+ *
+ *     V = 0; if (A) { P...; V = E; } if (!V) { R... } if (!W) { R... } ... X...
+ *
+ * (`V = A ? E : 0;` without P...). VC8 merges the copies of R... into the one the facts place.
+ * Decided by the per-operand branches of the chain's line: as many as A, E's tests, V and
+ * the W's together, R...'s code after the branch of V's operand. Two lines (A's if apart
+ * from V's) need A's jump to land on R... and V's chain to lay R... after V's branch.
+ */
+function getterTailAt(stmts: readonly Statement[], i: number, ctx: Ctx, fallsOff: boolean): Statement[] | null {
+  const ifs = stmts[i] as IfStmt;
+  const rest = stmts.slice(i + 1);
+  if (rest.length === 0 || ifs.elseBranch || ifs.init || ctx.loopIfs.has(lineOf(ifs))) return null;
+  const shape = conditionShape(ifs.condition);
+  if (shape.kind !== 'simple' && !(shape.kind === 'and' && shape.conjuncts)) return null;
+  const arm = bodyOf(ifs.thenBranch);
+  const inner = arm[arm.length - 1];
+  if (!inner || inner.kind !== NodeKind.IfStmt || arm.length < 2) return null;
+  const ifIn = inner as IfStmt;
+  if (ifIn.elseBranch || ifIn.init || ifIn.isConstexpr) return null;
+  const set = setOf(arm[arm.length - 2]);
+  if (!set || !ctx.localTypes.has(set.name)) return null;
+  const v = set.name;
+  const prefix = arm.slice(0, -2);
+  // The prefix: declarations without initialiser and plain stores of locals, no calls.
+  const prefixNames = new Set<string>();
+  const hoisted: Statement[] = [];
+  const kept: Statement[] = [];
+  for (const s of prefix) {
+    const d = bareDeclOf(s);
+    if (d) { prefixNames.add(d.name.name); hoisted.push(s); continue; }
+    const a = setOf(s);
+    if (!a || a.decl || !ctx.localTypes.has(a.name) || hasCallOrWrite(a.value)) return null;
+    prefixNames.add(a.name);
+    kept.push(s);
+  }
+  // The condition of the inner if: V's non-null test, then the W's.
+  const cs = conditionShape(ifIn.condition);
+  const conj = cs.kind === 'and' && cs.conjuncts ? cs.conjuncts : cs.kind === 'simple' ? [ifIn.condition] : null;
+  if (!conj) return null;
+  const test = nullTest(conj[0]);
+  if (!test || test.nullWhenTrue || test.p.name !== v) return null;
+  const ws = conj.slice(1);
+  if (kept.length === 0 && hoisted.length === 0 && ws.length === 0) return null; // the plain getter's shape
+  if (!leaves(ifIn.thenBranch, ctx.noreturn)) return null;
+  if (!leaves(rest[rest.length - 1], ctx.noreturn) && !fallsOff) return null;
+  // R... is written once per W: short code without declarations, loops or jumps of its own.
+  if (ws.length > 0 && !copyableTail(rest, ctx.noreturn, fallsOff) && !chainTail(rest, ctx.noreturn, fallsOff) && !smallTail(rest)) return null;
+  const names = new Set([v, ...prefixNames]);
+  if (mentionsAny(rest, names) || mentionsAny([ifs.condition], new Set([v]))) return null;
+  if (set.decl && (mentionsAny(stmts.slice(0, i), new Set([v])) || declaredNames(stmts.slice(0, i)).has(v))) return null;
+  if (jumpedLabels([ifs.thenBranch, ...rest], ctx.gotos) || holdsFreeCase([ifs.thenBranch, ...rest]) || holdsJump(rest)) return null;
+  // The evidence.
+  const lo = ctx.reader.conditionLow(ifs) ?? -1;
+  const at = ctx.reader.entry(rest, lo);
+  if (at === null) return null;
+  const a = leafCount(ifs.condition), r = selectTests(set.value);
+  const before = (ops: readonly (readonly number[])[], at: number): number => {
+    let k = -1;
+    ops.forEach((b, j) => { if (b.length > 0 && Math.max(...b) < at) k = j; });
+    return k;
+  };
+  if (lineOf(ifs) === lineOf(ifIn)) {
+    const ops = ctx.reader.lineOperands(lineOf(ifs));
+    if (!ops || ops.length !== a + r + 1 + ws.length || ops.some(b => b.length === 0)) return null;
+    const k = before(ops, at);
+    if (k < a + r) return null;
+    // Every earlier operand's branch lies before R...: they jump forward to it.
+    if (ops.slice(0, a + r).some(b => Math.max(...b) >= at)) return null;
+  } else {
+    const outer = ctx.reader.edge(ifs);
+    if (!outer || outer.target !== at) return null;
+    const ops = ws.length > 0 ? ctx.reader.lineOperands(lineOf(ifIn)) : null;
+    if (ops) {
+      if (ops.length !== 1 + ws.length || ops.some(b => b.length === 0) || before(ops, at) < 0) return null;
+    } else {
+      const second = ctx.reader.edge(ifIn);
+      if (!second || second.fall !== at) return null;
+    }
+  }
+  ctx.onSite?.({ rule: 'getter', line: lineOf(ifs), why: `getter tail: ${kept.length} prefix store(s), ${ws.length} further test(s)` });
+  const zero = Expr.intLiteral(0);
+  const head: Statement[] = [...hoisted];
+  if (kept.length === 0) {
+    const selected = Expr.conditional(ifs.condition, set.value, zero);
+    head.push(set.decl
+      ? updateNode(arm[arm.length - 2] as DeclStmt, { declarations: [updateNode(set.decl, { initializer: selected } as Partial<VariableDecl>)] } as Partial<DeclStmt>)
+      : Stmt.expr(Expr.assign(Expr.identifier(v), selected)));
+  } else {
+    head.push(set.decl
+      ? updateNode(arm[arm.length - 2] as DeclStmt, { declarations: [updateNode(set.decl, { initializer: zero } as Partial<VariableDecl>)] } as Partial<DeclStmt>)
+      : Stmt.expr(Expr.assign(Expr.identifier(v), zero)));
+    head.push(updateNode(ifs, { thenBranch: Stmt.compound([...kept, Stmt.expr(Expr.assign(Expr.identifier(v), set.value))]) } as Partial<IfStmt>));
+  }
+  const moved = withReturn(rest, ctx.noreturn);
+  const failing = rewriteList(moved, ctx, false) ?? moved;
+  const copy = (): Statement[] => failing.map(s => ({ ...cloneNode(s), leadingTrivia: [] }) as Statement);
+  head.push(Stmt.if_(negate(conj[0]), Stmt.compound(failing)));
+  for (const w of ws) head.push(Stmt.if_(negate(w), Stmt.compound(copy())));
+  if (ws.length > 0) ctx.reader.taint(rest);
+  const pre = [...stmts.slice(0, i), ...head];
+  return [...head, ...spliced(ifIn.thenBranch, bodyOf(ifIn.thenBranch), pre, [])];
+}
+
+/**
+ * getter-guard: `if (c) { R... } V = E; if (!V) { R... } ...`, c simple, outside a loop, the
+ * two R... the same short leaving code, V a local R... does not read, the original laying
+ * R... out right after V's test (V's jump falls into it) with c's jump landing there: an
+ * inlined getter, `V = !c ? E : 0; if (!V) { R... } ...`. E runs only where it ran before.
+ */
+function getterGuardAt(stmts: readonly Statement[], i: number, ctx: Ctx): Statement[] | null {
+  const g = stmts[i] as IfStmt;
+  if (g.elseBranch || g.init || ctx.loopIfs.has(lineOf(g)) || i + 2 >= stmts.length) return null;
+  if (conditionShape(g.condition).kind !== 'simple') return null;
+  const set = setOf(stmts[i + 1]);
+  const h = stmts[i + 2];
+  if (!set || !ctx.localTypes.has(set.name) || h.kind !== NodeKind.IfStmt) return null;
+  const gv = h as IfStmt;
+  if (gv.elseBranch || gv.init || conditionShape(gv.condition).kind !== 'simple') return null;
+  const t = nullTest(gv.condition);
+  if (!t || !t.nullWhenTrue || t.p.name !== set.name) return null;
+  const r1 = bodyOf(g.thenBranch), r2 = bodyOf(gv.thenBranch);
+  if (r1.length !== r2.length || !r1.every((s, k) => sameExpr(s, r2[k]))) return null;
+  if (!copyableTail(r1, ctx.noreturn) && !chainTail(r1, ctx.noreturn, false)) return null;
+  if (!leaves(r1[r1.length - 1], ctx.noreturn)) return null;
+  const names = new Set([set.name]);
+  if (mentionsAny(r1, names) || mentionsAny([g.condition], names)) return null;
+  if (set.decl && declaredNames(stmts.slice(0, i)).has(set.name)) return null;
+  if (jumpedLabels([g, stmts[i + 1], gv], ctx.gotos) || holdsFreeCase([g, gv])) return null;
+  const eg = ctx.reader.edge(g), ev = ctx.reader.edge(gv);
+  if (!eg || !ev || eg.target !== ev.fall) return null;
+  if (!ctx.reader.returnCopyAt(ev.fall) && ctx.reader.entry(r2, ev.jcc) !== ev.fall) return null;
+  ctx.onSite?.({ rule: 'getter', line: lineOf(g), why: 'getter guard: a guard before the value, its tail after the value\'s test' });
+  const selected = Expr.conditional(negate(g.condition), set.value, Expr.intLiteral(0));
+  const s1 = set.decl
+    ? updateNode(stmts[i + 1] as DeclStmt, { declarations: [updateNode(set.decl, { initializer: selected } as Partial<VariableDecl>)] } as Partial<DeclStmt>)
+    : updateNode(stmts[i + 1] as ExprStmt, { expression: Expr.assign(Expr.identifier(set.name), selected) } as Partial<ExprStmt>);
+  return [s1, ...stmts.slice(i + 2)];
+}
+
 /**
  * A tail `chain` may write once per guard: calls on plain operands and stores of a plain
  * operand into a place without a call or a write in it, then a plain return or a halt; with
@@ -964,7 +1165,8 @@ function rewriteList(stmts: readonly Statement[], ctx: Ctx, fallsOff: boolean): 
     const cb = ctx.reader.cbranch(ifs)
       ?? (!ifs.elseBranch && conditionShape(ifs.condition).kind === 'or' ? ctx.reader.prefixBranch(ifs, leafCount(ifs.condition)) : null);
     if (cb === null) {
-      const r = ifs.elseBranch ? haltElseAt(ifs, ctx, { before: cur.slice(0, i), after: cur.slice(i + 1) }) : null;
+      const r = ifs.elseBranch ? haltElseAt(ifs, ctx, { before: cur.slice(0, i), after: cur.slice(i + 1) }) : getterTailAt(cur, i, ctx, fallsOff);
+      if (r && !ifs.elseBranch) { cur = [...cur.slice(0, i), ...r]; changed = true; continue; }
       if (r) { cur = [...cur.slice(0, i), ...r, ...cur.slice(i + 1)]; changed = true; }
       continue;
     }
@@ -974,7 +1176,9 @@ function rewriteList(stmts: readonly Statement[], ctx: Ctx, fallsOff: boolean): 
       if (r) { cur = [...cur.slice(0, i), ...r, ...cur.slice(i + 1)]; changed = true; }
       continue;
     }
-    const r = nestAt(cur, i, cb, ctx, fallsOff) ?? getterNestAt(cur, i, ctx, fallsOff) ?? chainAt(cur, i, ctx, fallsOff);
+    const g = getterGuardAt(cur, i, ctx);
+    if (g) { cur = [...cur.slice(0, i), ...g]; changed = true; continue; }
+    const r = nestAt(cur, i, cb, ctx, fallsOff) ?? getterNestAt(cur, i, ctx, fallsOff) ?? getterTailAt(cur, i, ctx, fallsOff) ?? chainAt(cur, i, ctx, fallsOff);
     if (r) { cur = [...cur.slice(0, i), ...r]; changed = true; }
   }
   return changed ? cur : null;
