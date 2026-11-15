@@ -4078,6 +4078,12 @@ function transformDecompiledCode(
             console.warn(`[flag-bit] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.getter} on line ${e.line}`),
         } : {}),
       };
+      // A TSList::Next whose two returns VC8 tail-duplicated from one link pick (link-select-tail.ts).
+      perPluginOptions['link-select-tail'] = {
+        branchLayout: layout,
+        onSite: (e: { line: number; form: string }) =>
+          console.warn(`[link-select] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.form} on line ${e.line}`),
+      };
       // A null guard before a record lookup through the pointer goes into the lookup's
       // condition where the original leaves both through one exit (record-null-fold.ts).
       perPluginOptions['record-null-fold'] = {
