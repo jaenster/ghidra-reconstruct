@@ -512,6 +512,11 @@ export {
 } from './builtins/compare-branch-form.js';
 
 export {
+  compareValueFormPlugin,
+  type CompareValueFormOptions,
+} from './builtins/compare-value-form.js';
+
+export {
   registerStoreSelectPlugin,
   type RegisterStoreSelectOptions,
 } from './builtins/register-store-select.js';
@@ -1033,6 +1038,7 @@ import { returnCopySplitPlugin, returnCopyJoinPlugin } from './builtins/return-c
 import { strlenDifferencePlugin } from './builtins/strlen-difference.js';
 import { boolSelectFormPlugin } from './builtins/bool-select-form.js';
 import { compareBranchFormPlugin } from './builtins/compare-branch-form.js';
+import { compareValueFormPlugin } from './builtins/compare-value-form.js';
 import { registerStoreSelectPlugin } from './builtins/register-store-select.js';
 import { linkNextSelectPlugin } from './builtins/link-next-select.js';
 import { heldAddressMemberPlugin } from './builtins/held-address-member.js';
@@ -1340,6 +1346,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   strlenDifferencePlugin,     // Matching: an inlined strlen scan's difference from its start is the length (priority 989.985)
   boolSelectFormPlugin,       // Matching: a materialised comparison spelled for the original's setcc or neg/sbb, from the compare sites (priority 989.99)
   compareBranchFormPlugin,    // Matching: a value-position comparison the original branched on -> a zeroed local set in one arm, from the compare sites (priority 989.991)
+  compareValueFormPlugin,     // Matching: a comparison the original computed as a value -> one shared local, or an SBB select for a mask, from the compare sites (priority 989.9915)
   registerStoreSelectPlugin,  // Matching: two stores of one lvalue whose constant the original stores from a register become a select (priority 989.992)
   linkNextSelectPlugin,       // Matching: a loop-leaving sign test of a list link becomes the inlined next-node select and a null test (priority 989.993)
   heldAddressMemberPlugin,    // Matching: a member of the link an inlined TSLink member runs on is addressed through the local holding it (priority 989.994)
