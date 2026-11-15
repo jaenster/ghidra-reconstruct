@@ -1830,6 +1830,7 @@ export function generateFunctionImplementation(
           haltLines: func.haltLines,
           jumpTables: func.jumpTables,
           zeroStores: func.zeroStores,
+          constantStores: func.constantStores,
           // A text patch anchors on the masks as Ghidra printed them.
           maskSites: override?.action === 'patch' ? undefined : func.maskSites,
           zextSites: override?.action === 'patch' ? undefined : func.zextSites,
@@ -2982,6 +2983,7 @@ function transformDecompiledCode(
     jumpTables?: import('../extract/jump-tables.js').JumpTableFacts;
     /** Per struct-typed stack local, what the original's opening stores write (extract/zero-stores.ts). */
     zeroStores?: import('../extract/zero-stores.js').ZeroStoreFacts;
+    constantStores?: import('../extract/constant-stores.js').ConstantStoreFacts;
     /** The decompile's byte/word masks and the instruction behind each (extract/mask-sites.ts). */
     maskSites?: import('../extract/mask-sites.js').MaskSiteFacts;
     /** The operators whose result the decompiler zero-extends to 64 bits (extract/zext-sites.ts). */
@@ -3309,6 +3311,14 @@ function transformDecompiledCode(
         enumValues: context.funcPtrArgCasts.enumValues,
         convertingAggregates: context.funcPtrArgCasts.convertingAggregates,
         zeroStores: enclosing?.zeroStores,
+      };
+      perPluginOptions['native-constant-store'] = {
+        targetPointerSize: context.targetPointerSize,
+        targetLanguageId: context.targetLanguageId,
+        structLayouts: context.funcPtrArgCasts.structLayouts,
+        aggregateSizes: context.funcPtrArgCasts.aggregateSizes,
+        unionNames: context.funcPtrArgCasts.unionNames,
+        constantStores: enclosing?.constantStores,
       };
       perPluginOptions['aggregate-table-init'] = {
         structLayouts: context.funcPtrArgCasts.structLayouts,
