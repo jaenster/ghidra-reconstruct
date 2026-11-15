@@ -533,10 +533,43 @@ function lowerSub(ctx: Ctx, n: number, m: number, args: Expression[]): Expressio
 function lowerConcat(ctx: Ctx, n: number, m: number, args: Expression[]): Expression {
   const [hi, lo] = args;
   const T = uType(n + m);
-  const h = raw(ctx, hi, n, n);
+  // A widened CONCAT of exactly n bytes is below 2^(8n) already: no truncation to n bytes.
+  const h = boundedBy(hi) === n ? hi : raw(ctx, hi, n, n);
   const l = raw(ctx, lo, m, m);
   const joined = fromTemplate(`(${T})(__A << ${m * 8} | __B)`, { __A: castTo(T, h), __B: castTo(T, l) });
   return isOddWidth(n + m) ? maskTo(T, n + m, joined) : joined;
+}
+
+/** The width a lowered, widened CONCAT's value is bounded by (`concat-widen`), else undefined. */
+function boundedBy(e: Expression): number | undefined {
+  for (let x: Expression | undefined = e; x; x = x.kind === NodeKind.ParenExpr ? (x as ParenExpr).expression : undefined) {
+    const b = x.ghidraInfo?.concatBounded;
+    if (b !== undefined) return b;
+  }
+  return undefined;
+}
+
+/**
+ * A lowered CONCAT of `bytes` without its outer truncation: `(T)(A << s | B)` (and the mask of
+ * an odd width) is `(A << s | B)`. The value is the same: A and B are each truncated to their
+ * part, so the sum of the parts never reaches 2^(8 * bytes). Tagged with that bound.
+ */
+function unbounded(lowered: Expression, bytes: number): Expression {
+  const T = uType(bytes);
+  let x = unwrapParens(lowered);
+  const castOf = (e: Expression) => (e.kind === NodeKind.CStyleCastExpr && typeName((e as CStyleCastExpr).type) === T ? unwrapParens((e as CStyleCastExpr).expression) : null);
+  const outer = castOf(x);
+  if (!outer) return lowered;
+  x = outer;
+  if (isOddWidth(bytes)) {
+    if (x.kind !== NodeKind.BinaryExpr || (x as BinaryExpr).operator !== '&') return lowered;
+    const inner = castOf(unwrapParens((x as BinaryExpr).left));
+    if (!inner) return lowered;
+    x = inner;
+  }
+  if (x.kind !== NodeKind.BinaryExpr || (x as BinaryExpr).operator !== '|') return lowered;
+  const out = Expr.paren(x);
+  return { ...out, ghidraInfo: { ...(out.ghidraInfo ?? {}), concatBounded: bytes } } as Expression;
 }
 
 /**
@@ -1424,6 +1457,11 @@ function createPseudoOpLowerTransformer(options: PseudoOpLowerOptions = {}): Tra
           return undefined;
         }
         if (!lowered) return undefined;
+        // `concat-widen`: the p-code only widens this value, the original never truncated it.
+        if (call.ghidraInfo?.concatWidened) {
+          const parsed = parseOpName(name);
+          if (parsed?.op === 'CONCAT') lowered = unbounded(lowered, parsed.n + parsed.m);
+        }
         return { ...lowered, leadingTrivia: call.leadingTrivia, trailingTrivia: call.trailingTrivia } as Expression;
       },
     });

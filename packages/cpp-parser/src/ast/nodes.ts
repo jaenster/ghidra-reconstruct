@@ -98,6 +98,13 @@ export interface GhidraMetadata {
    */
   zextOperand?: boolean;
   /**
+   * A CONCAT the p-code only widens (`concat-widen`): pseudo-op-lower writes it without the
+   * truncation to its own width, a value it never exceeds.
+   */
+  concatWidened?: boolean;
+  /** The width a lowered `concatWidened` CONCAT's value is bounded by (pseudo-op-lower). */
+  concatBounded?: number;
+  /**
    * The original computes this `/` or `%` with a signed divide (`signed-divide-site`);
    * `arith-idioms` divides an unsigned byte or word dividend as the promoted int it is.
    */
