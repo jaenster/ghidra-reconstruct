@@ -14,7 +14,7 @@ that justifies it:
 |Path|What|
 |-|-|
 |`ratchet/fn/<address>.json`|one record per function, kind `match` or `pin`|
-|`ratchet/release.tsv`|addresses whose generated body goes through anyway, with the reason|
+|`ratchet/release.tsv`|addresses whose generated body goes through anyway, with the reason (and, optionally, `body=<hash>`: only that generated body)|
 
 Why there and not in ghidra-reconstruct:
 
@@ -114,6 +114,8 @@ the same. Only `match` records apply there; pins never enter `source/regen`. Per
    regen never fails for it.
 
 Report: `<project>/.ghidra-mcp/ratchet-report.tsv` (status, address, name, record, kind, detail),
+beside it `ratchet-fresh.json` (address -> the generated definition of every closure member the
+apply kept, the input of the member release below),
 one summary line in the generation log, one `RATCHET UNRESOLVED` line per function that could not
 be kept. Statuses: `kept`, `equal`, `released`, `unresolved`, `stale` (the parser no longer
 re-finds the stored sites: recapture), `gone` (not defined any more), `shadowed` (another record
@@ -199,8 +201,13 @@ otherwise revert because `0057eab0` was MATCH with the old callee) is let throug
   `ratchet: "release"`; no store edit needed).
 
 Releasing a record's root lets every member through; releasing a member lets only that member
-through. The next measurement consumes a release: still MATCH, the new body is stored; not MATCH,
-the record is retired (the generated body won deliberately) and the release row removed.
+through. A row with a third column `body=<hash>` (`bodyHash`, the first 16 hex digits of the
+SHA-256 of the definition) lets only that generated body through; any other is kept and reported
+`kept` with "the release names another body". The next measurement consumes a release: still
+MATCH, the new body is stored; not MATCH, the record is retired (the generated body won
+deliberately) and the release row removed. A member's release is consumed once every record
+holding it was captured MATCH (each now stores the body the release let through); while one is
+not, the row stays, or the next regen would put the old body back.
 
 ## The ratchet only advances on measurement
 
@@ -221,10 +228,62 @@ node <gr>/packages/reconstruct/dist/ratchet/cli.js advance --tree recon/modified
 |`lost`|not MATCH and the tree carries another body (see the apply report for why)|kept|
 |`retired`|released and not MATCH|record and release removed|
 |`uncapturable`|the body does not parse standalone (5 EH destructors with local classes)|not captured|
+|`consumed`|a member's release whose holding records were all captured|release removed|
+
+## Non-MATCH members: released by a compile
+
+A closure member is kept for its record's sake, but a member that is not MATCH itself has nothing
+of its own to protect, and while its record holds the old body every later fix of it is vetoed.
+So `advance` takes the regen's `ratchet-fresh.json` and decides each such member by compiling it:
+
+```sh
+node <gr>/packages/reconstruct/dist/ratchet/cli.js advance --tree recon/modified \
+  --audit recon/modified/asm_matching/msvc8/evidence/audit.tsv --evidence <evidence-commit> \
+  --store recon/modified/ratchet --regen source/regen \
+  --fresh <project>/.ghidra-mcp/ratchet-fresh.json --members-report members.tsv \
+  --trial-wrap "/usr/bin/lockf -t 3600 <bench.lock> timeout 1800"
+```
+
+For every member of a match record (`ratchet/members.ts`):
+
+|Status|Meaning|Store|
+|-|-|-|
+|`match`|MATCH itself: its own measurement protects it|never released|
+|`own-record`|the root of a record of its own: that record decides|never released here|
+|`equal`|the regen kept nothing: its generated body is the stored one, so its unit compiles the same text with or without the record and the record's bytes cannot change (`verified` `text`: the generated tree's text of it is the measured tree's)|stays in its records|
+|`released`|its generated body differs, and compiled into its unit in place of the kept one, every MATCH record holding it, and every other function of the unit that matched unchanged, still matches|a `release.tsv` row naming that body, with the reason|
+|`kept`|that compile lost a MATCH, failed, or a holder did not match even unchanged; the detail says which|stays|
+|`no-holder`|no record holding it is MATCH, so there is nothing to verify against|stays|
+|`already-released`|a release row exists|untouched|
+
+The compile is the VC8 oracle's own trial (`ratchet/vc8-verify.ts`): the measured checkout's
+unit, translated as `oracle-zig build` translates it, compiled with the build's command line and
+precompiled header (`oracle-zig trial`), and judged as the audit judges (`oracle-zig judge`), next
+to the unchanged unit compiled the same way. A unit whose translation is not the one built is not
+compiled. Members of one unit go in together, as the next regen would produce them; when that
+fails each is tried alone, and those that pass alone are tried together again before any is
+released. Without a compiler (`--verify none`) nothing is released: a release is never assumed.
+`--dry-run` writes nothing, `--sample-equal N` compiles N units of `equal` members unchanged to
+show their holders match there, `--generated` names the generated tree for the `equal` text check
+(default `--regen`).
+
+Why at the measurement and not at the merge: the oracle checkout is built at exactly the tree the
+audit measured, so a trial differs from the measurement only by the swapped body. The merge runs
+every daemon cycle with no build to compile against.
+
+Why the `equal` members stay in their records: VC8 gives a static callee its own register
+convention and may inline it, so a record's bytes can follow a member's body even when the member
+does not match (deploy 1163 lost `0057eab0` to its static callee `0057e860`). Dropping them would
+let the next change of such a member through unmeasured. Kept, the change is not silent: the
+apply keeps the old body once and writes the new one to `ratchet-fresh.json`, the advance after
+that measurement compiles it, and the regen after the advance lets it through when it passed.
+
+Why the release names the body: the regen that runs after the advance may carry a newer
+generated body than the one compiled. Only the compiled one goes through; a newer one is kept and
+compiled at the next advance.
 
 ## Trade-off to know
 
-A kept file-static callee is kept even when its change was an improvement: at 1162,
-`005153c0` went OUR-3 to OUR-2 while its caller stayed MATCH. The ratchet cannot know that
-without measuring; the apply report lists such members (`kept` with a `record` other than their
-own address), and a release is how they go through.
+A member that is MATCH itself is never released by the compile above: when its generated body
+changes while its own record and its caller stay MATCH, both records keep the old body until a
+release (by hand, or of the member's own record) lets it through.

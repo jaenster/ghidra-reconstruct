@@ -10,6 +10,7 @@
  * printed in, its parameters, and the binding of every reference site, so it can be printed
  * again under names that have changed since.
  */
+import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
@@ -52,7 +53,22 @@ export interface RatchetRecord {
   members: StoredBody[];
 }
 
-export interface Release { address: string; reason: string }
+export interface Release {
+  address: string;
+  reason: string;
+  /**
+   * The body the release is for (`bodyHash` of its definition): the generated body goes through
+   * only while it is that one. A release without it lets any generated body through.
+   */
+  body?: string;
+}
+
+/** The identity of a definition's exact text, as a release names it. */
+export function bodyHash(definition: string): string {
+  return createHash('sha256').update(definition).digest('hex').slice(0, 16);
+}
+
+const BODY_COLUMN = /^body=([0-9a-f]{16})$/u;
 
 export class RatchetStore {
   constructor(readonly dir: string) {}
@@ -91,17 +107,19 @@ export class RatchetStore {
     const out: Release[] = [];
     for (const line of text.split('\n')) {
       if (!line.trim() || line.startsWith('#')) continue;
-      const [address, ...reason] = line.split('\t');
-      out.push({ address: normalizeAddress(address), reason: reason.join('\t') });
+      const [address, ...rest] = line.split('\t');
+      const body = rest.length > 1 ? BODY_COLUMN.exec(rest[rest.length - 1])?.[1] : undefined;
+      if (body) rest.pop();
+      out.push({ address: normalizeAddress(address), reason: rest.join('\t'), ...(body ? { body } : {}) });
     }
     return out;
   }
 
   writeReleases(rows: Release[]): void {
     fs.mkdirSync(this.dir, { recursive: true });
-    const body = rows.map(r => `${r.address}\t${r.reason}`).join('\n');
+    const body = rows.map(r => `${r.address}\t${r.reason}${r.body ? `\tbody=${r.body}` : ''}`).join('\n');
     fs.writeFileSync(path.join(this.dir, 'release.tsv'),
-      `# address\treason - the generated body goes through; the next measurement decides (docs/ratchet.md)\n${body}${body ? '\n' : ''}`, 'utf-8');
+      `# address\treason[\tbody=<hash>] - the generated body (that one, when a hash is given) goes through; the next measurement decides (docs/ratchet.md)\n${body}${body ? '\n' : ''}`, 'utf-8');
   }
 }
 
