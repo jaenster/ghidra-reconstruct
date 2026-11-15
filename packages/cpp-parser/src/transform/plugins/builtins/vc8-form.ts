@@ -416,6 +416,7 @@ import { initializerIsDead } from './store-liveness.js';
 import { recordWalk, type RecordWalkTables } from './record-walk.js';
 import { guardedPostDecrement } from './guarded-post-decrement.js';
 import { restoreSwitchDefault, switchDefaultValue } from './switch-default.js';
+import { countdownFieldPtrwalk } from './countdown-field-ptrwalk.js';
 
 export type Vc8Form =
   | { op: 'nullfault32' }
@@ -3563,6 +3564,10 @@ function readThrough(roots: ASTNode[], isSub: (x: ASTNode) => boolean, n: string
  * (`i++, N++`). N equals &X[i] wherever the loop evaluates either: only the increment
  * changes i, and X's storage stays put (fixedBase). The counter stays, so whatever else
  * reads i reads the same values.
+ * A positive constant countdown can instead walk one scalar member of X[K-i], using
+ * its actual record stride. It requires a plain automatic32bit counter, a fixed
+ * nonvolatile record-pointer parameter and one layout-proven non-bitfield scalar.
+ * Calls, aliases, extra uses, conditional first access and escaping control refuse.
  */
 function doPtrwalk(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'ptrwalk' }>): void {
   const { counter: i, name: n } = f;
@@ -3584,6 +3589,11 @@ function doPtrwalk(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'ptrwalk' }>): vo
     const reads = [...walk(loop.body)].some(x => isSub(x.node)) || (!!loop.condition && [...walk(loop.condition)].some(x => isSub(x.node)));
     if (reads) sites.push({ b, k, loop, start });
   });
+  if (sites.length === 0) {
+    const result = countdownFieldPtrwalk(fn, f, selectTables);
+    if ('why' in result) refuse(result.why);
+    return;
+  }
   const hit = f.index === 0 ? (sites.length === 1 ? sites[0] : refuse(`${sites.length} loops count ${i} over ${f.array}`))
     : (sites[f.index - 1] ?? refuse(`no loop #${f.index} counts ${i} over ${f.array}`));
   const { loop, start } = hit;

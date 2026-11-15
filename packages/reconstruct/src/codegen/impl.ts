@@ -4516,6 +4516,7 @@ function transformDecompiledCode(
           ...(perPluginOptions['select-argument'] as SelectArgumentOptions | undefined),
           writeEffects: context?.funcPtrArgCasts?.writeEffects,
           structLayouts: context?.funcPtrArgCasts?.structLayouts,
+          aggregateSizes: context?.funcPtrArgCasts?.aggregateSizes,
           aggregateMembers: context?.funcPtrArgCasts?.aggregateMembers,
           unionNames: context?.funcPtrArgCasts?.unionNames,
           accessors: context?.accessorTwins,

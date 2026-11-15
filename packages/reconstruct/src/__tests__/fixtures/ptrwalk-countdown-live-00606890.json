@@ -1,0 +1,480 @@
+{
+  "source": "c10da2561c82f135a9dd1242a6a6d70ded175b08",
+  "generatorBase": "ece9b518720e96393e8db5ab3cb5614e20efa1cc",
+  "scope": "Read-only Windows 1.14d function/types/callee fixture. Static linkage is published-source metadata. Unit-test ev/bh values are placeholders and never proposal data. Native body144 bytes spans157 including13 alignment bytes.",
+  "fn": {
+    "name": "DRAW_BuildBrightenLightnessTable",
+    "address": "00606890",
+    "entryPoint": "00606890",
+    "signature": "void DRAW_BuildBrightenLightnessTable(D2HSLColorStrc * pHSLPalette, LPPALETTEENTRY pPalette)",
+    "returnType": "void",
+    "callingConvention": "__cdecl",
+    "size": 144,
+    "isThunk": false,
+    "isExternal": false,
+    "hasVarArgs": false,
+    "namespace": "D2CMP::Draw",
+    "comment": "@function DRAW_BuildBrightenLightnessTable\n@address Game.exe.ram:00606890\n@date 2026.09.05\n@params\n  pHSLPalette: ECX:4 (D2HSLColorStrc *)\n  pPalette: EDI:4 (LPPALETTEENTRY)\n@description Diablo 2 1.14d reverse team\nhttps://blizzhackers.dev\n\nFunction uses custom registers for function arguments!\n[D2HSLColorStrc * pHSLPalette@ECX:4]\n[LPPALETTEENTRY pPalette@EDI:4]",
+    "sourceFile": null,
+    "sourceLine": null,
+    "sourceInfo": null,
+    "parameters": [
+      {
+        "name": "pHSLPalette",
+        "dataType": "D2HSLColorStrc *",
+        "size": 4,
+        "ordinal": 0,
+        "storage": "ECX:4",
+        "stackOffset": null,
+        "resolvedType": null
+      },
+      {
+        "name": "pPalette",
+        "dataType": "LPPALETTEENTRY",
+        "size": 4,
+        "ordinal": 1,
+        "storage": "EDI:4",
+        "stackOffset": null,
+        "resolvedType": null
+      }
+    ],
+    "localVariables": [
+      {
+        "name": "nColorIndex",
+        "dataType": "int",
+        "size": 4,
+        "storage": "ESI:4",
+        "stackOffset": null,
+        "resolvedType": "int"
+      },
+      {
+        "name": "pdHSLEntry",
+        "dataType": "double *",
+        "size": 4,
+        "storage": "EDX:4",
+        "stackOffset": null,
+        "resolvedType": "double *"
+      },
+      {
+        "name": "nPaletteIndex",
+        "dataType": "undefined4",
+        "size": 4,
+        "storage": "EAX:4",
+        "stackOffset": null,
+        "resolvedType": null
+      },
+      {
+        "name": "nOutputIndex",
+        "dataType": "uint",
+        "size": 4,
+        "storage": "ESI:4",
+        "stackOffset": null,
+        "resolvedType": "uint"
+      },
+      {
+        "name": "byRGBBuffer",
+        "dataType": "undefined1",
+        "size": 1,
+        "storage": "Stack[-0x4]:1",
+        "stackOffset": -4,
+        "resolvedType": null
+      },
+      {
+        "name": "rgbWorkBuffer",
+        "dataType": "tagRGBQUAD[256]",
+        "size": 1024,
+        "storage": "Stack[-0x404]:1024",
+        "stackOffset": -1028,
+        "resolvedType": null
+      },
+      {
+        "name": "dOldLightness",
+        "dataType": "double",
+        "size": 8,
+        "storage": "HASH:5f03e96124:8",
+        "stackOffset": null,
+        "resolvedType": "double"
+      },
+      {
+        "name": "dLightness",
+        "dataType": "undefined8",
+        "size": 8,
+        "storage": "HASH:5fffa0c7e23:8",
+        "stackOffset": null,
+        "resolvedType": null
+      }
+    ],
+    "tags": [
+      {
+        "type": "llm-named"
+      },
+      {
+        "type": "llm-artifact-fix"
+      },
+      {
+        "type": "asm-typed"
+      }
+    ],
+    "decompiled": "\n/* @function DRAW_BuildBrightenLightnessTable\n   @address Game.exe.ram:00606890\n   @date 2026.09.05\n   @params\n     pHSLPalette: ECX:4 (D2HSLColorStrc *)\n     pPalette: EDI:4 (LPPALETTEENTRY)\n   @description Diablo 2 1.14d reverse team\n   https://blizzhackers.dev\n   \n   Function uses custom registers for function arguments!\n   [D2HSLColorStrc * pHSLPalette@ECX:4]\n   [LPPALETTEENTRY pPalette@EDI:4] */\n\nvoid __cdecl\nD2CMP::Draw::DRAW_BuildBrightenLightnessTable(D2HSLColorStrc *pHSLPalette,LPPALETTEENTRY pPalette)\n\n{\n  byte bVar1;\n  double *pdHSLEntry;\n  int nColorIndex;\n  uint nOutputIndex;\n  tagRGBQUAD rgbWorkBuffer [256];\n  double dOldLightness;\n  \n  pdHSLEntry = &pHSLPalette->dLightness;\n  nColorIndex = 0x100;\n  do {\n    if ((*pdHSLEntry != 0.0) &&\n       (dOldLightness = *pdHSLEntry, *pdHSLEntry = dOldLightness + 0.20000000298023224,\n       1.0 < dOldLightness + 0.20000000298023224)) {\n      *pdHSLEntry = 1.0;\n    }\n    pdHSLEntry = pdHSLEntry + 3;\n    nColorIndex = nColorIndex + -1;\n  } while (nColorIndex != 0);\n  D2CMP::Draw::DRAW_ConvertPaletteHSLtoRGB(pHSLPalette,&rgbWorkBuffer[0].rgbBlue);\n  nOutputIndex = 0;\n  do {\n    bVar1 = D2CMP::Draw::D2GFX_FindNearestPaletteIndex\n                      (pPalette,0x100,(uint)rgbWorkBuffer[nOutputIndex].rgbBlue,\n                       (uint)rgbWorkBuffer[nOutputIndex].rgbGreen,\n                       (uint)rgbWorkBuffer[nOutputIndex].rgbRed);\n    (&pPalette[0xd00].peRed)[nOutputIndex] = bVar1;\n    nOutputIndex = nOutputIndex + 1;\n  } while (nOutputIndex < 0x100);\n  return;\n}\n\n"
+  },
+  "types": [
+    {
+      "name": "D2HSLColorStrc",
+      "category": "/Diablo2/GFX",
+      "size": 24,
+      "description": "",
+      "alignment": 1,
+      "type": "structure",
+      "fields": [
+        {
+          "name": "dHue",
+          "dataType": "double",
+          "offset": 0,
+          "size": 8,
+          "comment": "degrees, wrapped at 360",
+          "bitOffset": null,
+          "bitSize": null
+        },
+        {
+          "name": "dSaturation",
+          "dataType": "double",
+          "offset": 8,
+          "size": 8,
+          "comment": "0..1",
+          "bitOffset": null,
+          "bitSize": null
+        },
+        {
+          "name": "dLightness",
+          "dataType": "double",
+          "offset": 16,
+          "size": 8,
+          "comment": "0..1",
+          "bitOffset": null,
+          "bitSize": null
+        }
+      ],
+      "values": null,
+      "underlyingType": null,
+      "returnType": null,
+      "parameters": null,
+      "callingConvention": null,
+      "effectiveCallingConvention": null,
+      "hasUnknownCallingConvention": null,
+      "hasVarArgs": false,
+      "kind": "STRUCTURE"
+    },
+    {
+      "name": "tagRGBQUAD",
+      "category": "/wingdi.h",
+      "size": 4,
+      "description": "",
+      "alignment": 1,
+      "type": "structure",
+      "fields": [
+        {
+          "name": "rgbBlue",
+          "dataType": "BYTE",
+          "offset": 0,
+          "size": 1,
+          "comment": null,
+          "bitOffset": null,
+          "bitSize": null
+        },
+        {
+          "name": "rgbGreen",
+          "dataType": "BYTE",
+          "offset": 1,
+          "size": 1,
+          "comment": null,
+          "bitOffset": null,
+          "bitSize": null
+        },
+        {
+          "name": "rgbRed",
+          "dataType": "BYTE",
+          "offset": 2,
+          "size": 1,
+          "comment": null,
+          "bitOffset": null,
+          "bitSize": null
+        },
+        {
+          "name": "rgbReserved",
+          "dataType": "BYTE",
+          "offset": 3,
+          "size": 1,
+          "comment": null,
+          "bitOffset": null,
+          "bitSize": null
+        }
+      ],
+      "values": null,
+      "underlyingType": null,
+      "returnType": null,
+      "parameters": null,
+      "callingConvention": null,
+      "effectiveCallingConvention": null,
+      "hasUnknownCallingConvention": null,
+      "hasVarArgs": false,
+      "kind": "STRUCTURE"
+    },
+    {
+      "name": "tagPALETTEENTRY",
+      "category": "/wingdi.h",
+      "size": 4,
+      "description": "",
+      "alignment": 1,
+      "type": "structure",
+      "fields": [
+        {
+          "name": "peRed",
+          "dataType": "BYTE",
+          "offset": 0,
+          "size": 1,
+          "comment": null,
+          "bitOffset": null,
+          "bitSize": null
+        },
+        {
+          "name": "peGreen",
+          "dataType": "BYTE",
+          "offset": 1,
+          "size": 1,
+          "comment": null,
+          "bitOffset": null,
+          "bitSize": null
+        },
+        {
+          "name": "peBlue",
+          "dataType": "BYTE",
+          "offset": 2,
+          "size": 1,
+          "comment": null,
+          "bitOffset": null,
+          "bitSize": null
+        },
+        {
+          "name": "peFlags",
+          "dataType": "BYTE",
+          "offset": 3,
+          "size": 1,
+          "comment": null,
+          "bitOffset": null,
+          "bitSize": null
+        }
+      ],
+      "values": null,
+      "underlyingType": null,
+      "returnType": null,
+      "parameters": null,
+      "callingConvention": null,
+      "effectiveCallingConvention": null,
+      "hasUnknownCallingConvention": null,
+      "hasVarArgs": false,
+      "kind": "STRUCTURE"
+    }
+  ],
+  "tables": {
+    "functionReturnTypes": {
+      "DRAW_ConvertPaletteHSLtoRGB": "void",
+      "D2CMP::Draw::DRAW_ConvertPaletteHSLtoRGB": "void",
+      "D2GFX_FindNearestPaletteIndex": "byte",
+      "D2CMP::Draw::D2GFX_FindNearestPaletteIndex": "byte"
+    },
+    "functionParamTypes": {
+      "DRAW_ConvertPaletteHSLtoRGB": [
+        "D2HSLColorStrc *",
+        "uint8_t *"
+      ],
+      "D2CMP::Draw::DRAW_ConvertPaletteHSLtoRGB": [
+        "D2HSLColorStrc *",
+        "uint8_t *"
+      ],
+      "D2GFX_FindNearestPaletteIndex": [
+        "LPPALETTEENTRY",
+        "uint32_t",
+        "int32_t",
+        "int32_t",
+        "int32_t"
+      ],
+      "D2CMP::Draw::D2GFX_FindNearestPaletteIndex": [
+        "LPPALETTEENTRY",
+        "uint32_t",
+        "int32_t",
+        "int32_t",
+        "int32_t"
+      ]
+    },
+    "globalTypes": {},
+    "enumTypes": [],
+    "enumValues": {},
+    "enumConstantTypes": {},
+    "typedefTargets": {
+      "BOOL": "int",
+      "DWORD": "unsigned int",
+      "BYTE": "unsigned char",
+      "LPPALETTEENTRY": "tagPALETTEENTRY *"
+    },
+    "structLayouts": {
+      "D2HSLColorStrc": [
+        {
+          "name": "dHue",
+          "type": "double",
+          "offset": 0,
+          "size": 8
+        },
+        {
+          "name": "dSaturation",
+          "type": "double",
+          "offset": 8,
+          "size": 8
+        },
+        {
+          "name": "dLightness",
+          "type": "double",
+          "offset": 16,
+          "size": 8
+        }
+      ],
+      "tagRGBQUAD": [
+        {
+          "name": "rgbBlue",
+          "type": "BYTE",
+          "offset": 0,
+          "size": 1
+        },
+        {
+          "name": "rgbGreen",
+          "type": "BYTE",
+          "offset": 1,
+          "size": 1
+        },
+        {
+          "name": "rgbRed",
+          "type": "BYTE",
+          "offset": 2,
+          "size": 1
+        },
+        {
+          "name": "rgbReserved",
+          "type": "BYTE",
+          "offset": 3,
+          "size": 1
+        }
+      ],
+      "tagPALETTEENTRY": [
+        {
+          "name": "peRed",
+          "type": "BYTE",
+          "offset": 0,
+          "size": 1
+        },
+        {
+          "name": "peGreen",
+          "type": "BYTE",
+          "offset": 1,
+          "size": 1
+        },
+        {
+          "name": "peBlue",
+          "type": "BYTE",
+          "offset": 2,
+          "size": 1
+        },
+        {
+          "name": "peFlags",
+          "type": "BYTE",
+          "offset": 3,
+          "size": 1
+        }
+      ]
+    },
+    "structFields": {
+      "D2HSLColorStrc": {
+        "dHue": "double",
+        "dSaturation": "double",
+        "dLightness": "double"
+      },
+      "tagRGBQUAD": {
+        "rgbBlue": "BYTE",
+        "rgbGreen": "BYTE",
+        "rgbRed": "BYTE",
+        "rgbReserved": "BYTE"
+      },
+      "tagPALETTEENTRY": {
+        "peRed": "BYTE",
+        "peGreen": "BYTE",
+        "peBlue": "BYTE",
+        "peFlags": "BYTE"
+      }
+    },
+    "structFieldOffsets": {
+      "D2HSLColorStrc": {
+        "dHue": 0,
+        "dSaturation": 8,
+        "dLightness": 16
+      },
+      "tagRGBQUAD": {
+        "rgbBlue": 0,
+        "rgbGreen": 1,
+        "rgbRed": 2,
+        "rgbReserved": 3
+      },
+      "tagPALETTEENTRY": {
+        "peRed": 0,
+        "peGreen": 1,
+        "peBlue": 2,
+        "peFlags": 3
+      }
+    },
+    "aggregateSizes": {
+      "D2HSLColorStrc": 24,
+      "tagRGBQUAD": 4,
+      "tagPALETTEENTRY": 4
+    },
+    "unionNames": [],
+    "aggregateMembers": {
+      "D2HSLColorStrc": [
+        "dHue",
+        "dSaturation",
+        "dLightness"
+      ],
+      "tagRGBQUAD": [
+        "rgbBlue",
+        "rgbGreen",
+        "rgbRed",
+        "rgbReserved"
+      ],
+      "tagPALETTEENTRY": [
+        "peRed",
+        "peGreen",
+        "peBlue",
+        "peFlags"
+      ]
+    },
+    "fieldTypes": {
+      "dHue": "double",
+      "dSaturation": "double",
+      "dLightness": "double",
+      "rgbBlue": "BYTE",
+      "rgbGreen": "BYTE",
+      "rgbRed": "BYTE",
+      "rgbReserved": "BYTE",
+      "peRed": "BYTE",
+      "peGreen": "BYTE",
+      "peBlue": "BYTE",
+      "peFlags": "BYTE"
+    }
+  },
+  "options": {
+    "outputDir": "./out",
+    "format": "cpp",
+    "organization": "namespace",
+    "generateCMake": false,
+    "generateSourceMaps": false,
+    "transformPreset": "full",
+    "includeAddressComments": false,
+    "promoteStaticGlobals": false
+  }
+}
