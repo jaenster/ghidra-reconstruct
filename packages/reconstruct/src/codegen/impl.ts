@@ -4085,6 +4085,12 @@ function transformDecompiledCode(
         onSite: (e: { line: number }) =>
           console.warn(`[hoisted-return] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: dropped at line ${e.line}`),
       };
+      // A case ending in the return after its switch, one copy in the original (case-return-break.ts).
+      perPluginOptions['case-return-break'] = {
+        branchLayout: layout,
+        onSite: (e: { line: number }) =>
+          console.warn(`[case-break] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: at line ${e.line}`),
+      };
       // A walk to the last node whose original re-tests the copied pointer (link-retest-for.ts).
       perPluginOptions['link-retest-for'] = {
         branchLayout: layout,
