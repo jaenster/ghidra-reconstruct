@@ -14,7 +14,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert';
 
 import { computeFileLocalGlobals } from '../codegen/index.js';
-import { assignDataHomes, keepDataRunsWhole, dataHomeVeto } from '../codegen/file-local-globals.js';
+import { assignDataHomes, keepDataRunsWhole, dataHomeVeto, giveMeasuredExternalLinkage } from '../codegen/file-local-globals.js';
 import { generateGlobalsImpl } from '../codegen/globals-header.js';
 import { parseVc8DataLinkageTag, vc8DataLinkage, markMeasuredExternData, VC8_DATA_LINKAGE_TAG } from '../codegen/vc8-data-linkage.js';
 import { vc8formBodyHash } from '../codegen/vc8form-spec.js';
@@ -53,6 +53,7 @@ function scopes(tags: Array<{ name: string; size: number; decompiled: string; ta
   ];
   const unknown = markMeasuredExternData(gs, vc8DataLinkage(tags as never));
   computeFileLocalGlobals(gs, implOf, new Set());
+  giveMeasuredExternalLinkage(gs);
   assignDataHomes(gs, implOf, inputs);
   const demoted = keepDataRunsWhole(gs, implOf);
   return { gs, unknown, demoted };
@@ -61,7 +62,9 @@ function scopes(tags: Array<{ name: string; size: number; decompiled: string; ta
 describe('vc8datalinkage tags', () => {
   it('parses one or more addresses and the measured body', () => {
     assert.deepStrictEqual(parseVc8DataLinkageTag(tagData('007c0c7b,0x007C0C77')),
-      { addresses: ['007c0c7b', '007c0c77'], size: 164, body: DH });
+      { kind: 'extern', addresses: ['007c0c7b', '007c0c77'], size: 164, body: DH });
+    assert.deepStrictEqual(parseVc8DataLinkageTag(tagData('007c0c7b').replace(/^extern/, 'defined')),
+      { kind: 'defined', addresses: ['007c0c7b'], size: 164, body: DH });
     for (const bad of ['static(007c0c7b);ev=0123456789;bh=164-89abcdef;dh=' + DH, tagData(''), tagData('7c0c7b'),
       'extern(007c0c7b);bh=164-89abcdef;dh=' + DH]) {
       assert.strictEqual(parseVc8DataLinkageTag(bad), undefined, bad);
@@ -110,5 +113,41 @@ describe('Golden: NPCMENU_ScrollCompleteShowNextMessage 004b18c0', () => {
     const { gs, unknown } = scopes([func(tagData('007c0c7c'))]);
     assert.deepStrictEqual(unknown, ['007c0c7c']);
     assert.ok(gs.every(g => g.scope === 'file-local'));
+  });
+});
+
+/**
+ * A global a VC8 compile proved has external linkage in the TU that uses it: not that TU's
+ * `static`, defined in its data run all the same.
+ *
+ * Shape from 1.14d: SELECT_SetExclusionRect 00467430 loads and stores the four
+ * gnSelectExclusionRect* globals of select.cpp each in statement order; with them `static`,
+ * VC8 hoists every load above the stores and the function stops matching.
+ */
+describe('vc8datalinkage:defined', () => {
+  const defined = (addrs: string) => func(tagData(addrs).replace(/^extern/, 'defined'));
+
+  it('the tagged global leaves static and is homed in the run; the others stay static', () => {
+    const { gs, unknown, demoted } = scopes([defined('007c0c79')]);
+    assert.deepStrictEqual(unknown, []);
+    assert.strictEqual(demoted, 0);
+    const by = new Map(gs.map(g => [g.name, g]));
+    const g = by.get('gnNpcMenuTradeActionGold')!;
+    assert.strictEqual(g.scope, 'global');
+    assert.strictEqual(g.homeFile, NPCMENU);
+    for (const n of ['gnNpcMenuRepairCostGold', 'gnNpcMenuScrollCompleteMode', 'gpNpcCurrentSpeech']) {
+      assert.deepStrictEqual([by.get(n)!.scope, by.get(n)!.ownerFile], ['file-local', NPCMENU], n);
+    }
+  });
+
+  it('a global measured both extern and defined keeps the scope its users give it', () => {
+    const l = vc8DataLinkage([defined('007c0c79'), func(tagData('007c0c79'))]);
+    assert.strictEqual(l.external.size + l.defined.size, 0);
+    assert.deepStrictEqual(l.stale.map(s => s.why), ['measured both extern and defined']);
+    assert.strictEqual(scopes([defined('007c0c79'), func(tagData('007c0c79'))]).gs[1].scope, 'file-local');
+  });
+
+  it('a stale defined tag changes nothing', () => {
+    assert.ok(scopes([func(tagData('007c0c79').replace(/^extern/, 'defined'), 170)]).gs.every(g => g.scope === 'file-local'));
   });
 });

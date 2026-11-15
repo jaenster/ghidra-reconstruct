@@ -117,6 +117,22 @@ export function foreignReferencedFileLocals(
   return out;
 }
 
+/**
+ * Globals a `vc8datalinkage:defined` tag proves have external linkage (vc8-data-linkage.ts):
+ * a file-local one leaves `static` - and a function-owned one its function - and is
+ * homed in its TU's data run like any other global all of whose users are in one TU.
+ * Returns how many moved.
+ */
+export function giveMeasuredExternalLinkage(globals: AnalyzedDataSymbol[]): number {
+  let n = 0;
+  for (const g of globals) {
+    if (!g.externalLinkage || g.scope !== 'file-local') continue;
+    demote(g, 'vc8datalinkage-defined');
+    n++;
+  }
+  return n;
+}
+
 /** Foreign source names these: they keep external linkage. Returns how many moved back. */
 export function keepForeignReferencedGlobalsExternal(
   globals: AnalyzedDataSymbol[],

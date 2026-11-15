@@ -143,7 +143,7 @@ import { hashFunction, hashDataType, hashGlobal } from '../modules/buildinfo.js'
 import { warningRows, formatWarningsTsv, WARNINGS_TSV } from './warning-facts.js';
 import { markCompilerData, compilerDataReport } from './compiler-data.js';
 import { vc8DataLinkage, markMeasuredExternData } from './vc8-data-linkage.js';
-import { keepForeignReferencedGlobalsExternal, keepDataRunsWhole, fileLocalGlobalKey, assignDataHomes, dataHomeVetoCounts, dataHomeVeto, homedGlobalKey, dataHeaderPathOf } from './file-local-globals.js';
+import { keepForeignReferencedGlobalsExternal, giveMeasuredExternalLinkage, keepDataRunsWhole, fileLocalGlobalKey, assignDataHomes, dataHomeVetoCounts, dataHomeVeto, homedGlobalKey, dataHeaderPathOf } from './file-local-globals.js';
 import { noteGlobalScopeReason, resetGlobalScopeTrace, setGlobalScopeTraceImplMap, reportGlobalScopeTrace } from './global-scope-trace.js';
 
 /**
@@ -1775,6 +1775,8 @@ export function generateProjectStage1(
         console.log(`Globals kept external (named by a global initializer): ${reclaimed}`);
       }
       const pinned = keepForeignReferencedGlobalsExternal(analyzedGlobals, foreignSources);
+      const measuredExternal = giveMeasuredExternalLinkage(analyzedGlobals);
+      if (measuredExternal > 0) console.log(`Globals given external linkage in their TU (vc8datalinkage:defined): ${measuredExternal}`);
       const homes = assignDataHomes(analyzedGlobals, funcToImpl, { foreignSources, functionQualifiedNames, rootTypeNames: allDataTypeNames });
       const split = keepDataRunsWhole(analyzedGlobals, funcToImpl);
       if (pinned || split) {
@@ -1850,6 +1852,7 @@ export function generateProjectStage1(
         reconcileStaticScopeWithBodyReferences(analyzedGlobals, functions, funcToImpl, allDataTypeNames, programInfo?.imageBase, strings ?? []);
         promoteInitializerReferencedGlobals(analyzedGlobals);
         keepForeignReferencedGlobalsExternal(analyzedGlobals, foreignSources);
+        giveMeasuredExternalLinkage(analyzedGlobals);
         const homes = assignDataHomes(analyzedGlobals, funcToImpl, { foreignSources, functionQualifiedNames, rootTypeNames: allDataTypeNames });
         keepDataRunsWhole(analyzedGlobals, funcToImpl);
         reportDataHomes(analyzedGlobals, homes);
@@ -4143,9 +4146,12 @@ function buildAddressLiteralResolver(
 function applyMeasuredDataLinkage(analyzedGlobals: AnalyzedDataSymbol[], functions: ReadonlyArray<ExtractedFunction>): void {
   const linkage = vc8DataLinkage(functions);
   const unknown = markMeasuredExternData(analyzedGlobals, linkage);
-  if (linkage.external.size > 0) {
-    console.log(`Globals defined outside the TU that uses them (vc8datalinkage): ${linkage.external.size - unknown.length}` +
+  if (linkage.external.size > 0 || unknown.length > 0) {
+    console.log(`Globals defined outside the TU that uses them (vc8datalinkage): ${linkage.external.size}` +
       (unknown.length ? `; no global at ${unknown.join(', ')}` : ''));
+  }
+  if (linkage.defined.size > 0) {
+    console.log(`Globals with external linkage in the TU that uses them (vc8datalinkage:defined): ${linkage.defined.size}`);
   }
   if (linkage.stale.length > 0) {
     console.log(`Stale vc8datalinkage tags (${linkage.stale.length}): ` +
