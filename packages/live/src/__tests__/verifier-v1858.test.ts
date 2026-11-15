@@ -91,7 +91,10 @@ describe('model verifier against the stale v1858 model', { skip }, () => {
     assert.match(druid.diff!, /- .*pAllStatesDataTblFlag0x10\[nStateIdx\]\.nStateId;/);
     assert.match(druid.diff!, /\+ .*\(short\)sgptDataTable->pAllStatesDataTblFlag0x10\[nStateIdx\];/);
     const stale = checks.filter(c => c.status === 'mismatch').map(c => c.key).sort();
-    assert.deepStrictEqual(stale, ['004c72f0', '005c8980', '0062c100', '00645270', '00646020']);
+    // 0049a950 differs only in zeroStores: Ghidra's row now carries the `rezero` bytes (a zero
+    // store after an address-take ended the opening run) that the fixture's older record lacks.
+    assert.deepStrictEqual(stale, ['0049a950', '004c72f0', '005c8980', '0062c100', '00645270', '00646020']);
+    assert.deepStrictEqual(checks.find(c => c.key === '0049a950')!.fields, ['zeroStores']);
     const others = checks.filter(c => !stale.includes(c.key));
     assert.ok(others.length > 0 && others.every(c => c.status === 'match'),
       `every other function matches: ${others.filter(c => c.status !== 'match').map(c => `${c.key} ${c.status} ${c.fields ?? c.note}`).join('; ')}`);
@@ -112,7 +115,7 @@ describe('model verifier against the stale v1858 model', { skip }, () => {
     }, { enabled: true, batchSize: 16, typeBatchSize: 64, globalBatchSize: 200, concurrency: 4, pauseMs: 0, quietMs: 0, keepMismatches: 50 }, null);
     const r = await v.verifyNow(rec.functions) as { stale: number };
     await applied;
-    assert.equal(r.stale, 5);
+    assert.equal(r.stale, stale.length);
     assert.match(indices.fnByAddr.get('005c8980')!.decompiled!, /\(eD2States\)\(short\)sgptDataTable->pAllStatesDataTblFlag0x10\[nStateIdx\];/);
     const after = computeHashCache(model.primary);
     const moved = Object.keys(after.functions).filter(a => after.functions[a].hash !== before.functions[a]?.hash).sort();
