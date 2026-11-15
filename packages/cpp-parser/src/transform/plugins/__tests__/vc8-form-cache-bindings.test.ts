@@ -55,6 +55,11 @@ it('preserves the measured first-character cache across a final loop pointer ste
  assert.ok(r.site.applied,r.site.why);assert.match(r.after,/uint16_t t2_c0 = \*szBuffer;/);
  assert.match(r.after,/if \(t2_c0 == 10\)/);assert.match(r.after,/szBuffer\+\+;/);
 });
+it('keeps an address cache while storing through its members',()=>{
+ const r=apply('int f(Frame* frame) { frame->slot.a=3; frame->slot.b=4; return frame->slot.a+frame->slot.b; }','cache(&frame->slot,pSlot,Slot*)');
+ assert.ok(r.site.applied,r.site.why);assert.match(r.after,/pSlot->a = 3;/);assert.match(r.after,/pSlot->b = 4;/);
+ assert.match(r.after,/return pSlot->a \+ pSlot->b;/);
+});
 const refusals:Array<[string,string,string]>=[
  ['legacy brace subscript tag','int f(Entry* table,int index) { return table[index].value; }','cache(&table{index},entry,Entry*)'],
  ['invalid cache type','int f(int value) { return value; }','cache(value,cached,int +)'],

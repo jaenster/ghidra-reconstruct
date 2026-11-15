@@ -1574,6 +1574,13 @@ function doCache(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'cache' }>): void {
     }
     return false;
   };
+  const changesDependency = (n: ASTNode) => [...walk(n)].some(({ node }) => {
+    const target = node.kind === NodeKind.AssignExpr ? (node as AssignExpr).left
+      : node.kind === NodeKind.PostfixExpr || (node.kind === NodeKind.UnaryExpr && ['++', '--'].includes((node as UnaryExpr).operator))
+        ? (node as UnaryExpr | PostfixExpr).operand : undefined;
+    const variable = target && unparen(target);
+    return variable && isId(variable) && dependencies.has(variable.name);
+  });
   const replaceIn = (n: ASTNode): number => {
     let k = 0;
     for (const { node, slot } of [...walk(n)]) {
@@ -1587,7 +1594,7 @@ function doCache(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'cache' }>): void {
       // the final loop body is different: existing measured tags deliberately
       // cache its first read across the loop (TEXT_CalculateTextHeight).
       for (let p = parents.get(node); p && isExpression(p.kind); p = parents.get(p))
-        if (stores(p)) refuse(`${f.expr} changes within a cached read`);
+        if (changesDependency(p)) refuse(`${f.expr} changes within a cached read`);
       const id = { kind: NodeKind.Identifier, name: f.name } as Identifier;
       if (!byAddress) put(slot, id);
       else if (owner && owner.kind === NodeKind.MemberExpr && slot.key === 'object' && !(owner as unknown as { isArrow: boolean }).isArrow) {
