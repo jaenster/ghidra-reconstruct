@@ -38,6 +38,13 @@
  *   if (C) { fail; } else E   followed by `return R;` (or the end of a void function)
  *                                                  -> the block, then E, then the return
  *
+ * A check that dereferences a name (`*p == '\0'`, Storm's VALIDATE(*p)) can fault, so it is
+ * taken only on the original's word that it evaluated it unconditionally: the compare-sites row
+ * of that test's NEG says the decompiler printed it in a branch condition (`pos` `b`) while the
+ * original materialised it with SBB (`use` `c`). The original then read `*p` whatever the other
+ * checks found (SRegDeleteValue 00414d90 loads `*pszSubKey` before it tests `pszSubKey`), and so
+ * does the block.
+ *
  * A check that also blanks an out parameter (Storm's VALIDATEANDBLANK) is no mask: it is
  * `if (p) *p = 0; else <accumulator> = 0`, one TEST and a conditional jump, and the block's
  * failure arm is laid out after the code that follows the check. The decompiler folds the
@@ -58,7 +65,7 @@
 import { NodeKind } from '../../../ast/kinds.js';
 import type {
   AnyNode, ASTNode, AssignExpr, BinaryExpr, CallExpr, CharLiteralExpr, CompoundStmt, CStyleCastExpr, DeclStmt, ExprStmt, Expression,
-  FunctionDecl, IfStmt, IntegerLiteralExpr, MemberExpr, ParenExpr, ReturnStmt, Statement, UnaryExpr,
+  FunctionDecl, IfStmt, IntegerLiteralExpr, MemberExpr, ParenExpr, ReturnStmt, Statement, SubscriptExpr, UnaryExpr,
   VariableDecl, BuiltinType,
 } from '../../../ast/nodes.js';
 import { traverseAST } from '../../../ast/visitor.js';
@@ -100,6 +107,12 @@ export interface ParamCheckBlockOptions extends PluginOptions {
   errorSetter?: string;
   /** The code it is called with. */
   errorCode?: number;
+  /**
+   * The function's compare-sites rows (extract/compare-sites.ts) and its entry address: a check
+   * that dereferences is taken when the row at its NEG says the original materialised it.
+   */
+  compareSites?: string;
+  entry?: string;
   /** Called once per rewritten block. */
   onSite?: (site: { line: number; checks: number; form: 'return' | 'void' | 'else' | 'blank' }) => void;
   /** Called once per failure arm left as it is, with the reason. */
@@ -151,6 +164,48 @@ function pureLeaf(e: Expression): boolean {
     }
   }
   return true;
+}
+
+/** A read through a name: `*p`, `*(T *)p`, `p[k]` with a literal `k`. */
+function nameRead(n: ASTNode): boolean {
+  if (n.kind === NodeKind.UnaryExpr && (n as UnaryExpr).operator === '*') {
+    let o = stripParens((n as UnaryExpr).operand);
+    while (o.kind === NodeKind.CStyleCastExpr) o = stripParens((o as CStyleCastExpr).expression);
+    return o.kind === NodeKind.Identifier;
+  }
+  if (n.kind === NodeKind.SubscriptExpr) {
+    return stripParens((n as SubscriptExpr).array).kind === NodeKind.Identifier
+      && stripParens((n as SubscriptExpr).index).kind === NodeKind.IntegerLiteral;
+  }
+  return false;
+}
+
+/** Whether `e` reads through a name and is otherwise what pureLeaf allows. */
+function derefLeaf(e: Expression): boolean {
+  let reads = 0;
+  const ok = (x: Expression): boolean => {
+    if (nameRead(x)) { reads++; return true; }
+    switch (x.kind) {
+      case NodeKind.ParenExpr: return ok((x as ParenExpr).expression);
+      case NodeKind.CStyleCastExpr: return ok((x as CStyleCastExpr).expression);
+      case NodeKind.UnaryExpr: return PURE_UNARY.has((x as UnaryExpr).operator) && ok((x as UnaryExpr).operand);
+      case NodeKind.BinaryExpr: return !IMPURE_BINARY.has((x as BinaryExpr).operator) && ok((x as BinaryExpr).left) && ok((x as BinaryExpr).right);
+      default: return pureLeaf(x);
+    }
+  };
+  return ok(e) && reads > 0;
+}
+
+/** The compare-sites rows' (pos, use) by op address, `pos` and `use` columns present. */
+function rowsByAddress(rows: string | undefined): Map<number, { pos: string; use: string }[]> {
+  const out = new Map<number, { pos: string; use: string }[]>();
+  for (const line of (rows ?? '').split('\n')) {
+    const f = line.split('\t');
+    if (f.length < 22 || !/^[0-9a-f]+$/i.test(f[8])) continue;
+    const at = Number.parseInt(f[8], 16);
+    out.set(at, [...(out.get(at) ?? []), { pos: f[18], use: f[19] }]);
+  }
+  return out;
 }
 
 /** `!d`, written without a double negation where the leaf allows it. */
@@ -254,6 +309,14 @@ function createParamCheckBlockTransformer(options: ParamCheckBlockOptions = {}):
   const ev = options.branchLayout;
   const setter = options.errorSetter;
   const code = BigInt(options.errorCode ?? 0x57);
+  const sites = rowsByAddress(options.compareSites);
+  const entry = options.entry && /^(0x)?[0-9a-f]+$/i.test(options.entry) ? Number.parseInt(options.entry.replace(/^0x/i, ''), 16) : null;
+  /** Whether the original materialised the test at this offset: its rows say printed as a branch, read by SBB. */
+  const materialised = (at: number): boolean => {
+    if (entry === null) return false;
+    const r = sites.get(entry + at);
+    return !!r && r.length > 0 && r.every(x => x.pos === 'b' && x.use === 'c');
+  };
 
   /** The failure call `setter(code)`, or null. */
   const failCall = (s: Statement): Expression | null => {
@@ -340,9 +403,12 @@ function createParamCheckBlockTransformer(options: ParamCheckBlockOptions = {}):
         const form: 'return' | 'void' | 'else' = passArm && negated ? 'else' : ret === null ? 'void' : 'return';
 
         const leaves = chainLeaves(ifs.condition, negated ? '||' : '&&');
-        if (!leaves.every(pureLeaf)) { left('a check has a side effect or can fault'); continue; }
+        if (!leaves.every(l => pureLeaf(l) || derefLeaf(l))) { left('a check has a side effect or can fault'); continue; }
         const tests = headerTests(ifs);
         if (!tests || tests.length !== leaves.length) { left(`${tests?.length ?? 'no'} equality tests for ${leaves.length} checks`); continue; }
+        if (leaves.some((l, k) => !pureLeaf(l) && !(tests[k].mnemonic === 'NEG' && materialised(tests[k].at)))) {
+          left('a check reads through a pointer the original did not evaluate unconditionally'); continue;
+        }
         // `if (p) { *p = 0; ...leaves... } fail; return R;` or `if (!p) { fail; return R; } *p = 0; ...`
         const guardForm = negated && !passArm && failing.ret !== undefined && alwaysLeaves(Stmt.compound(after));
         const blankArm = leaves.length === 1 && tests[0].mnemonic !== 'NEG'
