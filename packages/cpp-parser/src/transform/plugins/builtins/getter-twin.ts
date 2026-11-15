@@ -48,6 +48,7 @@ import { getChildren, traverseAST } from '../../../ast/visitor.js';
 import { createTransformer, cloneNode, updateNode, type Transformer } from '../../transformer.js';
 import { bareName, calleeName } from './call-arg-cast.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
+import type { BranchLayoutEvidence } from './branch-layout/evidence.js';
 
 /** A getter `return F(p[i0], ...)->M[p[k]->N];` and the twin a site calls instead. */
 export interface GetterTwin {
@@ -69,6 +70,8 @@ export interface GetterTwin {
 
 export interface GetterTwinOptions extends PluginOptions {
   twins?: GetterTwin[];
+  /** Code offsets per line of the parsed text (branch-layout/evidence.ts); orders a held site against its index's store. */
+  branchLayout?: BranchLayoutEvidence | null;
   onSite?: (e: { line: number; call: string; held: string | null }) => void;
 }
 
@@ -171,6 +174,49 @@ function evaluated(s: Statement): ASTNode | null {
     case NodeKind.DeclStmt: return (s as DeclStmt).declarations.length === 1 ? s : null;
     default: return null;
   }
+}
+
+/** The lowest code offset the lines of a statement print; null when they print none. */
+function lowOffset(s: Statement, ev: BranchLayoutEvidence): number | null {
+  if (!s.location) return null;
+  let low: number | null = null;
+  for (let l = s.location.start.line; l <= s.location.end.line; l++) {
+    for (const o of ev.lines.get(l) ?? []) if (low === null || o < low) low = o;
+  }
+  return low;
+}
+
+/**
+ * The index `b->N` reads a local b stored by the statement right before the held store, and
+ * the original's code for the held call starts ahead of that store's (Q05_Callback13_PlayerStartedGame
+ * 00595860: `mov eax, [edx+0xc]` for the call's argument before `mov esi, [edx]` for pGame).
+ * The twin takes b as an argument and VC8 then evaluates the store first, so the site keeps
+ * its call in its own statement, where VC8 schedules the argument's load first as well.
+ */
+function indexStoredAfter(st: readonly Statement[], i: number, index: Expression, ev: BranchLayoutEvidence | null | undefined): boolean {
+  if (!ev || i === 0) return false;
+  // The twin's index argument: b itself (the getter reads b->N).
+  const b = unparen(index);
+  if (b.kind !== NodeKind.Identifier) return false;
+  const prev = heldOrStore(st[i - 1]);
+  if (prev !== (b as Identifier).name) return false;
+  const a = lowOffset(st[i], ev), p = lowOffset(st[i - 1], ev);
+  return a !== null && p !== null && a < p;
+}
+
+/** `v = e;` or `T v = e;`: v, else null. */
+function heldOrStore(s: Statement): string | null {
+  if (s.kind === NodeKind.ExprStmt) {
+    const e = unparen((s as ExprStmt).expression);
+    if (e.kind !== NodeKind.AssignExpr || (e as AssignExpr).operator !== '=') return null;
+    const l = unparen((e as AssignExpr).left);
+    return l.kind === NodeKind.Identifier ? (l as Identifier).name : null;
+  }
+  if (s.kind === NodeKind.DeclStmt) {
+    const ds = (s as DeclStmt).declarations;
+    return ds.length === 1 && ds[0].kind === NodeKind.VariableDecl && (ds[0] as VariableDecl).initializer ? (ds[0] as VariableDecl).name.name : null;
+  }
+  return null;
 }
 
 /** `V = F(a);` or `T V = F(a);`: the held local and the call. */
@@ -290,6 +336,7 @@ function rewriteFunction(fn: FunctionDecl, opts: GetterTwinOptions): FunctionDec
       // The arguments are not V itself and are not written by the reading statement.
       if (b.some(x => [...traverseAST(x)].some(k => isId(k, h.name)))) { refused.add(h.name); continue; }
       if (!statementCalm(next, unparen(site as Expression))) { refused.add(h.name); continue; }
+      if (indexStoredAfter(st, i, r.index, opts.branchLayout)) continue;
       const list = pairs.get(h.name) ?? [];
       list.push({ block, at: i, twin, bound: b, site, decl: h.decl });
       pairs.set(h.name, list);

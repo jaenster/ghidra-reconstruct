@@ -4218,6 +4218,7 @@ function transformDecompiledCode(
     if (context?.getterTwins && context.getterTwins.length > 0) {
       perPluginOptions['getter-twin'] = {
         twins: context.getterTwins,
+        branchLayout: layout ?? null,
         onSite: (e: { call: string; held: string | null }) =>
           console.warn(`[getter-twin] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.call}${e.held ? ` (held in ${e.held})` : ''}`),
       };
