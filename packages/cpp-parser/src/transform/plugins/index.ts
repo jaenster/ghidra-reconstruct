@@ -1064,6 +1064,8 @@ import { switchCaseSignednessPlugin } from './builtins/switch-case-signedness.js
 export { switchCaseSignednessPlugin } from './builtins/switch-case-signedness.js';
 
 import { switchCaseDedupPlugin } from './builtins/switch-case-dedup.js';
+import { testedValueArmPlugin } from './builtins/tested-value-arm.js';
+export { testedValueArmPlugin, type TestedValueArmOptions } from './builtins/tested-value-arm.js';
 export { switchCaseDedupPlugin, type SwitchCaseDedupOptions } from './builtins/switch-case-dedup.js';
 
 import { duplicateLabelUniquifyPlugin } from './builtins/duplicate-label-uniquify.js';
@@ -1221,6 +1223,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   typeNormalizePlugin,         // Cleanup: uint → uint32_t, undefined4 → auto/uint32_t (priority 15)
   pointerCastNormalizePlugin, // Cleanup: (int)&expr → (intptr_t)&expr, (uint32_t)&expr → (uintptr_t)&expr (priority 16)
   pseudoOpLowerPlugin,        // Cleanup: SUB/CONCAT/ZEXT/SEXT/CARRY/SBORROW → exact C++ (priority 20)
+  testedValueArmPlugin,       // Matching: an if-chain arm that is the else arm at the tested constant -> dropped (priority 21.5)
   loopPhiElementCopyPlugin,   // Correctness: a loop-carried value merged into a local array element, stored by no instruction -> a local (priority 4.5)
   sunkStoreHoistPlugin,       // Correctness: a stack element store sunk past a read through its address -> back before the read (priority 21)
   fourccLiteralPlugin,        // Cleanup: (char[4])L'\x...' → "abcd" (priority 25)

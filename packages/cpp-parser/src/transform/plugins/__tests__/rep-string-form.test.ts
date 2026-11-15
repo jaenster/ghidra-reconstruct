@@ -169,7 +169,8 @@ ${after}
     // A frame array nothing named before the loop: no pointer from outside reaches into it.
     const frame = COPY('  pSrc = pAny;\n  pDst = aTable;').replace('void f() {', 'void f(uint *pAny) {');
     assert.match(run(frame, [MOVS], globals).out, /memcpy\(pDst, pSrc, 0x7f8\);/);
-    const named = COPY('  h(aTable);\n  pSrc = pAny;\n  pDst = aTable;').replace('void f() {', 'void f(uint *pAny) {');
+    // Named before the loop, and the source is a pointer a callee returned: it may point into it.
+    const named = COPY('  h(aTable);\n  pSrc = (uint *)k(pAny);\n  pDst = aTable;').replace('void f() {', 'void f(uint *pAny) {');
     assert.match(run(named, [MOVS], globals).out, /\*pDst = \*pSrc/);
   });
 
@@ -477,5 +478,103 @@ describe('rep-string-form: a copy out of a frame record', () => {
     const code = SAVE_QUESTS('').replace('  pSrc = &pSaveQuests;', '  pDst = *pStartAddress;\n  pSrc = &pSaveQuests;');
     assert.match(run(code.replace('  pEnd = pDst + 0x12a;\n', ''), [MOVS_QUESTS], QUEST_LAYOUTS).out, /for \(i = 0x4a/);
     assert.match(run(SAVE_QUESTS('  pDst = *pStartAddress;\n  pDst = g(pDst);'), [MOVS_QUESTS], QUEST_LAYOUTS).out, /for \(i = 0x4a/);
+  });
+});
+
+// Copies whose two pointers are shown apart by where the objects come from: a fresh block from
+// an allocator, a parameter's memory against a frame object, and one member of two pointers to
+// the same struct type (they coincide or do not overlap).
+const MOVS_DW = (count: number, names: string[]): RepStringOp => ({ op: 'movs', unit: 4, count, names });
+const COPY_LOOP = (n: string, d: string, s: string, count: string) => `  for (${n} = ${count}; ${n} != 0; ${n} = ${n} + -1) {
+    *${d} = *${s};
+    ${s} = ${s} + 1;
+    ${d} = ${d} + 1;
+  }`;
+
+describe('rep-string-form: copies between objects shown apart', () => {
+  // SMemAllocHeapRecord-style: the allocator's block filled from a frame record.
+  const FRESH = (alloc = 'Storm::Source::SMem::SMemAlloc(0x130, s_rec, 0xfffffffe, 8)', extra = '') => `void f(void) {
+  int **pNewRec;
+  uint32_t *pDst;
+  uint32_t *pSrc;
+  int n;
+  uint32_t sDetails [0x4a];
+  g(sDetails);
+  pNewRec = (int **)${alloc};
+  if (pNewRec == (int **)0x0) {
+    pNewRec = (int **)0x0;
+  }
+${extra}  pSrc = sDetails;
+  pDst = (uint32_t *)(pNewRec + 2);
+${COPY_LOOP('n', 'pDst', 'pSrc', '0x4a')}
+  h(pNewRec);
+}`;
+  const OP = MOVS_DW(0x4a, ['n', 'pDst', 'pSrc']);
+
+  it('a block an allocator returned against a frame object', () => {
+    const { out, census } = run(FRESH(), [OP]);
+    assert.match(out, /memcpy\(pDst, pSrc, 0x128\);/);
+    assert.deepStrictEqual(census, { fills: 0, copies: 1, untied: 0 });
+  });
+
+  it('leaves it when the callee is not a known allocator, or the local holds another value', () => {
+    assert.match(run(FRESH('Storm::Source::SMem::SMemFind(0x130)'), [OP]).out, /for \(n = 0x4a/);
+    assert.match(run(FRESH(undefined, '  pNewRec = (int **)k(pNewRec);\n'), [OP]).out, /for \(n = 0x4a/);
+    assert.match(run(FRESH(undefined, '  m(&pNewRec);\n'), [OP]).out, /for \(n = 0x4a/);
+  });
+
+  const PARAM = (dst = 'pModuleList + *pModuleList * 0x8a + 1', head = '') => `int f(int *pModuleList) {
+  int *pDst;
+  int *pSrc;
+  int n;
+  int aInfo [0x8a];
+${head}  g(aInfo);
+  pSrc = aInfo;
+  pDst = ${dst};
+${COPY_LOOP('n', 'pDst', 'pSrc', '0x8a')}
+  return 1;
+}`;
+  const OPP = MOVS_DW(0x8a, ['n', 'pDst', 'pSrc']);
+
+  it('an address computed from an untouched parameter against a frame object', () => {
+    assert.match(run(PARAM(), [OPP]).out, /memcpy\(pDst, pSrc, 0x228\);/);
+  });
+
+  it('leaves it when the address is loaded through the parameter or the parameter is reassigned', () => {
+    assert.match(run(PARAM('(int *)*pModuleList'), [OPP]).out, /for \(n = 0x8a/);
+    assert.match(run(PARAM(undefined, '  pModuleList = (int *)k();\n'), [OPP]).out, /for \(n = 0x8a/);
+  });
+
+  const GAME = [
+    { name: 'pPartyControl', offset: 0, size: 4, type: 'void *' },
+    { name: 'nBossFlagList', offset: 4, size: 64, type: 'uint8_t[64]' },
+    { name: 'nTail', offset: 68, size: 4, type: 'int' },
+  ];
+  const SAME = (count = '0x10', src = 'pSource->nBossFlagList', srcType = 'D2GameStrc') => `void f(D2GameStrc *pGame, ${srcType} *pSource) {
+  uint *pDst;
+  uint *pSrc;
+  int n;
+  pGame->pPartyControl = pSource->pPartyControl;
+  pSrc = (uint *)${src};
+  pDst = (uint *)pGame->nBossFlagList;
+${COPY_LOOP('n', 'pDst', 'pSrc', count)}
+}`;
+  const SAME_LAYOUTS = { structLayouts: { D2GameStrc: GAME, D2OtherStrc: GAME }, aggregateSizes: { D2GameStrc: 72, D2OtherStrc: 72 } };
+
+  it('one array member of two pointers to the same struct type', () => {
+    assert.match(run(SAME(), [MOVS_DW(0x10, ['n', 'pDst', 'pSrc'])], SAME_LAYOUTS).out, /memcpy\(pDst, pSrc, 0x40\);/);
+  });
+
+  it('a `this` member: the parameter this-param-rewrite names it (GAME copy 0x10 dwords of nBossFlagList)', () => {
+    const code = SAME().replace('D2GameStrc *pGame', 'D2GameStrc *pThis').replace(/pGame->/g, 'this->');
+    const op = [MOVS_DW(0x10, ['n', 'pDst', 'pSrc'])];
+    assert.match(run(code, op, { ...SAME_LAYOUTS, thisName: 'pThis' }).out, /memcpy\(pDst, pSrc, 0x40\);/);
+    assert.match(run(code, op, SAME_LAYOUTS).out, /for \(n = 0x10/);
+  });
+
+  it('leaves it past the end of the struct, for another member, or another struct type', () => {
+    assert.match(run(SAME('0x12'), [MOVS_DW(0x12, ['n', 'pDst', 'pSrc'])], SAME_LAYOUTS).out, /for \(n = 0x12/);
+    assert.match(run(SAME('0x10', '&pSource->nTail'), [MOVS_DW(0x10, ['n', 'pDst', 'pSrc'])], SAME_LAYOUTS).out, /for \(n = 0x10/);
+    assert.match(run(SAME('0x10', 'pSource->nBossFlagList', 'D2OtherStrc'), [MOVS_DW(0x10, ['n', 'pDst', 'pSrc'])], SAME_LAYOUTS).out, /for \(n = 0x10/);
   });
 });

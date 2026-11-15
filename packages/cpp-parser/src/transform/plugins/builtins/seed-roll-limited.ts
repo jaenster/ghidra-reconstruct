@@ -56,6 +56,15 @@
  *   - nothing the seed's address names is written in the block.
  * The call stores the same two words, and r gets the same value converted the same way. The
  * declarations of temporaries nothing names any more go.
+ *
+ * The decompiler often merges the helper's `<= 0` arm with the code around it: the result is
+ * set to 0 before the guard, or the guard has no else and a label below it stores the 0. Then
+ * the other branch is not `r = 0;` and only the positive branch's roll is rewritten: its first
+ * if/else, the statements before it, and the plain statements after it up to the shortest run
+ * that completes the step (a high-word store sunk below the join). The guard proved the limit
+ * positive, where the helper never takes its `<= 0` arm, so those statements alone are
+ * `r = D2_SeedRollLimited(&seed, n);`; the guard and the rest of its branch stay. The same
+ * symbolic checks hold over the replaced statements, and r is the last store of both arms.
  */
 
 import { NodeKind } from '../../../ast/kinds.js';
@@ -704,6 +713,33 @@ interface Guard {
   result: string;
   /** The branch run when the limit is positive. */
   body: Statement;
+  /**
+   * Set when the other branch is not `r = 0;` (or there is none): only the first `count`
+   * statements of the positive branch, ending in the power-of-two if/else, are the roll.
+   * They run only when the guard found the limit positive, where the helper's `<= 0` arm
+   * is never taken, so they alone are `r = D2_SeedRollLimited(&seed, n);`.
+   */
+  prefix?: number;
+  /** The longest prefix tried: the if/else and the plain statements after it (a high-word
+   *  store sunk below the join belongs to the roll). */
+  maxPrefix?: number;
+}
+
+/** An assignment to r as the last statement of a branch: r. */
+function lastStore(s: Statement): string | null {
+  const l = listOf(s);
+  const last = l[l.length - 1];
+  if (!last || last.kind !== NodeKind.ExprStmt) return null;
+  const e = unwrap((last as ExprStmt).expression);
+  // `r = E` or `r op= E`: the runner checks what r ends as.
+  if (e.kind !== NodeKind.AssignExpr) return null;
+  return nameOf((e as AssignExpr).left);
+}
+
+/** The statements of a guard's positive branch that make the roll. */
+function rollStatements(g: Guard): Statement[] {
+  const l = listOf(g.body);
+  return g.prefix === undefined ? l : l.slice(0, g.prefix);
 }
 
 /** `r = 0;` as the whole branch: r. */
@@ -718,7 +754,7 @@ function zeroStore(s: Statement): string | null {
 }
 
 function guardOf(i: IfStmt, ctx: Ctx): Guard | null {
-  if (!i.elseBranch || i.init) return null;
+  if (i.init) return null;
   const c = unwrap(i.condition);
   if (c.kind !== NodeKind.BinaryExpr) return null;
   const b = c as BinaryExpr;
@@ -748,11 +784,27 @@ function guardOf(i: IfStmt, ctx: Ctx): Guard | null {
     // (promoted to int, never negative, so `<= 0` is `== 0` either way).
     if (!k || k.w === 64 || (k.w === 32 && !k.s)) return null;
   }
-  const result = zeroStore(positiveIsThen ? i.elseBranch : i.thenBranch);
-  if (!result) return null;
-  const rk = ctx.kinds.get(result);
-  if (!rk || rk === 'seed' || rk.w !== 32 || ctx.addressed.has(result) || !ctx.locals.has(result)) return null;
-  return { limit, result, body: positiveIsThen ? i.thenBranch : i.elseBranch };
+  const positive = positiveIsThen ? i.thenBranch : i.elseBranch;
+  if (!positive) return null;
+  const other = positiveIsThen ? i.elseBranch : i.thenBranch;
+  const usable = (r: string | null): r is string => {
+    if (!r) return false;
+    const rk = ctx.kinds.get(r);
+    return !!rk && rk !== 'seed' && rk.w === 32 && !ctx.addressed.has(r) && ctx.locals.has(r);
+  };
+  const result = other ? zeroStore(other) : null;
+  if (usable(result)) return { limit, result, body: positive };
+  // The zero result is written elsewhere (the decompiler merged the helper's `<= 0` arm with
+  // code around it): the roll is the positive branch up to its first if/else.
+  const list = listOf(positive);
+  const at = list.findIndex(s => s.kind === NodeKind.IfStmt && !!(s as IfStmt).elseBranch);
+  if (at < 0) return null;
+  const test = list[at] as IfStmt;
+  const r = lastStore(test.thenBranch);
+  if (!usable(r) || lastStore(test.elseBranch!) !== r) return null;
+  let end = at + 1;
+  while (end < list.length && (list[end].kind === NodeKind.ExprStmt || list[end].kind === NodeKind.NullStmt)) end++;
+  return { limit, result: r, body: positive, prefix: at + 1, maxPrefix: end };
 }
 
 // ---------------------------------------------------------------------------
@@ -1058,14 +1110,14 @@ function createSeedRollLimitedTransformer(options: SeedRollLimitedOptions = {}):
         if (s.kind !== NodeKind.IfStmt) continue;
         const guard = guardOf(s as IfStmt, ctx);
         if (!guard) continue;
-        try {
+        const attempt = (g: Guard): Found => {
           const facts = factsAt(work, s as IfStmt, ctx, seedPointers, ownAddressed);
           const entry: State = { env: new Map(facts.env), seed: null, lo: null, hi: null, stored: false, arm: null, written: new Set() };
-          const nKey = new Runner(ctx, '', facts.ptrs).num(entry, guard.limit).k;
+          const nKey = new Runner(ctx, '', facts.ptrs).num(entry, g.limit).k;
           const ends: State[] = [];
           for (const take of [true, false]) {
             const st: State = { env: new Map(facts.env), seed: null, lo: null, hi: null, stored: false, arm: null, written: new Set() };
-            new Runner(ctx, nKey, facts.ptrs).run(st, listOf(guard.body), take);
+            new Runner(ctx, nKey, facts.ptrs).run(st, rollStatements(g), take);
             if (st.arm === null || !st.seed) no('no test');
             ends.push(st);
           }
@@ -1077,19 +1129,32 @@ function createSeedRollLimitedTransformer(options: SeedRollLimitedOptions = {}):
           ];
           ends.forEach((st, i) => {
             if (!st.lo || !st.hi || st.lo.k !== trunc(step).k || st.hi.k !== high(step).k) no('seed not stepped once');
-            const r = st.env.get(guard.result);
+            const r = st.env.get(g.result);
             if (!r || r.t !== 'num' || r.k !== want[st.arm ? 0 : 1]) no('result');
             if (!sameExpr(st.seed as ASTNode, ends[0].seed as ASTNode)) no('two seeds');
           });
           // The seed's address names nothing the block writes.
           const written = new Set([...ends[0].written, ...ends[1].written]);
           for (const name of [...namesIn(ends[0].seed!), ...namesIn(ends[0].spelled!)]) if (written.has(name)) no('seed address written');
-          found.push({ stmt: s as IfStmt, guard, seed: ends[0].spelled!, written });
-        } catch (e) {
-          // Anything the model does not cover leaves the block as it is.
-          if (!(e instanceof Reject) && options.strict) throw e;
-          options.onReject?.({ line: s.location?.start.line ?? 0, why: (e as Error).message });
+          return { stmt: s as IfStmt, guard: g, seed: ends[0].spelled!, written };
+        };
+        // A partial roll: the shortest prefix that is the whole roll.
+        const tries: Guard[] = [];
+        if (guard.prefix === undefined) tries.push(guard);
+        else for (let p = guard.prefix; p <= (guard.maxPrefix ?? guard.prefix); p++) tries.push({ ...guard, prefix: p });
+        let why: Error | null = null;
+        for (const g of tries) {
+          try {
+            found.push(attempt(g));
+            why = null;
+            break;
+          } catch (e) {
+            // Anything the model does not cover leaves the block as it is.
+            if (!(e instanceof Reject) && options.strict) throw e;
+            why = e as Error;
+          }
         }
+        if (why) options.onReject?.({ line: s.location?.start.line ?? 0, why: why.message });
       }
       if (found.length === 0) return undefined;
 
@@ -1098,7 +1163,7 @@ function createSeedRollLimitedTransformer(options: SeedRollLimitedOptions = {}):
       const accepted = found.filter(f => {
         const reject = (why: string) => { options.onReject?.({ line: f.stmt.location?.start.line ?? 0, why }); return false; };
         const inside = new Set<number>();
-        const stmts = statementsUnder(f.stmt);
+        const stmts = f.guard.prefix === undefined ? statementsUnder(f.stmt) : rollStatements(f.guard).flatMap(s => statementsUnder(s));
         for (const st of stmts) {
           const id = flow.nodeOf(st);
           if (id !== undefined) inside.add(id);
@@ -1122,14 +1187,33 @@ function createSeedRollLimitedTransformer(options: SeedRollLimitedOptions = {}):
         const stmt = {
           ...Expr.assign(Expr.identifier(f.guard.result), call),
         };
-        const es: ExprStmt = {
-          kind: NodeKind.ExprStmt,
-          expression: stmt as AssignExpr,
-          leadingTrivia: f.stmt.leadingTrivia,
-          trailingTrivia: f.stmt.trailingTrivia,
-          location: f.stmt.location,
-        } as ExprStmt;
-        replace.set(f.stmt, es);
+        if (f.guard.prefix !== undefined) {
+          // Only the roll's statements go; the guard and the rest of its branch stay.
+          const roll = rollStatements(f.guard);
+          const es: ExprStmt = {
+            kind: NodeKind.ExprStmt,
+            expression: stmt as AssignExpr,
+            leadingTrivia: roll[0].leadingTrivia,
+            trailingTrivia: roll[roll.length - 1].trailingTrivia,
+            location: roll[0].location,
+          } as ExprStmt;
+          const body = f.guard.body;
+          if (body.kind === NodeKind.CompoundStmt) {
+            const rest = (body as CompoundStmt).statements.slice(roll.length);
+            replace.set(body, { ...(body as CompoundStmt), statements: [es, ...rest] } as CompoundStmt);
+          } else {
+            replace.set(body, es);
+          }
+        } else {
+          const es: ExprStmt = {
+            kind: NodeKind.ExprStmt,
+            expression: stmt as AssignExpr,
+            leadingTrivia: f.stmt.leadingTrivia,
+            trailingTrivia: f.stmt.trailingTrivia,
+            location: f.stmt.location,
+          } as ExprStmt;
+          replace.set(f.stmt, es);
+        }
         options.onSite?.({
           seed: emit(f.seed as AnyNode).trim(), limit: emit(f.guard.limit as AnyNode).trim(), result: f.guard.result,
           line: f.stmt.location?.start.line ?? 0,
@@ -1142,13 +1226,13 @@ function createSeedRollLimitedTransformer(options: SeedRollLimitedOptions = {}):
             v.forEach((x, i) => {
               if (x && typeof x === 'object' && 'kind' in x) {
                 const r = replace.get(x as ASTNode);
-                if (r) v[i] = r;
+                if (r) { v[i] = r; put(r); }
                 else put(x as ASTNode);
               }
             });
           } else if (v && typeof v === 'object' && 'kind' in v) {
             const r = replace.get(v as ASTNode);
-            if (r) (n as unknown as Record<string, unknown>)[key] = r;
+            if (r) { (n as unknown as Record<string, unknown>)[key] = r; put(r); }
             else put(v as ASTNode);
           }
         }
