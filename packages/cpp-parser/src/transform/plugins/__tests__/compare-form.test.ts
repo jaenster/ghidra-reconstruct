@@ -33,6 +33,70 @@ function run(code: string, sites: Site[], decisions: CompareFormDecision[], cens
 const lit = (raw: string, value: bigint, base: 10 | 16 = 16, suffix = ''): IntegerLiteralExpr =>
   ({ kind: NodeKind.IntegerLiteral, value, raw, base, suffix } as IntegerLiteralExpr);
 
+describe('signed comparisons of narrow values carried in int locals', () => {
+  const recover = (code: string, opts: Partial<CompareFormOptions> = {}): string => {
+    const site = { text: '<', fp: ['v:level', 'v:prev'] as [string, string] };
+    const options: CompareFormOptions = {
+      ...opts, sites: [site], decisions: [dec({ ord: 0, ...site, keep: true, signed: true, zextPair: true })],
+    };
+    const formed = createCompareFormTransformer(options)(parse(code));
+    return emit(createCompareSignednessTransformer(options)(formed) as AnyNode).trim();
+  };
+
+  it('recovers the signed compare after byte loads into int locals (00664b10)', () => {
+    const out = recover('void f(unsigned char a, unsigned char b) { int level = (int)a; int prev = (int)b; if ((unsigned int)level < (unsigned int)prev) g(); }');
+    assert.match(out, /if \(level < prev\)/);
+  });
+
+  it('follows the loop-carried previous byte, including its initial zero', () => {
+    const out = recover('void f(unsigned char *p, int count) { int prev = 0; int level; while (count--) { level = (int)*p; if ((unsigned int)level < (unsigned int)prev) g(); prev = level; p++; } }');
+    assert.match(out, /if \(level < prev\)/);
+  });
+
+  it('proves word values in unsigned locals and keeps the comparison signed', () => {
+    const out = recover('void f(unsigned short a, unsigned short b) { unsigned int level = a; unsigned int prev = b; if ((unsigned int)level < (unsigned int)prev) g(); }');
+    assert.match(out, /\(int32_t\)level < \(int32_t\)prev/);
+    const edge = recover('void f() { int level = 65535; int prev = 65534; if ((unsigned int)level < (unsigned int)prev) g(); }');
+    assert.match(edge, /if \(level < prev\)/);
+  });
+
+  it('recovers a byte parameter carried in an int beside a byte field (0061b490)', () => {
+    const site = { text: '<=', fp: ['v:level', 'e'] as [string, string] };
+    const options: CompareFormOptions = {
+      structFields: { Room: { status: 'unsigned char' } },
+      sites: [site], decisions: [dec({ ord: 0, ...site, op: '>=', swap: true, signed: true, zextPair: true })],
+    };
+    const formed = createCompareFormTransformer(options)(parse('void f(Room *r, unsigned char depth) { int level = (int)depth; if ((unsigned int)level <= (unsigned int)r->status) g(); }'));
+    const out = emit(createCompareSignednessTransformer(options)(formed) as AnyNode);
+    assert.match(out, /if \(r->status >= level\)/);
+  });
+
+  it('keeps unsigned comparisons when a local may be negative or escape to a writer', () => {
+    for (const code of [
+      'void f(unsigned char a, int b) { int level = a; int prev = b; if ((unsigned int)level < (unsigned int)prev) g(); }',
+      'void f(unsigned char a, unsigned char b) { int level = a; int prev = b; mutate(&prev); if ((unsigned int)level < (unsigned int)prev) g(); }',
+      'void f(unsigned char a, unsigned char b, int n) { int level = a; int prev = b; if (n) prev = -1; if ((unsigned int)level < (unsigned int)prev) g(); }',
+    ]) {
+      const out = recover(code);
+      assert.match(out, /\(unsigned int\)level < \(unsigned int\)prev/, out);
+      assert.doesNotMatch(out, /int32_t/);
+    }
+  });
+
+  it('keeps unknown and non-integral values outside the narrow proof', () => {
+    const out = recover('void f(unsigned int a, unsigned int b) { int level = a; int prev = b; if ((unsigned int)level < (unsigned int)prev) g(); }');
+    assert.match(out, /\(unsigned int\)level < \(unsigned int\)prev/);
+    const floating = recover('void f(unsigned char a, unsigned char b) { float level = a; float prev = b; if ((unsigned int)level < (unsigned int)prev) g(); }');
+    assert.match(floating, /\(unsigned int\)level < \(unsigned int\)prev/);
+  });
+
+  it('retains the upstream nonnegative proof above the narrow domain', () => {
+    const out = recover('void f(unsigned char a) { int level = 65536; int prev = a; if ((unsigned int)level < (unsigned int)prev) g(); }');
+    assert.match(out, /if \(level < prev\)/);
+    assert.doesNotMatch(out, /\(unsigned int\)/);
+  });
+});
+
 describe('compare-form', () => {
   // OnMouseWheel 004bc050: `jge` on the flags of the `> 0` test before it, no CMP of its own.
   it('writes an untied -1 < x on a signed x as x >= 0', () => {
@@ -523,7 +587,7 @@ describe('compare-form: steps the instructions prove in either domain', () => {
       ' if ((u < 0x80000000) != (u <= 0x7fffffff)) bad++;' +
       ' if ((u < 0xc0000006) != (u <= 0xc0000005)) bad++;' +
       ' if ((0x7ffe < u) != (u >= 0x7fff)) bad++;' +
-      ' if ((-1 < y - 0x20) != (y - 0x20 >= 0) && y > (int)0x80000020) bad++;' +
+      ' if (y > (int)0x80000020 && ((-1 < y - 0x20) != (y - 0x20 >= 0))) bad++;' +
       ' if (((u >> 0xe & 7) < (u >> 3 & 7)) != ((int32_t)(u >> 0xe & 7) < (int32_t)(u >> 3 & 7))) bad++;' +
       ' void *p = (void *)(uintptr_t)u; if ((p != 0) != ((uintptr_t)p > 0)) bad++; }' +
       ' printf("%d\\n", bad);');
