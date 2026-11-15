@@ -44,12 +44,13 @@ import { NodeKind } from '../../../ast/kinds.js';
 import type {
   ASTNode, AssignExpr, CallExpr, CompoundStmt, CStyleCastExpr, DeclStmt, ExprStmt, Expression,
   FunctionDecl, Identifier, ParameterDecl, Statement, TypeNode, UnaryExpr, VariableDecl,
+  BinaryExpr, MemberExpr,
 } from '../../../ast/nodes.js';
 import { Expr, Type, Decl, Stmt } from '../../../ast/factory.js';
 import { findNodesByKind } from '../../../ast/visitor.js';
 import { createTransformer, updateNode, type Transformer } from '../../transformer.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
-import { buildFunctionFlow, ENTRY_DEF } from '../../cfg/index.js';
+import { buildFunctionFlow, ENTRY_DEF, type FunctionFlow } from '../../cfg/index.js';
 import { calleeName, bareName, unwrapParens, typeFromSpelling } from './call-arg-cast.js';
 import { emit } from '../../../emit/index.js';
 import { createExprShape } from './expr-shape.js';
@@ -88,6 +89,10 @@ export interface ReusedParamSlotOptions extends PluginOptions {
   enumConstants?: readonly string[];
   /** Unambiguous enum constant -> value. */
   enumValues?: Record<string, number>;
+  /** Known enum type names when a synthetic/external declaration supplies them. */
+  enumTypes?: readonly string[];
+  /** Only defer a scalar lifetime when the later pass proves its integer split. */
+  canDeferScalarValues?: (fn: FunctionDecl, name: string) => boolean;
 }
 
 /** Anonymous call-site override funcdefs: never the source's type. */
@@ -364,6 +369,23 @@ export function isConstantStore(e: Expression, enumConstants: ReadonlySet<string
 }
 
 /**
+ * Before nullptr-cleanup (25), Ghidra spells a small literal address such as 2
+ * as `&DAT_00000002`. Like a literal store, it supplies a value but no evidence
+ * for the reused slot's new type. A mapped/global address or a shadowing local
+ * still has to participate in type inference.
+ */
+function isNullPageAddressConstant(e: Expression, localTypes: ReadonlyMap<string, TypeNode>): boolean {
+  const x = unwrapParens(e);
+  if (x.kind !== NodeKind.UnaryExpr || (x as UnaryExpr).operator !== '&') return false;
+  const operand = unwrapParens((x as UnaryExpr).operand);
+  if (operand.kind !== NodeKind.Identifier) return false;
+  const name = (operand as Identifier).name;
+  if (localTypes.has(name)) return false;
+  const match = /^_?DAT_([0-9a-fA-F]{8})$/.exec(name);
+  return match !== null && parseInt(match[1], 16) < 0x1000;
+}
+
+/**
  * A name for the second value. Ghidra has no variable to carry one, so it comes from
  * the type where the type is a program struct (`D2RoomStrc *` -> pRoom, `D2MissilesTxt *`
  * -> pMissilesTxt), and from the parameter whose slot it shares otherwise.
@@ -376,6 +398,140 @@ export function valueLocalName(type: string, param: string, taken: ReadonlySet<s
   let name = base;
   for (let i = 2; taken.has(name) || name === param; i++) name = `${base}${i}`;
   return name;
+}
+
+interface SlotRead { id: Identifier; cast: CStyleCastExpr | null; casts: readonly CStyleCastExpr[] }
+
+/** Keep integer uses integer; a typed pointer view is needed only to access memory. */
+function integerSlotReads(
+  statements: Statement[], flow: FunctionFlow, reads: SlotRead[], p: string,
+  param: ParameterDecl, target: TypeNode, local: string, localTypes: ReadonlyMap<string, TypeNode>,
+  o: ReusedParamSlotOptions,
+): { replacements: Map<object, Expression>; declarations: Map<object, TypeNode>; comparisons: Set<object>; scalarOnly: boolean } | null {
+  const parent = new Map<object, { node: ASTNode; key: string }>();
+  const identifiers: Identifier[] = [], declarations = new Map<object, TypeNode>();
+  const visit = (x: unknown, owner?: ASTNode, key = ''): void => {
+    if (Array.isArray(x)) { for (const v of x) visit(v, owner, key); return; }
+    if (!x || typeof x !== 'object') return;
+    const node = x as ASTNode;
+    if (owner) parent.set(node, { node: owner, key });
+    if (node.kind === NodeKind.Identifier) identifiers.push(node as Identifier);
+    for (const [k, v] of Object.entries(node)) {
+      if (['location', 'leadingTrivia', 'trailingTrivia', 'type'].includes(k)) continue;
+      if ((node.kind === NodeKind.VariableDecl || node.kind === NodeKind.ParameterDecl) && k === 'name') continue;
+      if (node.kind === NodeKind.MemberExpr && k === 'member') continue;
+      if (node.kind === NodeKind.QualifiedId) continue;
+      if (v && typeof v === 'object') visit(v, node, k);
+    }
+  };
+  visit(statements);
+  const paramType = spellingOf(param.type), targetType = spellingOf(target);
+  const integer = (t: string) => wordClass(t) === 'int' || wordClass(t) === 'enum' || o.enumTypes?.includes(t);
+  const rootOf = (r: SlotRead): Expression => r.casts[0] ?? r.id;
+  const useOf = (root: Expression) => {
+    let u = parent.get(root);
+    while (u?.node.kind === NodeKind.ParenExpr) u = parent.get(u.node);
+    return u;
+  };
+  const readOf = (id: Identifier): SlotRead => {
+    const casts: CStyleCastExpr[] = []; let u = parent.get(id);
+    while (u && (u.node.kind === NodeKind.ParenExpr || u.node.kind === NodeKind.CStyleCastExpr)) {
+      if (u.node.kind === NodeKind.CStyleCastExpr) casts.unshift(u.node as CStyleCastExpr);
+      u = parent.get(u.node);
+    }
+    return { id, cast: casts.at(-1) ?? null, casts };
+  };
+  const work = reads.map(r => ({ read: r, name: local })), aliases = new Set<string>();
+  const aliasWrites = new Set<object>(), replacements = new Map<object, Expression>(), comparisons = new Set<object>();
+  let scalarOnly = true;
+  for (let at = 0; at < work.length; at++) {
+    const { read: r, name } = work[at], root = rootOf(r), use = useOf(root);
+    if (r.casts.some(c => !sameType(spellingOf(c.type), paramType) && !integer(spellingOf(c.type)))) return null;
+    let numeric: Expression = Expr.identifier(name);
+    for (let i = r.casts.length - 1; i >= 0; i--) {
+      const c = r.casts[i], t = spellingOf(c.type);
+      if (sameType(t, paramType)) continue;
+      // Preserve outer conversion chains and pointer-sized integer widths on x64.
+      if (i === r.casts.length - 1 && sameType(t, targetType) && !/\b(?:u?intptr_t)\b/.test(t)) continue;
+      numeric = Expr.cast(c.type, numeric);
+    }
+    const typedInteger = r.casts.length > 0 && integer(spellingOf(r.casts[0].type));
+    const pointerUse = use && ((use.node.kind === NodeKind.MemberExpr && use.key === 'object' && (use.node as MemberExpr).isArrow)
+      || (use.node.kind === NodeKind.SubscriptExpr && use.key === 'array')
+      || (use.node.kind === NodeKind.UnaryExpr && (use.node as UnaryExpr).operator === '*')
+      || (use.node.kind === NodeKind.CallExpr && use.key === 'callee'));
+    if (pointerUse) {
+      scalarOnly = false;
+      replacements.set(root, Expr.paren(Expr.cast(param.type, Expr.cast(Type.typedef('uintptr_t'), numeric))));
+      continue;
+    }
+    if (typedInteger) { replacements.set(root, numeric); continue; }
+    if (use?.node.kind === NodeKind.AssignExpr && use.key === 'right') {
+      const a = use.node as AssignExpr, left = unwrapParens(a.left);
+      if (a.operator !== '=' || left.kind !== NodeKind.Identifier) return null;
+      const alias = (left as Identifier).name;
+      const decls = findNodesByKind({ kind: NodeKind.CompoundStmt, statements } as unknown as ASTNode, NodeKind.VariableDecl)
+        .map(d => d as VariableDecl).filter(d => d.name.name === alias);
+      if (alias === p || decls.length !== 1 || !sameType(spellingOf(decls[0].type), paramType) || flow.isEscaped(alias)) return null;
+      aliasWrites.add(a); scalarOnly = false; replacements.set(root, numeric);
+      if (aliases.has(alias)) continue;
+      aliases.add(alias); declarations.set(decls[0], target);
+      const defs = new Set<number>();
+      for (const n of flow.cfg.nodes) if (flow.writes(n.id).has(alias)) {
+        // An uninitialised declaration is a definition in the flow model, but is
+        // harmless when every subsequent read is reached by a qualified copy.
+        if (n.stmt?.kind === NodeKind.DeclStmt && (n.stmt as DeclStmt).declarations.includes(decls[0]) && !decls[0].initializer) continue;
+        const e = n.stmt?.kind === NodeKind.ExprStmt ? unwrapParens((n.stmt as ExprStmt).expression) : null;
+        if (!e || e.kind !== NodeKind.AssignExpr || !aliasWrites.has(e)) return null;
+        defs.add(n.id);
+      }
+      if (!defs.size) return null;
+      // Every value use must be reached by these copies. Unevaluated or otherwise
+      // unmodelled uses cannot change type along with the alias's declaration.
+      const seen = new Set<object>();
+      for (const n of flow.cfg.nodes) if (flow.reads(n.id).has(alias)) {
+        const reach = [...flow.reaching(n.id, alias)]; if (!reach.length || reach.some(d => !defs.has(d))) return null;
+        for (const id of identifiers.filter(id => id.name === alias)) {
+          if (findNodesByKind({ kind: NodeKind.CompoundStmt, statements: flow.ownExprs(n.id) } as unknown as ASTNode, NodeKind.Identifier).includes(id)) seen.add(id);
+        }
+      }
+      const ids = identifiers.filter(id => id.name === alias && !(parent.get(id)?.node.kind === NodeKind.AssignExpr && parent.get(id)?.key === 'left'));
+      if (ids.some(id => !seen.has(id))) return null;
+      work.push(...ids.map(id => ({ read: readOf(id), name: alias })));
+      continue;
+    }
+    if (use?.node.kind === NodeKind.BinaryExpr && ['==', '!=', '<', '<=', '>', '>='].includes((use.node as BinaryExpr).operator)) {
+      const b = use.node as BinaryExpr, other = use.key === 'left' ? b.right : b.left;
+      const t = evidentType(other, o, localTypes);
+      // An unknown class operand could select an overloaded pointer comparison.
+      if (!pointerConstant(other, localTypes) && (!t || wordClass(spellingOf(t)) === null)) return null;
+      comparisons.add(use.node); replacements.set(root, numeric); continue;
+    }
+    const truth = use && (((use.node.kind === NodeKind.IfStmt || use.node.kind === NodeKind.WhileStmt || use.node.kind === NodeKind.DoWhileStmt || use.node.kind === NodeKind.ForStmt || use.node.kind === NodeKind.ConditionalExpr) && use.key === 'condition')
+      || (use.node.kind === NodeKind.UnaryExpr && (use.node as UnaryExpr).operator === '!'));
+    if (truth) { replacements.set(root, numeric); continue; }
+    if (use?.node.kind === NodeKind.BinaryExpr && ['&&', '||'].includes((use.node as BinaryExpr).operator)) {
+      const b = use.node as BinaryExpr, other = use.key === 'left' ? b.right : b.left;
+      const t = evidentType(other, o, localTypes); if (!t || wordClass(spellingOf(t)) === null) return null;
+      replacements.set(root, numeric); continue;
+    }
+    return null;
+  }
+  return { replacements, declarations, comparisons, scalarOnly };
+}
+
+/** A pointer constant's integer spelling; keep its signedness and literal suffix. */
+function pointerConstant(e: Expression, localTypes: ReadonlyMap<string, TypeNode>): Expression | null {
+  let x = unwrapParens(e);
+  if (x.kind === NodeKind.CStyleCastExpr && wordClass(spellingOf((x as CStyleCastExpr).type)) === 'ptr') x = unwrapParens((x as CStyleCastExpr).expression);
+  if (x.kind === NodeKind.NullptrLiteral) return Expr.intLiteral(0n) as Expression;
+  if (x.kind === NodeKind.IntegerLiteral) return x;
+  if (x.kind === NodeKind.UnaryExpr && (x as UnaryExpr).operator === '-' && unwrapParens((x as UnaryExpr).operand).kind === NodeKind.IntegerLiteral) return x;
+  if (isNullPageAddressConstant(x, localTypes)) {
+    const id = unwrapParens((x as UnaryExpr).operand) as Identifier;
+    return Expr.intLiteral(BigInt('0x' + /DAT_([0-9a-f]{8})$/i.exec(id.name)![1])) as Expression;
+  }
+  return null;
 }
 
 export function splitReusedValueSlots(fn: FunctionDecl, o: ReusedParamSlotOptions, statementsIn?: Statement[]): Statement[] | null {
@@ -433,32 +589,34 @@ export function splitReusedValueSlots(fn: FunctionDecl, o: ReusedParamSlotOption
     if (mixed) { o.onRefused?.(fnName, `${p}: a read is reached by the parameter and by a later store`); continue; }
     if (second.size === 0) continue;
 
-    // Every occurrence of P the second range reads, with the cast around it (if any).
+    // Every occurrence of P the second range reads, with its entire direct cast
+    // chain. The innermost cast determines the rewrite, but an outer cast can
+    // reveal a different use of the value (e.g. `(Other *)(int)P`).
     // The store statements' own left-hand sides are writes, not reads.
     const lhs = new Set<object>();
     for (const s of stores.values()) lhs.add(unwrapParens((unwrapParens(s.stmt.expression) as AssignExpr).left));
-    const occurrences: { id: Identifier; cast: CStyleCastExpr | null }[] = [];
+    const occurrences: { id: Identifier; cast: CStyleCastExpr | null; casts: readonly CStyleCastExpr[] }[] = [];
     for (const n of second) {
-      const walk = (x: unknown, parentCast: CStyleCastExpr | null): void => {
-        if (Array.isArray(x)) { for (const i of x) walk(i, null); return; }
+      const walk = (x: unknown, casts: readonly CStyleCastExpr[]): void => {
+        if (Array.isArray(x)) { for (const i of x) walk(i, []); return; }
         if (!x || typeof x !== 'object') return;
         const node = x as ASTNode;
         if (node.kind === NodeKind.Identifier && (node as Identifier).name === p && !lhs.has(node)) {
-          occurrences.push({ id: node as Identifier, cast: parentCast });
+          occurrences.push({ id: node as Identifier, cast: casts.at(-1) ?? null, casts });
           return;
         }
         if (node.kind === NodeKind.CStyleCastExpr) {
           const c = node as CStyleCastExpr;
           const inner = unwrapParens(c.expression);
-          walk(inner, c);
+          walk(inner, [...casts, c]);
           return;
         }
         for (const [k, v] of Object.entries(node)) {
           if (k === 'location' || k === 'leadingTrivia' || k === 'trailingTrivia' || k === 'type') continue;
-          if (v && typeof v === 'object') walk(v, null);
+          if (v && typeof v === 'object') walk(v, []);
         }
       };
-      walk(flow.ownExprs(n), null);
+      walk(flow.ownExprs(n), []);
     }
     if (occurrences.length === 0) continue;
 
@@ -470,7 +628,8 @@ export function splitReusedValueSlots(fn: FunctionDecl, o: ReusedParamSlotOption
     } else {
       // A literal store (`p = (T *)0x0`) holds a value of whichever type the others say;
       // the second range's type is what every other store agrees on.
-      const values = [...stores.values()].map(s => storedValue(s.value, paramType)).filter(v => !isConstantStore(v, enumConstants, localTypes));
+      const values = [...stores.values()].map(s => storedValue(s.value, paramType))
+        .filter(v => !isConstantStore(v, enumConstants, localTypes) && !isNullPageAddressConstant(v, localTypes));
       const evident = values.map(v => evidentType(v, o, localTypes));
       const spelled = evident.map(t => t ? spellingOf(t) : null);
       if (evident.length > 0 && spelled.every(t => t !== null) && new Set(spelled.map(t => canonicalWord(t!))).size === 1) target = evident[0];
@@ -483,27 +642,42 @@ export function splitReusedValueSlots(fn: FunctionDecl, o: ReusedParamSlotOption
     // Ghidra's untyped pointer, not the type the source declared.
     if (/\bcode\b/.test(targetType)) continue;
     if (targetClass !== 'ptr' && paramClass !== 'ptr') continue;
-    // Every cast read must agree with T: a read reinterpreting the slot as a third type
-    // is not one variable either.
-    if (readCasts.some(c => c !== null && !sameType(c, targetType) && !sameType(c, paramType))) {
+    // A pointer slot reused for a word-sized integer can be viewed through both
+    // signed and unsigned integer casts. Keep each differing cast at its read:
+    // `(int)p` becomes `(int)n`, rather than `(int)(P *)n`. A cast to another
+    // pointer type still makes the second value ambiguous.
+    const integerView = (c: string) => targetClass === 'int' && paramClass === 'ptr'
+      && WORD_INTEGERS[c] !== undefined;
+    const allReadCasts = occurrences.flatMap(oc => oc.casts.map(c => spellingOf(c.type)));
+    if (allReadCasts.some(c => !sameType(c, targetType)
+        && !sameType(c, paramType) && !integerView(c))) {
       o.onRefused?.(fnName, `${p}: the second range is read as more than one type`);
       continue;
     }
 
     const local = valueLocalName(targetType, p, declared);
+    const projection = paramClass === 'ptr' && (targetClass === 'int' || targetClass === 'enum')
+      ? integerSlotReads(statements, flow, occurrences, p, param, target, local, localTypes, o) : undefined;
+    if (projection === null) { o.onRefused?.(fnName, `${p}: a pointer view is not a proven integer use or memory access`); continue; }
+    if (projection?.scalarOnly && o.canDeferScalarValues?.({ ...fn, body: { ...body, statements } }, p)) continue;
     declared.add(local);
-    const castReads = new Map<object, Expression>();
+    const castReads = projection?.replacements ?? new Map<object, Expression>();
     const bareReads = new Set<object>();
-    for (const oc of occurrences) {
-      if (oc.cast && sameType(spellingOf(oc.cast.type), targetType)) castReads.set(oc.cast, Expr.identifier(local));
-      else bareReads.add(oc.id);
+    for (const oc of projection ? [] : occurrences) {
+      if (oc.cast && sameType(spellingOf(oc.cast.type), targetType)) {
+        castReads.set(oc.cast, Expr.identifier(local));
+      } else if (oc.cast && integerView(spellingOf(oc.cast.type))) {
+        castReads.set(oc.cast, Expr.cast(oc.cast.type, Expr.identifier(local)));
+      } else {
+        bareReads.add(oc.id);
+      }
     }
     const storeStmts = new Map<object, Expression>();
     // An integer the slot's new type takes without a cast: a literal, or arithmetic on
     // a read of the slot itself (`(int)p - 1` once that read is the local).
     const isOwnRead = (e: Expression): boolean => {
       const u = unwrapParens(e);
-      if (u.kind === NodeKind.Identifier) return bareReads.has(u);
+      if (u.kind === NodeKind.Identifier) return bareReads.has(u) || castReads.has(u);
       return castReads.has(u);
     };
     const plainInteger = (e: Expression): boolean => {
@@ -517,6 +691,7 @@ export function splitReusedValueSlots(fn: FunctionDecl, o: ReusedParamSlotOption
     };
     for (const s of stores.values()) {
       let x = storedValue(s.value, paramType);
+      if ((targetClass === 'int' || targetClass === 'enum') && isNullPageAddressConstant(x, localTypes)) x = pointerConstant(x, localTypes)!;
       // An enum constant Ghidra printed for the PARAMETER's enum type is a number in the
       // second range, whose type is not that enum: the number it stands for.
       const xu = unwrapParens(x);
@@ -546,6 +721,16 @@ export function splitReusedValueSlots(fn: FunctionDecl, o: ReusedParamSlotOption
       }
       const asLocal = castReads.get(node);
       if (asLocal) return asLocal;
+      if (projection?.declarations.has(node)) return { ...node, type: projection.declarations.get(node) };
+      if (projection?.comparisons.has(node)) {
+        const b = node as BinaryExpr, lc = pointerConstant(b.left, localTypes), rc = pointerConstant(b.right, localTypes);
+        const left = lc ?? rebuild(b.left) as Expression, right = rc ?? rebuild(b.right) as Expression;
+        const small = (e: Expression | null) => e?.kind === NodeKind.IntegerLiteral
+          && BigInt((e as unknown as { value: bigint }).value) >= 0n && BigInt((e as unknown as { value: bigint }).value) <= 0x7fffffffn;
+        const word = (e: Expression) => castReads.has(unwrapParens(e));
+        const plain = ['==', '!='].includes(b.operator) && ((small(lc) && word(b.right)) || (small(rc) && word(b.left)) || (word(b.left) && word(b.right)));
+        return { ...b, left: plain ? left : Expr.cast(Type.typedef('uintptr_t'), left), right: plain ? right : Expr.cast(Type.typedef('uintptr_t'), right) };
+      }
       if (bareReads.has(node)) return Expr.paren(Expr.cast(param.type, Expr.identifier(local)));
       let copy: Record<string, unknown> | null = null;
       for (const [k, v] of Object.entries(node)) {
@@ -561,6 +746,7 @@ export function splitReusedValueSlots(fn: FunctionDecl, o: ReusedParamSlotOption
     while (at < rewritten.length && rewritten[at].kind === NodeKind.DeclStmt) at++;
     statements = [...rewritten.slice(0, at), decl as unknown as Statement, ...rewritten.slice(at)];
     localTypes.set(local, target);
+    for (const [decl, type] of projection?.declarations ?? []) localTypes.set((decl as VariableDecl).name.name, type);
     changed = true;
   }
   return changed ? statements : null;

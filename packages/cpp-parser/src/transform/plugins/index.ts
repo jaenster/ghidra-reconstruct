@@ -1217,7 +1217,7 @@ import { loopStrideHoistPlugin } from './builtins/loop-stride-hoist.js';
 import { reusedParamSlotPlugin } from './builtins/reused-param-slot.js';
 export { reusedParamSlotPlugin, splitReusedParameterSlots, type ReusedParamSlotOptions } from './builtins/reused-param-slot.js';
 import { splitLivesPlugin } from './builtins/split-lives.js';
-export { splitLivesPlugin, splitLives, type SplitLivesOptions } from './builtins/split-lives.js';
+export { splitLivesPlugin, splitLives, canSplitScalarParameter, type SplitLivesOptions } from './builtins/split-lives.js';
 export { stridedAccessPlugin, rewriteStridedAccesses, type StridedAccessOptions, type StructLayoutField } from './builtins/strided-access.js';
 import { allocMacrosPlugin } from './builtins/alloc-macros.js';
 export {

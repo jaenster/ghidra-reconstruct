@@ -1,0 +1,419 @@
+{
+  "source": "dd289669c82a03e993a928b2b0f2c724a1cc731d",
+  "ghidraVersion": 2109,
+  "functions": [
+    {
+      "name": "szPrintfBuffer",
+      "address": "00485410",
+      "entryPoint": "00485410",
+      "signature": "void szPrintfBuffer(D2UnitStrc * pUnit, WCHAR * wszText)",
+      "returnType": "void",
+      "callingConvention": "__stdcall",
+      "size": 1972,
+      "isThunk": false,
+      "isExternal": false,
+      "hasVarArgs": false,
+      "namespace": "D2Client::UI::Inv",
+      "comment": "@function szPrintfBuffer\n@address Game.exe.ram:00485410\n@date 2026.06.12\n@calling __stdcall\n@description Formats weapon damage text for item tooltips, handling one-handed, two-handed, barbarian dual-wield, throwable, and missile potion damage display. Calculates min/max damage based on weapon type, applies color coding for modified stats, and formats elemental damage for missile potions with duration scaling.",
+      "sourceFile": null,
+      "sourceLine": null,
+      "sourceInfo": null,
+      "parameters": [
+        {
+          "name": "pUnit",
+          "dataType": "D2UnitStrc *",
+          "size": 4,
+          "ordinal": 0,
+          "storage": "Stack[0x4]:4",
+          "stackOffset": 4,
+          "resolvedType": null
+        },
+        {
+          "name": "wszText",
+          "dataType": "WCHAR *",
+          "size": 4,
+          "ordinal": 1,
+          "storage": "Stack[0x8]:4",
+          "stackOffset": 8,
+          "resolvedType": null
+        }
+      ],
+      "localVariables": [
+        {
+          "name": "extraout_var",
+          "dataType": "undefined3",
+          "size": 3,
+          "storage": "register:00000001:3",
+          "stackOffset": null,
+          "resolvedType": null
+        },
+        {
+          "name": "extraout_var_00",
+          "dataType": "undefined3",
+          "size": 3,
+          "storage": "register:00000001:3",
+          "stackOffset": null,
+          "resolvedType": null
+        },
+        {
+          "name": "extraout_var_01",
+          "dataType": "undefined3",
+          "size": 3,
+          "storage": "register:00000001:3",
+          "stackOffset": null,
+          "resolvedType": null
+        },
+        {
+          "name": "iDurationFrames",
+          "dataType": "int",
+          "size": 4,
+          "storage": "ECX:4",
+          "stackOffset": null,
+          "resolvedType": "int"
+        },
+        {
+          "name": "pwColorPrefix",
+          "dataType": "WCHAR *",
+          "size": 4,
+          "storage": "EAX:4",
+          "stackOffset": null,
+          "resolvedType": "WCHAR *"
+        },
+        {
+          "name": "pwColorSuffix",
+          "dataType": "WCHAR *",
+          "size": 4,
+          "storage": "EAX:4",
+          "stackOffset": null,
+          "resolvedType": "WCHAR *"
+        },
+        {
+          "name": "pPlayerUnit_lcl",
+          "dataType": "D2UnitStrc *",
+          "size": 4,
+          "storage": "EAX:4",
+          "stackOffset": null,
+          "resolvedType": "D2UnitStrc *"
+        },
+        {
+          "name": "nTypeCheck",
+          "dataType": "uint32_t",
+          "size": 4,
+          "storage": "EAX:4",
+          "stackOffset": null,
+          "resolvedType": "uint32_t"
+        },
+        {
+          "name": "nElemMinDamage",
+          "dataType": "int32_t",
+          "size": 4,
+          "storage": "EAX:4",
+          "stackOffset": null,
+          "resolvedType": "int32_t"
+        },
+        {
+          "name": "pwLocaleStr2",
+          "dataType": "int32_t",
+          "size": 4,
+          "storage": "EAX:4",
+          "stackOffset": null,
+          "resolvedType": "int32_t"
+        },
+        {
+          "name": "bColorCode",
+          "dataType": "byte",
+          "size": 1,
+          "storage": "AL:1",
+          "stackOffset": null,
+          "resolvedType": "byte"
+        },
+        {
+          "name": "nElemDuration",
+          "dataType": "int32_t",
+          "size": 4,
+          "storage": "EAX:4",
+          "stackOffset": null,
+          "resolvedType": "int32_t"
+        },
+        {
+          "name": "nCalcMinDamage",
+          "dataType": "int",
+          "size": 4,
+          "storage": "EDI:4",
+          "stackOffset": null,
+          "resolvedType": "int"
+        },
+        {
+          "name": "bCheckResult",
+          "dataType": "byte",
+          "size": 1,
+          "storage": "AL:1",
+          "stackOffset": null,
+          "resolvedType": "byte"
+        },
+        {
+          "name": "pszBufCursor",
+          "dataType": "wchar_t *",
+          "size": 4,
+          "storage": "EDI:4",
+          "stackOffset": null,
+          "resolvedType": "wchar_t *"
+        },
+        {
+          "name": "wStringId",
+          "dataType": "uint16_t",
+          "size": 2,
+          "storage": "CX:2",
+          "stackOffset": null,
+          "resolvedType": "uint16_t"
+        },
+        {
+          "name": "pwLocaleStr",
+          "dataType": "WCHAR *",
+          "size": 4,
+          "storage": "EDX:4",
+          "stackOffset": null,
+          "resolvedType": "WCHAR *"
+        },
+        {
+          "name": "nMinDamage",
+          "dataType": "uint32_t",
+          "size": 4,
+          "storage": "Stack[-0x8]:4",
+          "stackOffset": -8,
+          "resolvedType": "uint32_t"
+        },
+        {
+          "name": "nMaxDamage",
+          "dataType": "int32_t",
+          "size": 4,
+          "storage": "Stack[-0xc]:4",
+          "stackOffset": -12,
+          "resolvedType": "int32_t"
+        },
+        {
+          "name": "bIsDamageModified",
+          "dataType": "int",
+          "size": 4,
+          "storage": "Stack[-0x10]:4",
+          "stackOffset": -16,
+          "resolvedType": "int"
+        },
+        {
+          "name": "pwBufEnd",
+          "dataType": "undefined4",
+          "size": 4,
+          "storage": "Stack[-0x14]:4",
+          "stackOffset": -20,
+          "resolvedType": null
+        },
+        {
+          "name": "szPrintfBuffer",
+          "dataType": "char[256]",
+          "size": 256,
+          "storage": "Stack[-0x114]:256",
+          "stackOffset": -276,
+          "resolvedType": null
+        },
+        {
+          "name": "wszDamageTextBuf",
+          "dataType": "wchar_t[256]",
+          "size": 512,
+          "storage": "Stack[-0x314]:512",
+          "stackOffset": -788,
+          "resolvedType": null
+        },
+        {
+          "name": "wszTempBuffer",
+          "dataType": "wchar_t[256]",
+          "size": 512,
+          "storage": "Stack[-0x514]:512",
+          "stackOffset": -1300,
+          "resolvedType": null
+        },
+        {
+          "name": "wszTwoHandDamageBuffer",
+          "dataType": "wchar_t[128]",
+          "size": 256,
+          "storage": "Stack[-0x614]:256",
+          "stackOffset": -1556,
+          "resolvedType": null
+        }
+      ],
+      "tags": [
+        {
+          "type": "callee-signature-changed"
+        }
+      ],
+      "decompiled": "\n/* WARNING: Enum \"eCollisionFlags\": Some values do not have unique names */\n/* WARNING: Enum \"eD2TimerType\": Some values do not have unique names */\n/* WARNING: Enum \"eD2TimerTypeDWORD\": Some values do not have unique names */\n/* @function szPrintfBuffer\n   @address Game.exe.ram:00485410\n   @date 2026.06.12\n   @calling __stdcall\n   @description Formats weapon damage text for item tooltips, handling one-handed, two-handed,\n   barbarian dual-wield, throwable, and missile potion damage display. Calculates min/max damage\n   based on weapon type, applies color coding for modified stats, and formats elemental damage for\n   missile potions with duration scaling. */\n\nvoid D2Client::UI::Inv::szPrintfBuffer(D2UnitStrc *pUnit,WCHAR *wszText)\n\n{\n  byte bColorCode;\n  WCHAR *pwColorPrefix;\n  WCHAR *pwColorSuffix;\n  D2UnitStrc *pPlayerUnit_lcl;\n  uint32_t nTypeCheck;\n  int32_t nElemMinDamage;\n  int32_t nElemDuration;\n  BOOL BVar1;\n  uint16_t wStringId;\n  int iDurationFrames;\n  WCHAR *pwLocaleStr;\n  uint nColor;\n  int nCalcMinDamage;\n  wchar_t *pszBufCursor;\n  wchar_t wszTwoHandDamageBuffer [128];\n  wchar_t wszTempBuffer [256];\n  wchar_t wszDamageTextBuf [256];\n  char szPrintfBuffer [256];\n  int bIsDamageModified;\n  int32_t nMaxDamage;\n  uint32_t nMinDamage;\n  \n  pszBufCursor = wszTempBuffer;\n  for (iDurationFrames = 0x80; iDurationFrames != 0; iDurationFrames = iDurationFrames + -1) {\n    pszBufCursor[0] = L'\\0';\n    pszBufCursor[1] = L'\\0';\n    pszBufCursor = pszBufCursor + 2;\n  }\n  pwColorPrefix = D2Lang::StrTable::strtable::GetLocaleString(0xf9b);\n  pwColorSuffix = D2Lang::StrTable::strtable::GetLocaleString(0xf9e);\n  pPlayerUnit_lcl = D2Client::UNIT::Player::GetPlayerUnit_UI();\n  nTypeCheck = D2Common::ITEMS::Items::ITEMS_IsA(pUnit,ITEMTYPE_MissilePotion);\n  if (nTypeCheck == 0) {\n    bIsDamageModified = 0;\n    nElemMinDamage =\n         D2Common::ITEMS::Items::BARBARIAN_CheckItemData_b1or2Handed_isTrue(pPlayerUnit_lcl,pUnit);\n    if (nElemMinDamage == 0) {\n      BVar1 = D2Common::ITEMS::Items::IsTwoHanded(pUnit);\n      if (BVar1 == 0) {\n        D2Client::UI::Inv::INV_CalcWeaponDamageRange\n                  (pPlayerUnit_lcl,UNITSTAT_mindamage,UNITSTAT_maxdamage,(int *)&nMinDamage,\n                   &nMaxDamage,&bIsDamageModified,pUnit);\n        wStringId = 0xd89;\n      }\n      else {\n        D2Client::UI::Inv::INV_CalcWeaponDamageRange\n                  (pPlayerUnit_lcl,UNITSTAT_secondary_mindamage,UNITSTAT_secondary_maxdamage,\n                   (int *)&nMinDamage,&nMaxDamage,&bIsDamageModified,pUnit);\n        wStringId = 0xd8a;\n      }\n      if (nMaxDamage <= (int)(nMinDamage + 1)) {\n        nMaxDamage = nMinDamage + 1;\n      }\n      pwLocaleStr = D2Lang::StrTable::strtable::GetLocaleString(wStringId);\n      D2Lang::Unicode::UNISYS::STRING_CopyWideString(wszText,pwLocaleStr);\n      Storm::Source::SSTR::SStrPrintf(szPrintfBuffer,0x100,\"%i\",nMinDamage);\n      D2Lang::Unicode::UNISYS::STRING_CopyCharToWCharWithSetMaxSize(wszTempBuffer,szPrintfBuffer,9);\n      D2Lang::Unicode::UNISYS::AppendToBuffer(wszText,pwColorPrefix);\n      if (bIsDamageModified != 0) {\n        D2Client::UI::ui::AppendAsWideChar(wszTempBuffer,3);\n      }\n      D2Lang::Unicode::UNISYS::AppendToBuffer(wszText,wszTempBuffer);\n      D2Lang::Unicode::UNISYS::AppendToBuffer(wszText,pwColorPrefix);\n      pwLocaleStr = D2Lang::StrTable::strtable::GetLocaleString(0xd88);\n      D2Lang::Unicode::UNISYS::AppendToBuffer(wszText,pwLocaleStr);\n      Storm::Source::SSTR::SStrPrintf(szPrintfBuffer,0x100,\"%i\",nMaxDamage);\n      D2Lang::Unicode::UNISYS::STRING_CopyCharToWCharWithSetMaxSize(wszTempBuffer,szPrintfBuffer,9);\n      D2Lang::Unicode::UNISYS::AppendToBuffer(wszText,pwColorPrefix);\n      D2Lang::Unicode::UNISYS::AppendToBuffer(wszText,wszTempBuffer);\n      pwLocaleStr = pwColorSuffix;\n    }\n    else {\n      D2Client::UI::Inv::INV_CalcWeaponDamageRange\n                (pPlayerUnit_lcl,UNITSTAT_secondary_mindamage,UNITSTAT_secondary_maxdamage,\n                 (int *)&nMinDamage,&nMaxDamage,&bIsDamageModified,pUnit);\n      pszBufCursor = wszTwoHandDamageBuffer;\n      for (iDurationFrames = 0x40; iDurationFrames != 0; iDurationFrames = iDurationFrames + -1) {\n        pszBufCursor[0] = L'\\0';\n        pszBufCursor[1] = L'\\0';\n        pszBufCursor = pszBufCursor + 2;\n      }\n      pwLocaleStr = D2Lang::StrTable::strtable::GetLocaleString(0xd8a);\n      D2Lang::Unicode::UNISYS::STRING_CopyWideString(wszTwoHandDamageBuffer,pwLocaleStr);\n      D2Lang::Unicode::UNISYS::AppendToBuffer(wszTwoHandDamageBuffer,pwColorPrefix);\n      Storm::Source::SSTR::SStrPrintf(szPrintfBuffer,0x100,\"%i\",nMinDamage);\n      D2Lang::Unicode::UNISYS::STRING_CopyCharToWCharWithSetMaxSize(wszTempBuffer,szPrintfBuffer,5);\n      if (bIsDamageModified != 0) {\n        D2Client::UI::ui::AppendAsWideChar(wszTempBuffer,3);\n      }\n      D2Lang::Unicode::UNISYS::AppendToBuffer(wszTwoHandDamageBuffer,wszTempBuffer);\n      D2Lang::Unicode::UNISYS::AppendToBuffer(wszTwoHandDamageBuffer,pwColorPrefix);\n      pwLocaleStr = D2Lang::StrTable::strtable::GetLocaleString(0xd88);\n      D2Lang::Unicode::UNISYS::AppendToBuffer(wszTwoHandDamageBuffer,pwLocaleStr);\n      Storm::Source::SSTR::SStrPrintf(szPrintfBuffer,0x100,\"%i\",nMaxDamage);\n      D2Lang::Unicode::UNISYS::STRING_CopyCharToWCharWithSetMaxSize(wszTempBuffer,szPrintfBuffer,5);\n      D2Lang::Unicode::UNISYS::AppendToBuffer(wszTwoHandDamageBuffer,pwColorPrefix);\n      D2Lang::Unicode::UNISYS::AppendToBuffer(wszTwoHandDamageBuffer,wszTempBuffer);\n      D2Lang::Unicode::UNISYS::AppendToBuffer(wszTwoHandDamageBuffer,pwColorSuffix);\n      D2Client::UI::Inv::INV_CalcWeaponDamageRange\n                (pPlayerUnit_lcl,UNITSTAT_mindamage,UNITSTAT_maxdamage,(int *)&nMinDamage,\n                 &nMaxDamage,&bIsDamageModified,pUnit);\n      pszBufCursor = wszDamageTextBuf + 0x80;\n      for (iDurationFrames = 0x40; iDurationFrames != 0; iDurationFrames = iDurationFrames + -1) {\n        pszBufCursor[0] = L'\\0';\n        pszBufCursor[1] = L'\\0';\n        pszBufCursor = pszBufCursor + 2;\n      }\n      pwLocaleStr = D2Lang::StrTable::strtable::GetLocaleString(0xd89);\n      D2Lang::Unicode::UNISYS::STRING_CopyWideString(wszDamageTextBuf + 0x80,pwLocaleStr);\n      D2Lang::Unicode::UNISYS::AppendToBuffer(wszDamageTextBuf + 0x80,pwColorPrefix);\n      Storm::Source::SSTR::SStrPrintf(szPrintfBuffer,0x100,\"%i\",nMinDamage);\n      D2Lang::Unicode::UNISYS::STRING_CopyCharToWCharWithSetMaxSize(wszTempBuffer,szPrintfBuffer,5);\n      if (bIsDamageModified != 0) {\n        D2Client::UI::ui::AppendAsWideChar(wszTempBuffer,3);\n      }\n      D2Lang::Unicode::UNISYS::AppendToBuffer(wszDamageTextBuf + 0x80,wszTempBuffer);\n      D2Lang::Unicode::UNISYS::AppendToBuffer(wszDamageTextBuf + 0x80,pwColorPrefix);\n      pwLocaleStr = D2Lang::StrTable::strtable::GetLocaleString(0xd88);\n      D2Lang::Unicode::UNISYS::AppendToBuffer(wszDamageTextBuf + 0x80,pwLocaleStr);\n      Storm::Source::SSTR::SStrPrintf(szPrintfBuffer,0x100,\"%i\",nMaxDamage);\n      D2Lang::Unicode::UNISYS::STRING_CopyCharToWCharWithSetMaxSize(wszTempBuffer,szPrintfBuffer,5);\n      D2Lang::Unicode::UNISYS::AppendToBuffer(wszDamageTextBuf + 0x80,pwColorPrefix);\n      D2Lang::Unicode::UNISYS::AppendToBuffer(wszDamageTextBuf + 0x80,wszTempBuffer);\n      D2Lang::Unicode::UNISYS::AppendToBuffer(wszDamageTextBuf + 0x80,pwColorSuffix);\n      D2Client::UI::ui::AppendAsWideChar(wszTwoHandDamageBuffer,0);\n      D2Client::UI::ui::AppendAsWideChar(wszDamageTextBuf + 0x80,0);\n      D2Lang::Unicode::UNISYS::STRING_CopyWideString(wszText,wszTwoHandDamageBuffer);\n      pwLocaleStr = wszDamageTextBuf + 0x80;\n    }\n    D2Lang::Unicode::UNISYS::AppendToBuffer(wszText,pwLocaleStr);\n    bIsDamageModified = 0;\n    nElemMinDamage =\n         D2Common::Stats::StatsEx::STATLIST_GetStatBonusFromLists\n                   (pUnit,UNITSTAT_item_mindamage_percent,0);\n    if ((((nElemMinDamage != 0) ||\n         (nElemMinDamage =\n               D2Common::Stats::StatsEx::STATLIST_GetStatBonusFromLists\n                         (pUnit,UNITSTAT_item_maxdamage_percent,0), nElemMinDamage != 0)) ||\n        (nElemMinDamage =\n              D2Common::Stats::StatsEx::STATLIST_GetStatBonusFromLists\n                        (pUnit,UNITSTAT_item_throw_mindamage,0), nElemMinDamage != 0)) ||\n       (nElemMinDamage =\n             D2Common::Stats::StatsEx::STATLIST_GetStatBonusFromLists\n                       (pUnit,UNITSTAT_item_throw_maxdamage,0), nElemMinDamage != 0)) {\n      bIsDamageModified = 1;\n    }\n    nElemMinDamage = D2Common::ITEMS::Items::ITEM_GetTxtItemTypes_throwable(pUnit);\n    if (nElemMinDamage != 0) {\n      pszBufCursor = wszDamageTextBuf;\n      for (iDurationFrames = 0x80; iDurationFrames != 0; iDurationFrames = iDurationFrames + -1) {\n        pszBufCursor[0] = L'\\0';\n        pszBufCursor[1] = L'\\0';\n        pszBufCursor = pszBufCursor + 2;\n      }\n      pwLocaleStr = D2Lang::StrTable::strtable::GetLocaleString(0xd8b);\n      D2Lang::Unicode::UNISYS::STRING_CopyWideString(wszDamageTextBuf,pwLocaleStr);\n      D2Client::UI::ui::AppendAsWideChar(wszDamageTextBuf,0);\n      D2Client::UI::Inv::INV_CalcWeaponDamageRange\n                (pPlayerUnit_lcl,UNITSTAT_item_throw_mindamage,UNITSTAT_item_throw_maxdamage,\n                 (int *)&nMinDamage,&nMaxDamage,&bIsDamageModified,pUnit);\n      Storm::Source::SSTR::SStrPrintf(szPrintfBuffer,0x100,\"%i\",nMinDamage);\n      D2Lang::Unicode::UNISYS::STRING_CopyCharToWCharWithSetMaxSize(wszTempBuffer,szPrintfBuffer,9);\n      nColor = -(uint)(bIsDamageModified != 0) & 3;\n      D2Client::UI::ui::AppendAsWideChar(wszTempBuffer,nColor);\n      D2Lang::Unicode::UNISYS::AppendToBuffer(wszDamageTextBuf,pwColorPrefix);\n      D2Lang::Unicode::UNISYS::AppendToBuffer(wszDamageTextBuf,wszTempBuffer);\n      D2Lang::Unicode::UNISYS::AppendToBuffer(wszDamageTextBuf,pwColorPrefix);\n      pwLocaleStr = D2Lang::StrTable::strtable::GetLocaleString(0xd88);\n      D2Lang::Unicode::UNISYS::AppendToBuffer(wszDamageTextBuf,pwLocaleStr);\n      Storm::Source::SSTR::SStrPrintf(szPrintfBuffer,0x100,\"%i\",nMaxDamage);\n      D2Lang::Unicode::UNISYS::STRING_CopyCharToWCharWithSetMaxSize(wszTempBuffer,szPrintfBuffer,9);\n      D2Client::UI::ui::AppendAsWideChar(wszTempBuffer,nColor);\n      D2Lang::Unicode::UNISYS::AppendToBuffer(wszDamageTextBuf,pwColorPrefix);\n      D2Lang::Unicode::UNISYS::AppendToBuffer(wszDamageTextBuf,wszTempBuffer);\n      D2Lang::Unicode::UNISYS::AppendToBuffer(wszDamageTextBuf,pwColorSuffix);\n      D2Lang::Unicode::UNISYS::AppendToBuffer(wszText,wszDamageTextBuf);\n    }\n    return;\n  }\n  nTypeCheck = D2Common::ITEMS::Items::ITEM_GetItemsTxt_wMissileType(pUnit);\n  pszBufCursor = wszDamageTextBuf;\n  nMinDamage = nTypeCheck;\n  for (iDurationFrames = 0x80; iDurationFrames != 0; iDurationFrames = iDurationFrames + -1) {\n    pszBufCursor[0] = L'\\0';\n    pszBufCursor[1] = L'\\0';\n    pszBufCursor = pszBufCursor + 2;\n  }\n  pUnit = (D2UnitStrc *)0x0;\n  nElemMinDamage =\n       D2Common::Units::Missile::GetMinElemDamage((D2UnitStrc *)0x0,pPlayerUnit_lcl,nTypeCheck,1);\n  nMaxDamage = D2Common::Units::Missile::GetMaxElemDamage\n                         ((D2UnitStrc *)0x0,pPlayerUnit_lcl,nMinDamage,1);\n  pwLocaleStr = D2Lang::StrTable::strtable::GetLocaleString(0xd8b);\n  D2Lang::Unicode::UNISYS::STRING_CopyWideString(wszDamageTextBuf,pwLocaleStr);\n  D2Client::UI::ui::AppendAsWideChar(wszDamageTextBuf,0);\n  bColorCode = D2Common::Units::Missile::GetElemTypeFromMissileId(nMinDamage);\n  if (true) {\n    switch(bColorCode) {\n    case 1:\n      pUnit = (D2UnitStrc *)0x1;\n      break;\n    case 2:\n      pUnit = (D2UnitStrc *)&DAT_00000004;\n      break;\n    case 4:\n      pUnit = (D2UnitStrc *)0x3;\n      break;\n    case 5:\n      pUnit = (D2UnitStrc *)&DAT_00000002;\n      nElemDuration =\n           D2Common::Units::Missile::GetElementalLength\n                     ((D2UnitStrc *)0x0,pPlayerUnit_lcl,nMinDamage,1);\n      iDurationFrames = nElemDuration / 0x19;\n      if (iDurationFrames < 1) {\n        iDurationFrames = 1;\n      }\n      nElemMinDamage = nElemMinDamage / iDurationFrames;\n      nMaxDamage = nMaxDamage / iDurationFrames;\n    }\n  }\n  nElemDuration =\n       D2Common::Units::Missile::GetMinDamage((D2UnitStrc *)0x0,pPlayerUnit_lcl,nMinDamage,1);\n  nCalcMinDamage = nElemMinDamage + nElemDuration >> 8;\n  nElemMinDamage =\n       D2Common::Units::Missile::GetMaxDamage((D2UnitStrc *)0x0,pPlayerUnit_lcl,nMinDamage,1);\n  iDurationFrames = nElemMinDamage + nMaxDamage >> 8;\n  if (iDurationFrames <= nCalcMinDamage) {\n    iDurationFrames = nCalcMinDamage;\n  }\n  Storm::Source::SSTR::SStrPrintf(szPrintfBuffer,0x100,\"%i\",nCalcMinDamage);\n  D2Lang::Unicode::UNISYS::STRING_CopyCharToWCharWithSetMaxSize(wszTempBuffer,szPrintfBuffer,9);\n  D2Client::UI::ui::AppendAsWideChar(wszTempBuffer,(int)pUnit);\n  D2Lang::Unicode::UNISYS::AppendToBuffer(wszDamageTextBuf,pwColorPrefix);\n  D2Lang::Unicode::UNISYS::AppendToBuffer(wszDamageTextBuf,wszTempBuffer);\n  if (nCalcMinDamage != iDurationFrames) {\n    D2Lang::Unicode::UNISYS::AppendToBuffer(wszDamageTextBuf,pwColorPrefix);\n    pwLocaleStr = D2Lang::StrTable::strtable::GetLocaleString(0xd88);\n    D2Lang::Unicode::UNISYS::AppendToBuffer(wszDamageTextBuf,pwLocaleStr);\n    Storm::Source::SSTR::SStrPrintf(szPrintfBuffer,0x100,\"%i\",iDurationFrames);\n    D2Lang::Unicode::UNISYS::STRING_CopyCharToWCharWithSetMaxSize(wszTempBuffer,szPrintfBuffer,9);\n    D2Client::UI::ui::AppendAsWideChar(wszTempBuffer,(int)pUnit);\n    D2Lang::Unicode::UNISYS::AppendToBuffer(wszDamageTextBuf,pwColorPrefix);\n    D2Lang::Unicode::UNISYS::AppendToBuffer(wszDamageTextBuf,wszTempBuffer);\n  }\n  D2Lang::Unicode::UNISYS::AppendToBuffer(wszDamageTextBuf,pwColorSuffix);\n  D2Lang::Unicode::UNISYS::STRING_CopyWideString(wszText,wszDamageTextBuf);\n  return;\n}\n\n",
+      "calledFunctions": []
+    },
+    {
+      "name": "UTF16_ToUTF8",
+      "address": "006c7130",
+      "entryPoint": "006c7130",
+      "signature": "int UTF16_ToUTF8(byte * pbUTF8, int nOutMaxChars, ushort * pszUTF16Out, int nInBytes, int * pnCharsWritten, int * pnBytesRead)",
+      "returnType": "int",
+      "callingConvention": "__stdcall",
+      "size": 421,
+      "isThunk": false,
+      "isExternal": false,
+      "hasVarArgs": false,
+      "namespace": "Storm::Source::SSTR",
+      "comment": "@function UTF16_ToUTF8\n@address Game.exe.ram:006c7130\n@date 2026.06.12\n@calling __stdcall",
+      "sourceFile": null,
+      "sourceLine": null,
+      "sourceInfo": null,
+      "parameters": [
+        {
+          "name": "pbUTF8",
+          "dataType": "byte *",
+          "size": 4,
+          "ordinal": 0,
+          "storage": "Stack[0x4]:4",
+          "stackOffset": 4,
+          "resolvedType": null
+        },
+        {
+          "name": "nOutMaxChars",
+          "dataType": "int",
+          "size": 4,
+          "ordinal": 1,
+          "storage": "Stack[0x8]:4",
+          "stackOffset": 8,
+          "resolvedType": null
+        },
+        {
+          "name": "pszUTF16Out",
+          "dataType": "ushort *",
+          "size": 4,
+          "ordinal": 2,
+          "storage": "Stack[0xc]:4",
+          "stackOffset": 12,
+          "resolvedType": null
+        },
+        {
+          "name": "nInBytes",
+          "dataType": "int",
+          "size": 4,
+          "ordinal": 3,
+          "storage": "Stack[0x10]:4",
+          "stackOffset": 16,
+          "resolvedType": null
+        },
+        {
+          "name": "pnCharsWritten",
+          "dataType": "int *",
+          "size": 4,
+          "ordinal": 4,
+          "storage": "Stack[0x14]:4",
+          "stackOffset": 20,
+          "resolvedType": null
+        },
+        {
+          "name": "pnBytesRead",
+          "dataType": "int *",
+          "size": 4,
+          "ordinal": 5,
+          "storage": "Stack[0x18]:4",
+          "stackOffset": 24,
+          "resolvedType": null
+        }
+      ],
+      "localVariables": [
+        {
+          "name": "pOutEnd",
+          "dataType": "ushort *",
+          "size": 4,
+          "storage": "EDI:4",
+          "stackOffset": null,
+          "resolvedType": "ushort *"
+        },
+        {
+          "name": "uCodepoint",
+          "dataType": "uint",
+          "size": 4,
+          "storage": "ECX:4",
+          "stackOffset": null,
+          "resolvedType": "uint"
+        },
+        {
+          "name": "uSurrPair",
+          "dataType": "uint",
+          "size": 4,
+          "storage": "ESI:4",
+          "stackOffset": null,
+          "resolvedType": "uint"
+        },
+        {
+          "name": "iResult",
+          "dataType": "int",
+          "size": 4,
+          "storage": "ESI:4",
+          "stackOffset": null,
+          "resolvedType": "int"
+        },
+        {
+          "name": "pInStart",
+          "dataType": "byte *",
+          "size": 4,
+          "storage": "EDX:4",
+          "stackOffset": null,
+          "resolvedType": "byte *"
+        },
+        {
+          "name": "pOutCur",
+          "dataType": "byte *",
+          "size": 4,
+          "storage": "EDX:4",
+          "stackOffset": null,
+          "resolvedType": "byte *"
+        },
+        {
+          "name": "local_8",
+          "dataType": "undefined4",
+          "size": 4,
+          "storage": "Stack[-0x8]:4",
+          "stackOffset": -8,
+          "resolvedType": null
+        },
+        {
+          "name": "local_c",
+          "dataType": "undefined4",
+          "size": 4,
+          "storage": "Stack[-0xc]:4",
+          "stackOffset": -12,
+          "resolvedType": null
+        },
+        {
+          "name": "local_10",
+          "dataType": "undefined4",
+          "size": 4,
+          "storage": "Stack[-0x10]:4",
+          "stackOffset": -16,
+          "resolvedType": null
+        },
+        {
+          "name": "pInEnd",
+          "dataType": "ushort *",
+          "size": 4,
+          "storage": "HASH:3f53980da5:4",
+          "stackOffset": null,
+          "resolvedType": "ushort *"
+        },
+        {
+          "name": "pInCur",
+          "dataType": "ushort *",
+          "size": 4,
+          "storage": "HASH:27f5e2866f3:4",
+          "stackOffset": null,
+          "resolvedType": "ushort *"
+        }
+      ],
+      "tags": null,
+      "decompiled": "\n/* @function UTF16_ToUTF8\n   @address Game.exe.ram:006c7130\n   @date 2026.06.12\n   @calling __stdcall */\n\nint Storm::Source::SSTR::UTF16_ToUTF8\n              (byte *pbUTF8,int nOutMaxChars,ushort *pszUTF16Out,int nInBytes,int *pnCharsWritten,\n              int *pnBytesRead)\n\n{\n  uint uCodepoint;\n  byte *pInStart;\n  byte *pOutCur;\n  uint uSurrPair;\n  int iResult;\n  ushort *pOutEnd;\n  ushort *pInCur;\n  ushort *pInEnd;\n  \n  pInEnd = pszUTF16Out;\n  if (nInBytes == 0x7fffffff) {\n    pOutEnd = (ushort *)0xffffffff;\n  }\n  else {\n    pOutEnd = pszUTF16Out + nInBytes;\n  }\n  pInStart = pbUTF8;\n  pInCur = pszUTF16Out;\n  while (pInCur < pOutEnd) {\n    uCodepoint = (uint)*pInCur;\n    pszUTF16Out = (ushort *)0x1;\n    if (uCodepoint - 0xd800 < 0x400) {\n      if (pOutEnd <= pInCur + 1) break;\n      uSurrPair = (uint)pInCur[1];\n      if (uSurrPair - 0xdc00 < 0x400) {\n        uCodepoint = (uCodepoint - 0xd7f7) * 0x400 + uSurrPair;\n        pszUTF16Out = (ushort *)&DAT_00000002;\n      }\n    }\n    if (uCodepoint < 0x80) {\n      iResult = 1;\n      if (uCodepoint == 0) {\n        if (pInStart < pbUTF8 + nOutMaxChars) {\n          *pInStart = 0;\n          pInStart = pInStart + 1;\n          iResult = 0;\n        }\n        goto report_counts;\n      }\n    }\n    else if (uCodepoint < 0x800) {\nLAB_006c7226:\n      iResult = 2;\n    }\n    else if (uCodepoint < 0x10000) {\n      iResult = 3;\n    }\n    else if (uCodepoint < 0x200000) {\n      iResult = 4;\n    }\n    else if (uCodepoint < 0x4000000) {\n      iResult = 5;\n    }\n    else {\n      if (0x7fffffff < uCodepoint) {\n        uCodepoint = 0xfffd;\n        goto LAB_006c7226;\n      }\n      iResult = 6;\n    }\n    pOutCur = pInStart + iResult;\n    if (pbUTF8 + nOutMaxChars < pOutCur) goto report_counts;\n    switch(iResult) {\n    case 6:\n      pOutCur = pOutCur + -1;\n      *pOutCur = (byte)uCodepoint & 0x3f | 0x80;\n      uCodepoint = uCodepoint >> 6;\n    case 5:\n      pOutCur = pOutCur + -1;\n      *pOutCur = (byte)uCodepoint & 0x3f | 0x80;\n      uCodepoint = uCodepoint >> 6;\n    case 4:\n      pOutCur = pOutCur + -1;\n      *pOutCur = (byte)uCodepoint & 0x3f | 0x80;\n      uCodepoint = uCodepoint >> 6;\n    case 3:\n      pOutCur = pOutCur + -1;\n      *pOutCur = (byte)uCodepoint & 0x3f | 0x80;\n      uCodepoint = uCodepoint >> 6;\n    case 2:\n      pOutCur = pOutCur + -1;\n      *pOutCur = (byte)uCodepoint & 0x3f | 0x80;\n      uCodepoint = uCodepoint >> 6;\n    case 1:\n      pOutCur = pOutCur + -1;\n      *pOutCur = *(byte *)(gaUTF8LeadByteMarks + iResult) | (byte)uCodepoint;\n    default:\n      pInCur = pInCur + (int)pszUTF16Out;\n      pInStart = pOutCur + iResult;\n    }\n  }\n  iResult = -1;\nreport_counts:\n  if (pnBytesRead != (int *)0x0) {\n    *pnBytesRead = (int)pInCur - (int)pInEnd >> 1;\n  }\n  if (pnCharsWritten != (int *)0x0) {\n    *pnCharsWritten = (int)pInStart - (int)pbUTF8;\n  }\n  return iResult;\n}\n\n",
+      "calledFunctions": []
+    }
+  ],
+  "scope": "Fresh live Inv szPrintfBuffer and Storm UTF16_ToUTF8 models. Regression guard uses the existing bounded typed fixture context; no owning extraction or native branch markup is claimed."
+}

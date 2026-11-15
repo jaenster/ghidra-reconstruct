@@ -1,0 +1,2250 @@
+{
+  "provenance": {
+    "ghidraVersion": 2105,
+    "source": "c10da2561c82f135a9dd1242a6a6d70ded175b08",
+    "generatorMain": "ece9b518720e96393e8db5ab3cb5614e20efa1cc",
+    "scope": "Complete live decompiles, resolved parameter/local storage, actual field types and callee signatures. No owning markup extraction. Expected damage bodies were emitted by unchanged main."
+  },
+  "types": [
+    {
+      "name": "SGAMEDATA",
+      "kind": "STRUCTURE"
+    },
+    {
+      "name": "D2UnitStrc",
+      "kind": "STRUCTURE"
+    },
+    {
+      "name": "D2UnitDataUnion",
+      "kind": "UNION"
+    },
+    {
+      "name": "D2UnitDataMonsterStrc",
+      "kind": "STRUCTURE"
+    },
+    {
+      "name": "D2DamageStrc",
+      "kind": "STRUCTURE"
+    },
+    {
+      "name": "D2MonStatsTxt",
+      "kind": "STRUCTURE"
+    },
+    {
+      "name": "D2MonStats2Txt",
+      "kind": "STRUCTURE"
+    },
+    {
+      "name": "D2MonStatsExTxtSlot",
+      "kind": "UNION"
+    },
+    {
+      "name": "D2MonsterRegionFieldStrc",
+      "kind": "STRUCTURE"
+    },
+    {
+      "name": "D2RoomStrc",
+      "kind": "STRUCTURE"
+    },
+    {
+      "name": "D2MonsterLevelDataStrc",
+      "kind": "STRUCTURE"
+    },
+    {
+      "name": "D2MonStatsInitStrc",
+      "kind": "STRUCTURE"
+    },
+    {
+      "name": "D2DifficultyLevelsTxt",
+      "kind": "STRUCTURE"
+    },
+    {
+      "name": "D2MonPropTxt",
+      "kind": "STRUCTURE"
+    },
+    {
+      "name": "D2SetsTxtFStrc",
+      "kind": "STRUCTURE"
+    },
+    {
+      "name": "D2SkillListStrc",
+      "kind": "STRUCTURE"
+    },
+    {
+      "name": "D2SkillStrc",
+      "kind": "STRUCTURE"
+    },
+    {
+      "name": "D2StatListExStrc",
+      "kind": "STRUCTURE"
+    },
+    {
+      "name": "D2DataTableTxtStrc",
+      "kind": "STRUCTURE"
+    },
+    {
+      "name": "D2MonsterRegionFieldSubStrc",
+      "kind": "STRUCTURE"
+    }
+  ],
+  "tables": {
+    "structFields": {
+      "SGAMEDATA": {
+        "super_TSHashObject": "TSHashObject<SGAMEDATA,HASHKEY_NONE>",
+        "lpCriticalSection": "LPCRITICAL_SECTION",
+        "pMemoryPool": "D2PoolManagerStrc *",
+        "pBnetGameData": "undefined4",
+        "bGameIsSetup": "int32_t",
+        "nServerToken": "ushort",
+        "szGameName": "char[16]",
+        "szGamePassword": "char[16]",
+        "szGameDescription": "char[32]",
+        "nGameType": "eD2HostGameType",
+        "nTemplateLevel": "byte",
+        "nReserved": "byte",
+        "nDifficulty": "byte",
+        "nLadder": "byte",
+        "pad_0x6F": "byte",
+        "bExpansion": "int32_t",
+        "eGameType": "eD2GSGameType",
+        "wItemFormat": "ushort",
+        "pad_0x7A": "ushort",
+        "pInitSeed": "D2SeedStrc",
+        "bInitSeed": "int32_t",
+        "pClient": "D2ClientStrc *32",
+        "nClientsCount": "int",
+        "anUnitGuidCounters": "uint32_t[6]",
+        "dwGameFrame": "int",
+        "dwCycleLastSecond": "int",
+        "dwCycleCount": "int",
+        "dwTickCount": "int",
+        "pTimerQueue": "D2TimerQueueStrc *",
+        "pAct": "D2DrlgActStrc *[5]",
+        "pGameSeed": "D2SeedStrc",
+        "pInactiveUnitList": "D2InactiveUnitListStrc *[5]",
+        "dwMonSeed": "uint",
+        "pMonsterRegion": "D2MonsterRegionStrc *[1024]",
+        "pObjectControl": "D2ObjectControlStrc *",
+        "pQuestControl": "D2QuestControlStrc *",
+        "pUnitNodes": "D2UnitNodeStrc *[10]",
+        "pUnitList": "D2UnitStrc *[5][128]",
+        "pWarpTileList": "D2UnitStrc *",
+        "fUniqueSpawn": "uint[128]",
+        "pNpcControl": "D2GameNpcControlStrc *",
+        "pArenaCtrl": "D2ArenaControlStrc *",
+        "pPartyControl": "D2UnitPartyControl *",
+        "nBossFlagList": "byte[64]",
+        "nPathCount": "uint[17]",
+        "nPathCountCount": "int",
+        "bUpdateStatsTick": "int32_t",
+        "dwStatsTick": "int",
+        "dwLastUpdateTick": "int",
+        "dwLastActivityTime": "uint32_t",
+        "dwUpdateTick": "int",
+        "pQServerHashLink": "int",
+        "dwUnknown": "int",
+        "dwServerGame": "int",
+        "pPrev": "SGAMEDATA *",
+        "pNext": "SGAMEDATA *",
+        "dwException": "int",
+        "nUberQuestObjectCount": "int",
+        "nUberQuestObjectIndex": "int",
+        "bUberBaal": "int",
+        "bUberDiablo": "int"
+      },
+      "D2UnitStrc": {
+        "eUnitType": "eD2UnitType",
+        "nClassId": "int",
+        "pMemory": "D2PoolManagerStrc *",
+        "nUnitGUID": "int",
+        "eAnimMode": "uD2UnitMode",
+        "pUnitData": "D2UnitDataUnion",
+        "nAct": "eAct",
+        "unk0x19": "byte[3]",
+        "pDrlgAct": "D2DrlgActStrc *32",
+        "sSeed": "D2SeedStrc",
+        "nInitSeed": "int",
+        "pPath": "D2PathUnion",
+        "pAnimSeq": "D2AnimSeqStrc *",
+        "nSeqFrameCount": "int",
+        "nSeqFrame": "int",
+        "nSeqAnimSpeed": "uint32_t",
+        "nSeqMode": "uint32_t",
+        "nGfxCurrentFrame": "int",
+        "nFrameCount": "int32_t",
+        "nAnimSpeed": "short",
+        "nActionFrame": "byte",
+        "unk0x4F": "byte",
+        "pAnimData": "D2AnimDataRecordStrc *",
+        "pGfxInfo": "D2GfxInfoStrc *",
+        "pGfxDataCopy": "undefined *",
+        "pStatsEx": "D2StatListExStrc *",
+        "pInventory": "D2InventoryStrc *",
+        "uSideData": "D2UnionData0x64",
+        "eOwnerType": "eD2UnitType",
+        "nOwnerGUID": "uint32_t",
+        "eKillerType": "eD2UnitType",
+        "nKillerGUID": "uint32_t",
+        "pHoverText": "D2HoverTextStrc *",
+        "pSkillsList": "D2SkillListStrc *",
+        "pCombat": "undefined *",
+        "dwLastHitClass": "uint32_t",
+        "unk0xB4": "uint32_t",
+        "dwDropItemCode": "uint32_t",
+        "unk0xBC": "uint32_t",
+        "unk0xC0": "uint32_t",
+        "eUnitFlags": "eD2UnitFlags",
+        "eUnitFlagsEx": "eD2UnitFlagsEx",
+        "pUnused0xCC": "undefined *",
+        "nNodeTableIndex": "int",
+        "dwTickCount": "uint32_t",
+        "pServerCmd": "D2ServerCmdStrc *",
+        "pTimerList": "D2TimerStrc *",
+        "pChangeNextUnit": "D2UnitStrc *",
+        "pListNext": "D2UnitStrc *",
+        "pRoomNext": "D2UnitStrc *",
+        "pMsgFirst": "D2SUnitMsgStrc *",
+        "pMsgLast": "D2SUnitMsgStrc *"
+      },
+      "D2UnitDataUnion": {
+        "pUnitDataPlayer": "D2UnitDataPlayerStrc *",
+        "pUnitDataMonster": "D2UnitDataMonsterStrc *",
+        "pUnitDataObject": "D2UnitDataObjectStrc *",
+        "pUnitDataMissile": "D2UnitDataMissileStrc *",
+        "pUnitDataItem": "D2UnitDataItemStrc *"
+      },
+      "D2UnitDataMonsterStrc": {
+        "pMonStatsTxt": "D2MonStatsTxt *",
+        "Components": "byte[16]",
+        "nNameSeed": "uint16_t",
+        "eMonsterType": "uint16_t",
+        "nDurielUnk": "int",
+        "MonUModList": "byte[9]",
+        "pad0x25": "byte",
+        "nBossNo": "int16_t",
+        "pAiGeneral": "D2AiGeneralStrc *",
+        "pPathParamOrName": "D2MonsterPathParamOrNameUnion",
+        "pMonsterAi": "D2MonsterAiStrc *",
+        "nAiRelated1": "int",
+        "nAiRelated2": "int",
+        "nOwnerGUID": "int32_t",
+        "nNecroPetGUID": "int32_t",
+        "unk0x44": "int",
+        "unk0x48": "int",
+        "unk0x4C": "int",
+        "pVision": "undefined *",
+        "nAiState": "int",
+        "eLevelId": "eD2LevelId",
+        "nSummonerFlags": "uint16_t",
+        "unk0x5E": "byte",
+        "unk0x5F": "byte"
+      },
+      "D2DamageStrc": {
+        "dwHitFlags": "int",
+        "wResultFlags": "short",
+        "wExtra": "short",
+        "dwPhysDamage": "int",
+        "dwEnDmgPct": "int",
+        "dwFireDmg": "int",
+        "dwBurnDmg": "int",
+        "dwBurnLen": "int",
+        "dwLtngDamage": "int",
+        "dwMagDamage": "int",
+        "dwColdDmg": "int",
+        "dwPoisDamage": "int",
+        "dwPoisLength": "int",
+        "dwColdLength": "int",
+        "dwFrzLength": "int",
+        "dwLifeLeech": "int",
+        "dwManaLeech": "int",
+        "dwStamLeech": "int",
+        "dwStunLen": "int",
+        "dwAbsLife": "int",
+        "dwDmgTotal": "int",
+        "dwAuraStatValue2": "int",
+        "dwPiercePct": "int",
+        "dwDamageRate": "int",
+        "dwAuraStatValue5": "int",
+        "dwHitClass": "int",
+        "nHitClassActiveSet": "byte",
+        "nConvType": "byte",
+        "nReserved66": "byte",
+        "nReserved67": "byte",
+        "dwConvPct": "int",
+        "nOverlay": "int"
+      },
+      "D2MonStatsTxt": {
+        "Id": "ushort",
+        "BaseId": "short",
+        "NextInClass": "short",
+        "NameStr": "ushort",
+        "DescStr": "ushort",
+        "null": "undefined",
+        "isSpawn": "int:1",
+        "isMelee": "int:1",
+        "noRatio": "int:1",
+        "opendoors": "int:1",
+        "SetBoss": "int:1",
+        "BossXfer": "int:1",
+        "boss": "int:1",
+        "primeevil": "int:1",
+        "npc": "int:1",
+        "interact": "int:1",
+        "inTown": "int:1",
+        "lUndead": "int:1",
+        "hUndead": "int:1",
+        "demon": "int:1",
+        "flying": "int:1",
+        "killable": "int:1",
+        "switchai": "int:1",
+        "nomultishot": "int:1",
+        "neverCount": "int:1",
+        "petIgnore": "int:1",
+        "deathDmg": "int:1",
+        "genericSpawn": "int:1",
+        "zoo": "int:1",
+        "placespawn": "int:1",
+        "inventory": "int:1",
+        "enabled": "int:1",
+        "NoShldBlock": "int:1",
+        "noaura": "int:1",
+        "rangedtype": "int:1",
+        "Code": "string",
+        "MonSound": "short",
+        "UMonSound": "short",
+        "MonStatsEx": "short",
+        "MonProp": "short",
+        "MonType": "short",
+        "AI": "short",
+        "spawn": "short",
+        "spawnx": "char",
+        "spawny": "char",
+        "spawnmode": "char",
+        "minion1": "short",
+        "minion2": "short",
+        "nMonEquipId": "short",
+        "PartyMin": "uint8_t",
+        "PartyMax": "uint8_t",
+        "Rarity": "char",
+        "MinGrp": "uint8_t",
+        "MaxGrp": "char",
+        "sparsePopulate": "char",
+        "Velocity": "short",
+        "Run": "short",
+        "wWalkAnimSpeed": "short",
+        "wRunAnimSpeed": "short",
+        "MissA1": "short",
+        "MissA2": "short",
+        "MissS1": "short",
+        "MissS2": "short",
+        "MissS3": "short",
+        "MissS4": "short",
+        "MissC": "short",
+        "MissSQ": "short",
+        "nMaxChainId": "byte",
+        "nChainId": "byte",
+        "Align": "uint8_t",
+        "TransLvl": "uint8_t",
+        "threat": "uint8_t",
+        "aidel": "byte[3]",
+        "aidist": "char[3]",
+        "aip": "short[8][3]",
+        "TreasureClass": "D2MonStatsTxtTC[3]",
+        "TCQuestId": "uint8_t",
+        "TCQuestCP": "char",
+        "aDrain": "uint8_t[3]",
+        "aToBlock": "uint8_t[3]",
+        "Crit": "char",
+        "SkillDamage": "short",
+        "aLevel": "short[3]",
+        "aMinHP": "short[3]",
+        "aMaxHP": "short[3]",
+        "aAC": "short[3]",
+        "aA1TH": "short[3]",
+        "aA2TH": "short[3]",
+        "aS1TH": "short[3]",
+        "aExp": "short[3]",
+        "aA1MinD": "short[3]",
+        "aA1MaxD": "short[3]",
+        "aA2MinD": "short[3]",
+        "aA2MaxD": "short[3]",
+        "aS1MinD": "short[3]",
+        "aS1MaxD": "short[3]",
+        "aElMode": "uint8_t[3]",
+        "aElType": "uint8_t[3]",
+        "aElPct": "uint8_t[3][3]",
+        "aEl1MinD": "short[3]",
+        "aEl2MinD": "short[3]",
+        "aEl3MinD": "short[3]",
+        "aEl1MaxD": "short[3]",
+        "aEl2MaxD": "short[3]",
+        "aEl3MaxD": "short[3]",
+        "aEl1Dur": "short[3]",
+        "aEl2Dur": "short[3]",
+        "aEl3Dur": "short[3]",
+        "aResDm": "short[3]",
+        "aResMa": "short[3]",
+        "aResFi": "short[3]",
+        "aResLi": "short[3]",
+        "aResCo": "short[3]",
+        "aResPo": "short[3]",
+        "aColdEffect": "char[3]",
+        "SendSkills": "byte[4]",
+        "aSkill": "short[8]",
+        "aSkMode": "char[8]",
+        "aSkSeq": "short[8]",
+        "aSkLvl": "char[8]",
+        "DamageRegen": "int",
+        "SplEndDeath": "uint8_t",
+        "SplGetModeChart": "char",
+        "SplEndGeneric": "char",
+        "SplClientEnd": "char"
+      },
+      "D2MonStats2Txt": {
+        "Id": "short",
+        "null": "undefined",
+        "noGfxHitTest": "int:1",
+        "noMap": "int:1",
+        "noOvly": "int:1",
+        "isSel": "int:1",
+        "alSel": "int:1",
+        "noSel": "int:1",
+        "shiftSel": "int:1",
+        "corpseSel": "int:1",
+        "revive": "int:1",
+        "isAtt": "int:1",
+        "isSmall": "int:1",
+        "large": "int:1",
+        "soft": "int:1",
+        "critter": "int:1",
+        "shadow": "int:1",
+        "noUniqueShift": "int:1",
+        "compositeDeath": "int:1",
+        "inert": "int:1",
+        "objCol": "int:1",
+        "deadCol": "int:1",
+        "unflatDead": "int:1",
+        "SizeX": "char",
+        "SizeY": "char",
+        "spawnCol": "char",
+        "Height": "char",
+        "overlayHeight": "uint8_t",
+        "pixHeight": "uint8_t",
+        "MeleeRng": "uint8_t",
+        "BaseW": "int",
+        "HitClass": "char",
+        "aComponents": "byte[16]",
+        "byTotalFrames": "byte",
+        "aCompCodes": "byte[192]",
+        "HD": "byte[2]",
+        "TotalPieces": "char",
+        "mDT": "byte[2]",
+        "byDirDT": "byte[16]",
+        "A1mv": "byte[2]",
+        "byInfernoLen": "uint8_t",
+        "byInfernoAnim": "uint8_t",
+        "byInfernoRollback": "uint8_t",
+        "byResurrectMode": "char",
+        "wResurrectSkill": "ushort",
+        "nHtTop": "short",
+        "nHtLeft": "short",
+        "nHtWidth": "short",
+        "nHtHeight": "short",
+        "nAutomapCel": "int",
+        "byLocalBlood": "byte",
+        "byBleed": "byte",
+        "byLight": "byte",
+        "byLgtR": "byte",
+        "byLgtG": "byte",
+        "byLgtB": "byte",
+        "byUtrans": "byte[3]",
+        "nHeart": "int",
+        "nBodyPart": "int",
+        "byRestore": "byte"
+      },
+      "D2MonStatsExTxtSlot": {
+        "pMonPropTxt": "D2MonPropTxt *32",
+        "pMonStats2Txt": "D2MonStats2Txt *32"
+      },
+      "D2MonsterRegionFieldStrc": {
+        "nClassId": "uint16_t",
+        "nRarity": "byte",
+        "pad": "byte",
+        "aArray": "D2MonsterRegionFieldSubStrc[3]"
+      },
+      "D2RoomStrc": {
+        "ppRoomList": "D2RoomStrc * *",
+        "nClientsMax": "uint",
+        "pRoomTiles": "D2DrlgRoomTilesStrc *",
+        "nIdleTicks": "int",
+        "pRoomEx": "D2RoomExStrc *",
+        "nCurrentDeathIndex": "int",
+        "pDrlgDelete": "D2DrlgDeleteStrc *",
+        "pUnitUpdate": "D2UnitStrc *",
+        "pCollisionGrid": "D2RoomCollisionGridStrc *",
+        "nRoomListCount": "uint",
+        "nAllies": "int",
+        "pDrlgAct": "D2DrlgActStrc *",
+        "dwUnk0x30": "int",
+        "eFlags": "int",
+        "nLastDeadGUIDs": "uint[4]",
+        "pClients": "D2ClientStrc * *",
+        "sCoords": "D2DrlgRoomCoordsStrc",
+        "sSeed": "D2SeedStrc",
+        "pUnitList": "D2UnitStrc *",
+        "nClientsCount": "int",
+        "pDrlgRoomNext": "D2RoomStrc *"
+      },
+      "D2MonsterLevelDataStrc": {
+        "nPlayerMultiplyer": "uint",
+        "nPlayerMultiplyer2": "uint",
+        "nMonsterSkillBonus": "uint",
+        "nDifficulty": "uint",
+        "nPlayerMultiplyer3": "uint"
+      },
+      "D2MonStatsInitStrc": {
+        "nMinHP": "int",
+        "nMaxHP": "int",
+        "nAC": "int",
+        "nTH": "int",
+        "nExp": "int",
+        "nA1MinD": "int",
+        "nA1MaxD": "int",
+        "nA2MinD": "int",
+        "nA2MaxD": "int",
+        "nS1MinD": "int",
+        "nS1MaxD": "int",
+        "nElMinD": "int",
+        "nElMaxD": "int",
+        "nElDur": "int"
+      },
+      "D2DifficultyLevelsTxt": {
+        "ResistPenalty": "int",
+        "DeathExpPenalty": "int",
+        "UberCodeOddsNormal": "int",
+        "UberCodeOddsGood": "int",
+        "MonsterSkillBonus": "int",
+        "MonsterFreezeDivisor": "int",
+        "MonsterColdDivisor": "int",
+        "AiCurseDivisor": "int",
+        "UltraCodeOddsNormal": "int",
+        "UltraCodeOddsGood": "int",
+        "LifeStealDivisor": "int",
+        "ManaStealDivisor": "int",
+        "UniqueDamageBonus": "int",
+        "ChampionDamageBonus": "int",
+        "HireableBossDamagePercent": "int",
+        "MonsterCEDamagePercent": "int",
+        "StaticFieldMin": "int",
+        "GambleRare": "int",
+        "GambleSet": "int",
+        "GambleUnique": "int",
+        "GambleUber": "int",
+        "GambleUltra": "int"
+      },
+      "D2MonPropTxt": {
+        "Id": "int",
+        "entry": "D2MonPropTxtEntry[3][6]",
+        "chance": "char[3][6]",
+        "null": "undefined"
+      },
+      "D2SetsTxtFStrc": {
+        "fcode": "int",
+        "fparam": "int",
+        "fmin": "int",
+        "fmax": "int"
+      },
+      "D2SkillListStrc": {
+        "pMemory": "D2PoolManagerStrc *",
+        "pFirstSkill": "D2SkillStrc *",
+        "pLeftSkill": "D2SkillStrc *",
+        "pRightSkill": "D2SkillStrc *",
+        "pCurrentSkill": "D2SkillStrc *",
+        "pLight": "D2LightMapStrc *"
+      },
+      "D2SkillStrc": {
+        "pRecord": "D2SkillsTxt *",
+        "pNext": "D2SkillStrc *",
+        "nMode": "int",
+        "fFlags": "int",
+        "dwTargetInfo": "int",
+        "dwTargetType": "int",
+        "nPar1": "int",
+        "nPar2": "int",
+        "nPar3": "int",
+        "nPar4": "int",
+        "nLevel": "int",
+        "nLevelBonus": "int",
+        "nQuantity": "int",
+        "nOwnerGUID": "int",
+        "nCharges": "int",
+        "bItemSkill": "int"
+      },
+      "D2StatListExStrc": {
+        "sStatList": "D2StatListStrc",
+        "pActiveHead": "D2StatListExStrc *",
+        "pInactiveHead": "D2StatListExStrc *",
+        "pOwner": "D2UnitStrc *",
+        "sFullStats": "D2StatInfoStrc",
+        "sChangedStats": "D2ChangedStatArrayStrc",
+        "pStateFlags": "int *",
+        "fpCallback": "fpStatListExChangeCb *",
+        "pGame": "SGAMEDATA *"
+      },
+      "D2DataTableTxtStrc": {
+        "pTxtPlayerClass": "D2PlayerClassTxt *",
+        "pTxtPlayerClassLink": "D2TxtLinkStrc *",
+        "pTxtBodyLocs": "D2BodyLocsTxt *",
+        "pTxtBodyLocsLink": "D2TxtLinkStrc *",
+        "pTxtStorePage": "D2StorePageTxt *",
+        "pTxtStorePageLink": "D2TxtLinkStrc *",
+        "pTxtElemTypes": "D2ElemTypesTxt *",
+        "pTxtElemTypesLink": "D2TxtLinkStrc *",
+        "pTxtHitClass": "D2HitClassTxt *",
+        "pTxtHitClassLink": "D2TxtLinkStrc *",
+        "pTxtMonMode": "D2MonModeTxtSmall *",
+        "pTxtMonModeLink": "D2TxtLinkStrc *",
+        "pTxtPlrMode": "D2PlrModeTxt *",
+        "pTxtPlrModeLink": "D2TxtLinkStrc *",
+        "pTxtSkillCalc": "D2SkillCalcTxt *",
+        "pTxtSkillCalcLink": "D2TxtLinkStrc *",
+        "pSkillsCode": "pointer",
+        "nSkillsCodeSize": "int",
+        "nSkillsCodeCapacity": "int",
+        "pSkillDescCode": "pointer",
+        "nSkillDescCodeSize": "int",
+        "nSkillDescCodeCapacity": "int",
+        "pTxtMissCalc": "D2MissCalcTxt *",
+        "pTxtMissCalcLink": "D2TxtLinkStrc *",
+        "pMissCode": "pointer",
+        "nMissCodeSize": "int",
+        "nMissCodeCapacity": "int",
+        "pTxtSkillsHeader": "D2SkillsHeaderTxt *",
+        "pTxtSkillsHeaderLink": "D2TxtLinkStrc *",
+        "pTxtEvents": "D2EventsTxt *",
+        "pTxtEventsLink": "D2TxtLinkStrc *",
+        "pTxtCompCode": "D2CompCodeTxt *",
+        "pTxtCompCodeLink": "D2TxtLinkStrc *",
+        "nTxtCompCodeSize": "int",
+        "pTxtMonAi": "D2MonAiTxt *",
+        "pTxtMonAiLink": "D2TxtLinkStrc *",
+        "nTxtMonAiSize": "int",
+        "sTxtItemsLink": "D2TxtLinkStrc *",
+        "pItemsCode": "pointer",
+        "nItemsCodeSize": "int",
+        "nItemsCodeCapacity": "int",
+        "pTxtProperties": "D2PropertiesTxt *",
+        "pTxtPropertiesLink": "D2TxtLinkStrc *",
+        "nTxtPropertiesSize": "int",
+        "pTxtRunesLink": "D2TxtLinkStrc *",
+        "pTxtHireDesc": "D2HireDescTxt *",
+        "pTxtHireDescLink": "D2TxtLinkStrc *",
+        "pTxtStates": "D2StatesTxt *",
+        "pTxtStatesLink": "D2TxtLinkStrc *",
+        "nTxtStatesSize": "int",
+        "pStatesDataTbls": "D2StatesDataTbls *",
+        "pSingleStateDataTbl": "D2StatesDataTbls *[40]",
+        "pAllStatesDataTblFlag0x04": "D2AllStatesDataTbl *",
+        "nAllStatesDataTblFlag0x04Size": "int",
+        "pAllStatesDataTblFlag0x0B": "D2AllStatesDataTbl *",
+        "nAllStatesDataTblFlag0x0BSize": "int",
+        "pAllStatesDataTblFlag0x10": "uint16_t *",
+        "nAllStatesDataTblFlag0x10Size": "int",
+        "pAllStatesDataTblFlag0x05": "uint16_t *",
+        "nAllStatesDataTblFlag0x05Size": "int",
+        "pStatesItemTypesDataTbl": "uint16_t *",
+        "nStatesItemTypesDataTblSize": "int",
+        "pTxtSounds": "D2SoundsTxtSmall *",
+        "pTxtSoundsLink": "D2TxtLinkStrc *",
+        "nTxtSoundsSize": "int",
+        "pTxtHireling": "D2HirelingTxt *",
+        "nTxtHirelingSize": "int",
+        "nTxtHirelingIdLines": "int[512]",
+        "pTxtNpc": "D2NpcTxt *",
+        "nTxtNpcSize": "int",
+        "pTxtColors": "D2ColorsTxt *",
+        "pTxtColorsLink": "D2TxtLinkStrc *",
+        "pTxtMonsterTblsLink": "D2TxtLinkStrc *",
+        "pParsedTreasureClass": "D2ParsedTreasureClassStrc *",
+        "nParsedTreasureClassSize": "int",
+        "pParsedTreasureClassDiffActChestABC": "D2ParsedDifficultyTreasureClassStrc",
+        "pTxtMonStats": "D2MonStatsTxt *",
+        "pTxtMonStatsLink": "D2TxtLinkStrc *",
+        "nTxtMonStatsSize": "int",
+        "pTxtMonSounds": "D2MonSoundsTxt *",
+        "pTxtMonSoundsLink": "D2TxtLinkStrc *",
+        "nTxtMonSoundsSize": "int",
+        "pTxtMonStatsEx": "D2MonStats2Txt *",
+        "pTxtMonStats2Link": "D2TxtLinkStrc *",
+        "nTxtMonStatsExSize": "int",
+        "pTxtMonPlace": "D2MonPlaceTxt *",
+        "pTxtMonPlaceLink": "D2TxtLinkStrc *",
+        "nTxtMonPlaceSize": "int",
+        "pTxtMonPresetPlace": "D2MonPresetTxtPlace *",
+        "pTxtMonPresetPerAct": "D2MonPresetTxt *[5]",
+        "pTxtMonPresetPerActId": "int[5]",
+        "pTxtSuperUniques": "D2SuperUniquesTxt *",
+        "pTxtSuperUniquesLink": "D2TxtLinkStrc *",
+        "nTxtSuperUniquesSize": "int",
+        "aTxtSuperUniquesHardcoded": "short[66]",
+        "pTxtMissiles": "D2MissilesTxt *",
+        "pTxtMissilesLink": "D2TxtLinkStrc *",
+        "nTxtMissilesSize": "int",
+        "pTxtMonLvl": "D2MonLvlTxt *",
+        "nTxtMonLvlSize": "int",
+        "pTxtMonSeq": "D2MonSeqTxt *",
+        "pTxtMonSeqLink": "D2TxtLinkStrc *",
+        "nTxtMonSeqSize": "int",
+        "pMonSeqMonsterTbls": "D2MonSeqMonsterTbls *",
+        "nMonSeqMonsterTblsSize": "int",
+        "pTxtSkillDesc": "D2SkillDescTxt *",
+        "pTxtSkillDescLink": "D2TxtLinkStrc *",
+        "nTxtSkillDescSize": "int",
+        "pTxtSkills": "D2SkillsTxt *",
+        "pTxtSkillsLink": "D2TxtLinkStrc *",
+        "nTxtSkillsCount": "int",
+        "pSkillsPerClassCounter": "D2SkillsPerClassCounter *",
+        "nSkillCountMaxPerClass": "int",
+        "pSkillsPerClassStrc": "int16_t *32",
+        "nPassiveSkillsCount": "int",
+        "pPassiveSkillsPerClassStrc": "D2PassiveSkillsPerClassStrc *",
+        "pTxtOverlayLink": "D2TxtLinkStrc *",
+        "pTxtOverlay": "D2OverlayTxt *",
+        "nTxtOverlaySize": "int",
+        "pTxtCharStats": "D2CharStatsTxt *",
+        "nTxtCharStatsSize": "int",
+        "pTxtItemStatCost": "D2ItemStatCostTxt *",
+        "pTxtItemStatCostLink": "D2TxtLinkStrc *",
+        "nTxtItemStatCostSize": "int",
+        "pItemStatCostDescPriority": "short *",
+        "nItemStatCostDescPrioritySize": "int",
+        "pTxtMonEquip": "D2MonEquipTxt *",
+        "nTxtMonEquipSize": "int",
+        "pTxtPetType": "D2PetTypeTxt *",
+        "pTxtPetTypeLink": "D2TxtLinkStrc *",
+        "nTxtPetTypeSize": "int",
+        "pTxtItemTypesLink": "D2TxtLinkStrc *",
+        "pTxtItemTypes": "D2ItemTypesTxt *",
+        "nTxtItemTypesSize": "int",
+        "nItemTypesEquivRowDwords": "int",
+        "pTxtItemTypesUnknown": "pointer",
+        "pTxtSetsLink": "D2TxtLinkStrc *",
+        "pTxtSets": "D2SetsTxt *",
+        "nTxtSetsSize": "int",
+        "pTxtSetItemsLink": "D2TxtLinkStrc *",
+        "pTxtSetItems": "D2SetItemsTxt *",
+        "nTxtSetItemsSize": "int",
+        "pTxtUniqueItemsLink": "D2TxtLinkStrc *",
+        "pTxtUniqueItems": "D2UniqueItemsTxt *",
+        "nTxtUniqueItemsSize": "int",
+        "pTxtMonPropLink": "D2TxtLinkStrc *",
+        "pTxtMonProp": "D2MonPropTxt *",
+        "nTxtMonPropSize": "int",
+        "pTxtMonTypeLink": "D2TxtLinkStrc *",
+        "pTxtMonType": "D2MonTypeTxt *",
+        "nTxtMonTypeSize": "int",
+        "pTxtMonTypeUnknown": "pointer",
+        "nMonTypeEquivRowDwords": "int",
+        "pTxtMonUmodLink": "D2TxtLinkStrc *",
+        "pTxtMonUmod": "D2MonUModTxt *",
+        "nTxtMonUmodSize": "int",
+        "pTxtLevels": "D2LevelsTxt *",
+        "nTxtLevelsSize": "int",
+        "pTxtLevelDefs": "D2LevelDefsTxt *",
+        "pTxtLvlPrest": "D2LvlPrestTxt *",
+        "nTxtLvlPrestSize": "int",
+        "nChargedSkillLevelBits": "int",
+        "dwChargedSkillLevelMask": "int",
+        "pAnimTbls": "D2AnimDataStrc *",
+        "pTxtExperience": "D2ExperienceTxt *",
+        "pTxtDifficultyLevels": "D2DifficultyLevelsTxt *",
+        "nTxtDifficultyLevelsSize": "int",
+        "bUseTxt": "BOOL",
+        "nRoomDataGenerationB": "int",
+        "nRoomDataFreeGenerationB": "int",
+        "nRoomDataFreeGenerationA": "int",
+        "nRoomDataGenerationA": "int"
+      },
+      "D2MonsterRegionFieldSubStrc": {
+        "aComponentVariants": "byte[16]"
+      }
+    },
+    "typedefTargets": {
+      "byte": "unsigned char",
+      "uint": "unsigned int",
+      "BOOL": "int",
+      "DWORD": "unsigned long"
+    },
+    "rootQualifiedTypedefs": [
+      "SGAMEDATA"
+    ],
+    "enumTypes": [
+      "eD2Difficulty",
+      "eD2UnitType"
+    ],
+    "enumValues": {
+      "DIFFICULTY_NORMAL": 0,
+      "DIFFICULTY_NIGHTMARE": 1,
+      "DIFFICULTY_HELL": 2,
+      "UNIT_PLAYER": 0,
+      "UNIT_MONSTER": 1,
+      "UNIT_OBJECT": 2,
+      "UNIT_MISSILE": 3,
+      "UNIT_ITEM": 4,
+      "UNIT_WARP": 5,
+      "UNIT_COUNT": 6
+    },
+    "enumMemberValues": {
+      "eD2Difficulty": {
+        "DIFFICULTY_NORMAL": 0,
+        "DIFFICULTY_NIGHTMARE": 1,
+        "DIFFICULTY_HELL": 2
+      },
+      "eD2UnitType": {
+        "UNIT_PLAYER": 0,
+        "UNIT_MONSTER": 1,
+        "UNIT_OBJECT": 2,
+        "UNIT_MISSILE": 3,
+        "UNIT_ITEM": 4,
+        "UNIT_WARP": 5,
+        "UNIT_COUNT": 6
+      }
+    },
+    "enumConstantTypes": {
+      "DIFFICULTY_NORMAL": "eD2Difficulty",
+      "DIFFICULTY_NIGHTMARE": "eD2Difficulty",
+      "DIFFICULTY_HELL": "eD2Difficulty",
+      "UNIT_PLAYER": "eD2UnitType",
+      "UNIT_MONSTER": "eD2UnitType",
+      "UNIT_OBJECT": "eD2UnitType",
+      "UNIT_MISSILE": "eD2UnitType",
+      "UNIT_ITEM": "eD2UnitType",
+      "UNIT_WARP": "eD2UnitType",
+      "UNIT_COUNT": "eD2UnitType"
+    },
+    "functionReturnTypes": {
+      "GetInstructionPointer": "void *",
+      "Fog::Src::ErrorManager::GetInstructionPointer": "void *",
+      "ERROR_UnrecoverableInternalError_Halt": "void",
+      "Fog::Src::ErrorManager::ERROR_UnrecoverableInternalError_Halt": "void",
+      "TXT_MonStats_GetLine": "D2MonStatsTxt *",
+      "D2Common::DATATBLS::MonsterTbls::TXT_MonStats_GetLine": "D2MonStatsTxt *",
+      "TXT_MonStats_GetFlagsByBitOffset": "BOOL",
+      "D2Common::DATATBLS::MonsterTbls::TXT_MonStats_GetFlagsByBitOffset": "BOOL",
+      "UNIT_GetModuloFromSeed": "uint32_t",
+      "D2Common::Seed::UNIT_GetModuloFromSeed": "uint32_t",
+      "RANDOM_RandomNumberSelector": "uint32_t",
+      "D2Common::Seed::RANDOM_RandomNumberSelector": "uint32_t",
+      "ValidateClassId": "int32_t",
+      "D2Common::DATATBLS::MonsterTbls::ValidateClassId": "int32_t",
+      "D2ApplyPercent": "int32_t",
+      "D2Common::DATATBLS::DataTbls::D2ApplyPercent": "int32_t",
+      "SUNITPROXY_GetNpcInventory": "D2InventoryStrc *",
+      "D2Game::UNIT::sunitproxy::SUNITPROXY_GetNpcInventory": "D2InventoryStrc *",
+      "EVENT_RemoveUnitTimersByType": "void",
+      "D2Game::GAME::Event::EVENT_RemoveUnitTimersByType": "void",
+      "SetEvent": "void",
+      "D2Game::GAME::Event::SetEvent": "void",
+      "GetGamePointer": "SGAMEDATA *",
+      "D2Game::UNIT::SUnit::GetGamePointer": "SGAMEDATA *",
+      "CheckForModeZeroDeath": "BOOL",
+      "D2Game::UNIT::SUnit::CheckForModeZeroDeath": "BOOL",
+      "UNITS_CheckIfCanAttackTarget": "uint32_t",
+      "D2Game::UNIT::SUnit::UNITS_CheckIfCanAttackTarget": "uint32_t",
+      "SetSkill": "void",
+      "D2Game::SKILLS::SkillsServer::SetSkill": "void",
+      "MONSTER_GetMonPropTxtRecord": "D2MonPropTxt *",
+      "D2Game::Monster::Monster::MONSTER_GetMonPropTxtRecord": "D2MonPropTxt *",
+      "MONSTER_InitLevelDifficultyScaling": "void",
+      "D2Game::Monster::Monster::MONSTER_InitLevelDifficultyScaling": "void",
+      "MONSTER_RollComponentAppearance": "void",
+      "D2Game::Monster::Monster::MONSTER_RollComponentAppearance": "void",
+      "DAMAGE_ApplyHealingToUnit": "int32_t",
+      "D2Game::UNIT::SUnitDmg::DAMAGE_ApplyHealingToUnit": "int32_t",
+      "DAMAGE_ApplyManaToUnit": "int32_t",
+      "D2Game::UNIT::SUnitDmg::DAMAGE_ApplyManaToUnit": "int32_t",
+      "DAMAGE_DrainManaFromUnit": "uint32_t",
+      "D2Game::UNIT::SUnitDmg::DAMAGE_DrainManaFromUnit": "uint32_t",
+      "DAMAGE_DrainStaminaFromUnit": "uint32_t",
+      "D2Game::UNIT::SUnitDmg::DAMAGE_DrainStaminaFromUnit": "uint32_t",
+      "DAMAGE_ApplyStun": "void",
+      "D2Game::UNIT::SUnitDmg::DAMAGE_ApplyStun": "void",
+      "DAMAGE_ApplyPoison": "void",
+      "D2Game::UNIT::SUnitDmg::DAMAGE_ApplyPoison": "void",
+      "DAMAGE_ApplyBurning": "void",
+      "D2Game::UNIT::SUnitDmg::DAMAGE_ApplyBurning": "void",
+      "DAMAGE_ApplyCold": "void",
+      "D2Game::UNIT::SUnitDmg::DAMAGE_ApplyCold": "void",
+      "DAMAGE_ApplyFreeze": "void",
+      "D2Game::UNIT::SUnitDmg::DAMAGE_ApplyFreeze": "void",
+      "DAMAGE_ApplyDefensiveReduction": "void",
+      "D2Game::UNIT::SUnitDmg::DAMAGE_ApplyDefensiveReduction": "void",
+      "DAMAGE_ApplyLifeAndManaLeech": "void",
+      "D2Game::UNIT::SUnitDmg::DAMAGE_ApplyLifeAndManaLeech": "void",
+      "MONSTER_DispatchUModOnAttack": "void",
+      "D2Game::Monsters::Monsters::MONSTER_DispatchUModOnAttack": "void",
+      "UNITEVENT_DispatchEventsByType": "int32_t",
+      "D2Game::UNIT::SUnitEvent::UNITEVENT_DispatchEventsByType": "int32_t",
+      "SKILLASS_ClearAllChargeUpStates": "void",
+      "D2Game::SKILLS::SkillAss::SKILLASS_ClearAllChargeUpStates": "void",
+      "SKILLASS_EquipSummonItems": "void",
+      "D2Game::SKILLS::SkillAss::SKILLASS_EquipSummonItems": "void",
+      "GetDifficultyLevels": "D2DifficultyLevelsTxt *",
+      "D2Common::DATATBLS::DataTbls::GetDifficultyLevels": "D2DifficultyLevelsTxt *",
+      "DRLGROOM_GetLevelIdFromRoom": "eD2LevelId",
+      "D2Common::DUNGEON::Dungeon::DRLGROOM_GetLevelIdFromRoom": "eD2LevelId",
+      "DRLGROOM_IsRoomInTown": "BOOL",
+      "D2Common::DUNGEON::Dungeon::DRLGROOM_IsRoomInTown": "BOOL",
+      "TXT_Levels_GetMonLvlForDifficulty": "int32_t",
+      "D2Common::DATATBLS::LvlTbls::TXT_Levels_GetMonLvlForDifficulty": "int32_t",
+      "UNITS_GetRoom": "D2RoomStrc *",
+      "D2Common::Units::Units::UNITS_GetRoom": "D2RoomStrc *",
+      "StoreLastAttacker": "void",
+      "D2Common::Units::Units::StoreLastAttacker": "void",
+      "SetOverlay": "void",
+      "D2Common::Units::Units::SetOverlay": "void",
+      "AllocStatList": "D2StatListStrc *",
+      "D2Common::Stats::StatsEx::AllocStatList": "D2StatListStrc *",
+      "STATSEX_GetCurrentStat": "int",
+      "D2Common::Stats::StatsEx::STATSEX_GetCurrentStat": "int",
+      "STATLIST_GetMaxLifeFromUnit": "int32_t",
+      "D2Common::Stats::StatsEx::STATLIST_GetMaxLifeFromUnit": "int32_t",
+      "AllocStatListEx": "D2StatListExStrc *",
+      "D2Common::Stats::StatsEx::AllocStatListEx": "D2StatListExStrc *",
+      "STATLIST_AttachStatListToUnit": "void",
+      "D2Common::Stats::StatsEx::STATLIST_AttachStatListToUnit": "void",
+      "STATLIST_SetUnitStat": "void",
+      "D2Common::Stats::StatsEx::STATLIST_SetUnitStat": "void",
+      "STATLIST_AddUnitStat": "void",
+      "D2Common::Stats::StatsEx::STATLIST_AddUnitStat": "void",
+      "STRUCT_CreatePlayerInventory": "D2InventoryStrc *",
+      "D2Common::INVENTORY::Inventory::STRUCT_CreatePlayerInventory": "D2InventoryStrc *",
+      "MONSTERS_OnInitMonster_NoOp": "void",
+      "D2Common::Monsters::MONSTERS::MONSTERS_OnInitMonster_NoOp": "void",
+      "MONSTER_GetMercType": "uint32_t",
+      "D2Common::Monsters::MONSTERS::MONSTER_GetMercType": "uint32_t",
+      "MONSTER_ApplyDifficultyScaling": "void",
+      "D2Common::Monsters::MONSTERS::MONSTER_ApplyDifficultyScaling": "void",
+      "STRUCT_CreateSkillsList": "D2SkillListStrc *",
+      "D2Common::Skills::Skills::STRUCT_CreateSkillsList": "D2SkillListStrc *",
+      "SKILLS_GetSkillByEnum": "D2SkillStrc *",
+      "D2Common::Skills::Skills::SKILLS_GetSkillByEnum": "D2SkillStrc *",
+      "SetSkillMode": "void",
+      "D2Common::Skills::Skills::SetSkillMode": "void",
+      "SKILLS_GetStateTransformGfx": "void",
+      "D2Common::Skills::Skills::SKILLS_GetStateTransformGfx": "void",
+      "MONSTER_CalculateLevelScaledStats": "BOOL",
+      "D2Common::DATATBLS::MonsterTbls::MONSTER_CalculateLevelScaledStats": "BOOL",
+      "ITEMMOD_ApplyPropertyToUnitStatsExpansion": "void",
+      "D2Common::ITEMS::ItemMods::ITEMMOD_ApplyPropertyToUnitStatsExpansion": "void",
+      "exit": "void",
+      "compiler::exit": "void",
+      "memset": "void *",
+      "compiler::memset": "void *"
+    },
+    "functionParamTypes": {
+      "GetInstructionPointer": [],
+      "Fog::Src::ErrorManager::GetInstructionPointer": [],
+      "ERROR_UnrecoverableInternalError_Halt": [
+        "char *",
+        "void *",
+        "int32_t"
+      ],
+      "Fog::Src::ErrorManager::ERROR_UnrecoverableInternalError_Halt": [
+        "char *",
+        "void *",
+        "int32_t"
+      ],
+      "TXT_MonStats_GetLine": [
+        "int32_t"
+      ],
+      "D2Common::DATATBLS::MonsterTbls::TXT_MonStats_GetLine": [
+        "int32_t"
+      ],
+      "TXT_MonStats_GetFlagsByBitOffset": [
+        "int32_t",
+        "TxtMonStatsField0x0c"
+      ],
+      "D2Common::DATATBLS::MonsterTbls::TXT_MonStats_GetFlagsByBitOffset": [
+        "int32_t",
+        "TxtMonStatsField0x0c"
+      ],
+      "UNIT_GetModuloFromSeed": [
+        "D2SeedStrc *",
+        "uint32_t"
+      ],
+      "D2Common::Seed::UNIT_GetModuloFromSeed": [
+        "D2SeedStrc *",
+        "uint32_t"
+      ],
+      "RANDOM_RandomNumberSelector": [
+        "D2SeedStrc *",
+        "uint32_t"
+      ],
+      "D2Common::Seed::RANDOM_RandomNumberSelector": [
+        "D2SeedStrc *",
+        "uint32_t"
+      ],
+      "ValidateClassId": [
+        "int32_t"
+      ],
+      "D2Common::DATATBLS::MonsterTbls::ValidateClassId": [
+        "int32_t"
+      ],
+      "D2ApplyPercent": [
+        "int32_t",
+        "int32_t",
+        "int32_t"
+      ],
+      "D2Common::DATATBLS::DataTbls::D2ApplyPercent": [
+        "int32_t",
+        "int32_t",
+        "int32_t"
+      ],
+      "SUNITPROXY_GetNpcInventory": [
+        "SGAMEDATA *",
+        "int32_t"
+      ],
+      "D2Game::UNIT::sunitproxy::SUNITPROXY_GetNpcInventory": [
+        "SGAMEDATA *",
+        "int32_t"
+      ],
+      "EVENT_RemoveUnitTimersByType": [
+        "SGAMEDATA *",
+        "D2UnitStrc *",
+        "eD2TimerTypeDWORD",
+        "int32_t"
+      ],
+      "D2Game::GAME::Event::EVENT_RemoveUnitTimersByType": [
+        "SGAMEDATA *",
+        "D2UnitStrc *",
+        "eD2TimerTypeDWORD",
+        "int32_t"
+      ],
+      "SetEvent": [
+        "SGAMEDATA *",
+        "D2UnitStrc *",
+        "int",
+        "int",
+        "int32_t",
+        "int32_t"
+      ],
+      "D2Game::GAME::Event::SetEvent": [
+        "SGAMEDATA *",
+        "D2UnitStrc *",
+        "int",
+        "int",
+        "int32_t",
+        "int32_t"
+      ],
+      "GetGamePointer": [
+        "D2UnitStrc *"
+      ],
+      "D2Game::UNIT::SUnit::GetGamePointer": [
+        "D2UnitStrc *"
+      ],
+      "CheckForModeZeroDeath": [
+        "D2UnitStrc *"
+      ],
+      "D2Game::UNIT::SUnit::CheckForModeZeroDeath": [
+        "D2UnitStrc *"
+      ],
+      "UNITS_CheckIfCanAttackTarget": [
+        "SGAMEDATA *",
+        "D2UnitStrc *",
+        "D2UnitStrc *"
+      ],
+      "D2Game::UNIT::SUnit::UNITS_CheckIfCanAttackTarget": [
+        "SGAMEDATA *",
+        "D2UnitStrc *",
+        "D2UnitStrc *"
+      ],
+      "SetSkill": [
+        "D2UnitStrc *",
+        "eD2Skills",
+        "int32_t",
+        "BOOL"
+      ],
+      "D2Game::SKILLS::SkillsServer::SetSkill": [
+        "D2UnitStrc *",
+        "eD2Skills",
+        "int32_t",
+        "BOOL"
+      ],
+      "MONSTER_GetMonPropTxtRecord": [
+        "int32_t"
+      ],
+      "D2Game::Monster::Monster::MONSTER_GetMonPropTxtRecord": [
+        "int32_t"
+      ],
+      "MONSTER_InitLevelDifficultyScaling": [
+        "SGAMEDATA *",
+        "D2MonsterLevelDataStrc *",
+        "D2RoomStrc *",
+        "D2UnitStrc *"
+      ],
+      "D2Game::Monster::Monster::MONSTER_InitLevelDifficultyScaling": [
+        "SGAMEDATA *",
+        "D2MonsterLevelDataStrc *",
+        "D2RoomStrc *",
+        "D2UnitStrc *"
+      ],
+      "MONSTER_RollComponentAppearance": [
+        "D2MonsterRegionFieldStrc *",
+        "D2UnitStrc *"
+      ],
+      "D2Game::Monster::Monster::MONSTER_RollComponentAppearance": [
+        "D2MonsterRegionFieldStrc *",
+        "D2UnitStrc *"
+      ],
+      "DAMAGE_ApplyHealingToUnit": [
+        "int32_t",
+        "D2UnitStrc *"
+      ],
+      "D2Game::UNIT::SUnitDmg::DAMAGE_ApplyHealingToUnit": [
+        "int32_t",
+        "D2UnitStrc *"
+      ],
+      "DAMAGE_ApplyManaToUnit": [
+        "int32_t",
+        "D2UnitStrc *"
+      ],
+      "D2Game::UNIT::SUnitDmg::DAMAGE_ApplyManaToUnit": [
+        "int32_t",
+        "D2UnitStrc *"
+      ],
+      "DAMAGE_DrainManaFromUnit": [
+        "uint32_t",
+        "D2UnitStrc *"
+      ],
+      "D2Game::UNIT::SUnitDmg::DAMAGE_DrainManaFromUnit": [
+        "uint32_t",
+        "D2UnitStrc *"
+      ],
+      "DAMAGE_DrainStaminaFromUnit": [
+        "uint32_t",
+        "D2UnitStrc *"
+      ],
+      "D2Game::UNIT::SUnitDmg::DAMAGE_DrainStaminaFromUnit": [
+        "uint32_t",
+        "D2UnitStrc *"
+      ],
+      "DAMAGE_ApplyStun": [
+        "D2UnitStrc *",
+        "int32_t",
+        "D2UnitStrc *"
+      ],
+      "D2Game::UNIT::SUnitDmg::DAMAGE_ApplyStun": [
+        "D2UnitStrc *",
+        "int32_t",
+        "D2UnitStrc *"
+      ],
+      "DAMAGE_ApplyPoison": [
+        "D2UnitStrc *",
+        "int32_t",
+        "int32_t",
+        "D2UnitStrc *"
+      ],
+      "D2Game::UNIT::SUnitDmg::DAMAGE_ApplyPoison": [
+        "D2UnitStrc *",
+        "int32_t",
+        "int32_t",
+        "D2UnitStrc *"
+      ],
+      "DAMAGE_ApplyBurning": [
+        "D2UnitStrc *",
+        "int32_t",
+        "int32_t",
+        "D2UnitStrc *"
+      ],
+      "D2Game::UNIT::SUnitDmg::DAMAGE_ApplyBurning": [
+        "D2UnitStrc *",
+        "int32_t",
+        "int32_t",
+        "D2UnitStrc *"
+      ],
+      "DAMAGE_ApplyCold": [
+        "D2UnitStrc *",
+        "int32_t",
+        "D2UnitStrc *"
+      ],
+      "D2Game::UNIT::SUnitDmg::DAMAGE_ApplyCold": [
+        "D2UnitStrc *",
+        "int32_t",
+        "D2UnitStrc *"
+      ],
+      "DAMAGE_ApplyFreeze": [
+        "D2UnitStrc *",
+        "int32_t",
+        "D2UnitStrc *"
+      ],
+      "D2Game::UNIT::SUnitDmg::DAMAGE_ApplyFreeze": [
+        "D2UnitStrc *",
+        "int32_t",
+        "D2UnitStrc *"
+      ],
+      "DAMAGE_ApplyDefensiveReduction": [
+        "SGAMEDATA *",
+        "D2UnitStrc *",
+        "D2UnitStrc *",
+        "D2DamageStrc *"
+      ],
+      "D2Game::UNIT::SUnitDmg::DAMAGE_ApplyDefensiveReduction": [
+        "SGAMEDATA *",
+        "D2UnitStrc *",
+        "D2UnitStrc *",
+        "D2DamageStrc *"
+      ],
+      "DAMAGE_ApplyLifeAndManaLeech": [
+        "SGAMEDATA *",
+        "D2UnitStrc *",
+        "D2UnitStrc *",
+        "D2DamageStrc *"
+      ],
+      "D2Game::UNIT::SUnitDmg::DAMAGE_ApplyLifeAndManaLeech": [
+        "SGAMEDATA *",
+        "D2UnitStrc *",
+        "D2UnitStrc *",
+        "D2DamageStrc *"
+      ],
+      "MONSTER_DispatchUModOnAttack": [
+        "SGAMEDATA *",
+        "D2UnitStrc *"
+      ],
+      "D2Game::Monsters::Monsters::MONSTER_DispatchUModOnAttack": [
+        "SGAMEDATA *",
+        "D2UnitStrc *"
+      ],
+      "UNITEVENT_DispatchEventsByType": [
+        "SGAMEDATA *",
+        "uint32_t",
+        "D2UnitStrc *",
+        "D2UnitStrc *",
+        "D2DamageStrc *"
+      ],
+      "D2Game::UNIT::SUnitEvent::UNITEVENT_DispatchEventsByType": [
+        "SGAMEDATA *",
+        "uint32_t",
+        "D2UnitStrc *",
+        "D2UnitStrc *",
+        "D2DamageStrc *"
+      ],
+      "SKILLASS_ClearAllChargeUpStates": [
+        "D2UnitStrc *"
+      ],
+      "D2Game::SKILLS::SkillAss::SKILLASS_ClearAllChargeUpStates": [
+        "D2UnitStrc *"
+      ],
+      "SKILLASS_EquipSummonItems": [
+        "SGAMEDATA *",
+        "D2UnitStrc *",
+        "D2UnitStrc *",
+        "undefined4",
+        "int32_t",
+        "int32_t",
+        "int32_t"
+      ],
+      "D2Game::SKILLS::SkillAss::SKILLASS_EquipSummonItems": [
+        "SGAMEDATA *",
+        "D2UnitStrc *",
+        "D2UnitStrc *",
+        "undefined4",
+        "int32_t",
+        "int32_t",
+        "int32_t"
+      ],
+      "GetDifficultyLevels": [
+        "int32_t"
+      ],
+      "D2Common::DATATBLS::DataTbls::GetDifficultyLevels": [
+        "int32_t"
+      ],
+      "DRLGROOM_GetLevelIdFromRoom": [
+        "D2RoomStrc *"
+      ],
+      "D2Common::DUNGEON::Dungeon::DRLGROOM_GetLevelIdFromRoom": [
+        "D2RoomStrc *"
+      ],
+      "DRLGROOM_IsRoomInTown": [
+        "D2RoomStrc *"
+      ],
+      "D2Common::DUNGEON::Dungeon::DRLGROOM_IsRoomInTown": [
+        "D2RoomStrc *"
+      ],
+      "TXT_Levels_GetMonLvlForDifficulty": [
+        "eD2LevelId",
+        "eD2Difficulty",
+        "BOOL"
+      ],
+      "D2Common::DATATBLS::LvlTbls::TXT_Levels_GetMonLvlForDifficulty": [
+        "eD2LevelId",
+        "eD2Difficulty",
+        "BOOL"
+      ],
+      "UNITS_GetRoom": [
+        "D2UnitStrc *"
+      ],
+      "D2Common::Units::Units::UNITS_GetRoom": [
+        "D2UnitStrc *"
+      ],
+      "StoreLastAttacker": [
+        "D2UnitStrc *",
+        "D2UnitStrc *"
+      ],
+      "D2Common::Units::Units::StoreLastAttacker": [
+        "D2UnitStrc *",
+        "D2UnitStrc *"
+      ],
+      "SetOverlay": [
+        "D2UnitStrc *",
+        "uint32_t",
+        "int32_t"
+      ],
+      "D2Common::Units::Units::SetOverlay": [
+        "D2UnitStrc *",
+        "uint32_t",
+        "int32_t"
+      ],
+      "AllocStatList": [
+        "D2PoolManagerStrc *",
+        "int32_t",
+        "int32_t",
+        "eD2UnitType",
+        "int32_t"
+      ],
+      "D2Common::Stats::StatsEx::AllocStatList": [
+        "D2PoolManagerStrc *",
+        "int32_t",
+        "int32_t",
+        "eD2UnitType",
+        "int32_t"
+      ],
+      "STATSEX_GetCurrentStat": [
+        "D2UnitStrc *",
+        "eD2UnitStat",
+        "uint16_t"
+      ],
+      "D2Common::Stats::StatsEx::STATSEX_GetCurrentStat": [
+        "D2UnitStrc *",
+        "eD2UnitStat",
+        "uint16_t"
+      ],
+      "STATLIST_GetMaxLifeFromUnit": [
+        "D2UnitStrc *"
+      ],
+      "D2Common::Stats::StatsEx::STATLIST_GetMaxLifeFromUnit": [
+        "D2UnitStrc *"
+      ],
+      "AllocStatListEx": [
+        "D2UnitStrc *",
+        "uint32_t",
+        "fpStatListExChangeCb *",
+        "SGAMEDATA *"
+      ],
+      "D2Common::Stats::StatsEx::AllocStatListEx": [
+        "D2UnitStrc *",
+        "uint32_t",
+        "fpStatListExChangeCb *",
+        "SGAMEDATA *"
+      ],
+      "STATLIST_AttachStatListToUnit": [
+        "D2UnitStrc *",
+        "D2StatListExStrc *",
+        "int32_t"
+      ],
+      "D2Common::Stats::StatsEx::STATLIST_AttachStatListToUnit": [
+        "D2UnitStrc *",
+        "D2StatListExStrc *",
+        "int32_t"
+      ],
+      "STATLIST_SetUnitStat": [
+        "D2UnitStrc *",
+        "eD2UnitStat",
+        "int32_t",
+        "uint16_t"
+      ],
+      "D2Common::Stats::StatsEx::STATLIST_SetUnitStat": [
+        "D2UnitStrc *",
+        "eD2UnitStat",
+        "int32_t",
+        "uint16_t"
+      ],
+      "STATLIST_AddUnitStat": [
+        "D2UnitStrc *",
+        "eD2UnitStat",
+        "int32_t",
+        "int16_t"
+      ],
+      "D2Common::Stats::StatsEx::STATLIST_AddUnitStat": [
+        "D2UnitStrc *",
+        "eD2UnitStat",
+        "int32_t",
+        "int16_t"
+      ],
+      "STRUCT_CreatePlayerInventory": [
+        "D2PoolManagerStrc *",
+        "D2UnitStrc *"
+      ],
+      "D2Common::INVENTORY::Inventory::STRUCT_CreatePlayerInventory": [
+        "D2PoolManagerStrc *",
+        "D2UnitStrc *"
+      ],
+      "MONSTERS_OnInitMonster_NoOp": [
+        "D2UnitStrc *",
+        "undefined4"
+      ],
+      "D2Common::Monsters::MONSTERS::MONSTERS_OnInitMonster_NoOp": [
+        "D2UnitStrc *",
+        "undefined4"
+      ],
+      "MONSTER_GetMercType": [
+        "D2UnitStrc *"
+      ],
+      "D2Common::Monsters::MONSTERS::MONSTER_GetMercType": [
+        "D2UnitStrc *"
+      ],
+      "MONSTER_ApplyDifficultyScaling": [
+        "D2UnitStrc *",
+        "int32_t",
+        "byte"
+      ],
+      "D2Common::Monsters::MONSTERS::MONSTER_ApplyDifficultyScaling": [
+        "D2UnitStrc *",
+        "int32_t",
+        "byte"
+      ],
+      "STRUCT_CreateSkillsList": [
+        "D2PoolManagerStrc *"
+      ],
+      "D2Common::Skills::Skills::STRUCT_CreateSkillsList": [
+        "D2PoolManagerStrc *"
+      ],
+      "SKILLS_GetSkillByEnum": [
+        "D2UnitStrc *",
+        "eD2Skills"
+      ],
+      "D2Common::Skills::Skills::SKILLS_GetSkillByEnum": [
+        "D2UnitStrc *",
+        "eD2Skills"
+      ],
+      "SetSkillMode": [
+        "D2SkillStrc *",
+        "uint32_t"
+      ],
+      "D2Common::Skills::Skills::SetSkillMode": [
+        "D2SkillStrc *",
+        "uint32_t"
+      ],
+      "SKILLS_GetStateTransformGfx": [
+        "D2UnitStrc *",
+        "eD2UnitType *",
+        "int *",
+        "int *",
+        "char *",
+        "int32_t"
+      ],
+      "D2Common::Skills::Skills::SKILLS_GetStateTransformGfx": [
+        "D2UnitStrc *",
+        "eD2UnitType *",
+        "int *",
+        "int *",
+        "char *",
+        "int32_t"
+      ],
+      "MONSTER_CalculateLevelScaledStats": [
+        "int32_t",
+        "int32_t",
+        "uint32_t",
+        "int32_t",
+        "uint32_t",
+        "D2MonStatsInitStrc *32"
+      ],
+      "D2Common::DATATBLS::MonsterTbls::MONSTER_CalculateLevelScaledStats": [
+        "int32_t",
+        "int32_t",
+        "uint32_t",
+        "int32_t",
+        "uint32_t",
+        "D2MonStatsInitStrc *32"
+      ],
+      "ITEMMOD_ApplyPropertyToUnitStatsExpansion": [
+        "undefined4",
+        "D2UnitStrc *",
+        "D2UnitStrc *",
+        "void *",
+        "undefined4",
+        "undefined4",
+        "D2SetsTxtFStrc *",
+        "int32_t",
+        "uint32_t",
+        "D2UnitStrc *"
+      ],
+      "D2Common::ITEMS::ItemMods::ITEMMOD_ApplyPropertyToUnitStatsExpansion": [
+        "undefined4",
+        "D2UnitStrc *",
+        "D2UnitStrc *",
+        "void *",
+        "undefined4",
+        "undefined4",
+        "D2SetsTxtFStrc *",
+        "int32_t",
+        "uint32_t",
+        "D2UnitStrc *"
+      ],
+      "exit": [
+        "int"
+      ],
+      "compiler::exit": [
+        "int"
+      ],
+      "memset": [
+        "void *",
+        "int",
+        "size_t"
+      ],
+      "compiler::memset": [
+        "void *",
+        "int",
+        "size_t"
+      ]
+    },
+    "globalTypes": {
+      "sgptDataTable": "D2DataTableTxtStrc*",
+      "D2Common::ITEMS::Items::sgptDataTable": "D2DataTableTxtStrc*"
+    }
+  },
+  "functions": [
+    {
+      "function": {
+        "name": "MONSTER_InitStats",
+        "address": "00573cb0",
+        "entryPoint": "00573cb0",
+        "signature": "void MONSTER_InitStats(SGAMEDATA * pGame, D2RoomStrc * pRoom, D2MonsterRegionFieldStrc * pMonRegionField, D2UnitStrc * pUnit)",
+        "returnType": "void",
+        "callingConvention": "__stdcall",
+        "size": 1423,
+        "isThunk": false,
+        "isExternal": false,
+        "hasVarArgs": false,
+        "namespace": "D2Game::Monster::Monster",
+        "comment": "@function MONSTER_InitStats\n@address Game.exe.ram:00573cb0\n@date 2026.06.20\n@params\n  pGame: Stack[0x4]:4 (SGAMEDATA *)\n  pRoom: Stack[0x8]:4 (D2RoomStrc *)\n  pMonRegionField: Stack[0xc]:4 (D2MonsterRegionFieldStrc *)\n  pUnit: ESI:4 (D2UnitStrc *)\n@description Server-side: fully initializes a spawned monster's stats/skills/inventory. Bails unless pUnit is a valid UNIT_MONSTER with MonStats/MonStatsEx records. Rolls component appearance, applies act-boss name bytes (classId 0x137/0x138), computes level/difficulty scaling (player-count multipliers), then SETs resistances, block, attack/velocity/animrate, HP (rolled min..max + player% bonus, capped 0x7FFFFF, x256), armorclass, experience and HP-regen via STATLIST_SetUnitStat. Applies difficulty scaling, attaches a second stat list, creates player or NPC inventory, builds the skills list (8 skills from MonStatsEx with level bonus + mode), sets CANBEATTACKED/PETIGNORE flags, rolls up-to-6 random monster properties (MonProp txt, per-difficulty chance), and equips summon items. Halts on bad HP-regen value.",
+        "sourceFile": null,
+        "sourceLine": null,
+        "sourceInfo": null,
+        "parameters": [
+          {
+            "name": "pGame",
+            "dataType": "SGAMEDATA *",
+            "size": 4,
+            "ordinal": 0,
+            "storage": "Stack[0x4]:4",
+            "stackOffset": 4,
+            "resolvedType": null
+          },
+          {
+            "name": "pRoom",
+            "dataType": "D2RoomStrc *",
+            "size": 4,
+            "ordinal": 1,
+            "storage": "Stack[0x8]:4",
+            "stackOffset": 8,
+            "resolvedType": null
+          },
+          {
+            "name": "pMonRegionField",
+            "dataType": "D2MonsterRegionFieldStrc *",
+            "size": 4,
+            "ordinal": 2,
+            "storage": "Stack[0xc]:4",
+            "stackOffset": 12,
+            "resolvedType": null
+          },
+          {
+            "name": "pUnit",
+            "dataType": "D2UnitStrc *",
+            "size": 4,
+            "ordinal": 3,
+            "storage": "ESI:4",
+            "stackOffset": null,
+            "resolvedType": null
+          }
+        ],
+        "localVariables": [
+          {
+            "name": "nMonStatsExId",
+            "dataType": "int",
+            "size": 4,
+            "storage": "EAX:4",
+            "stackOffset": null,
+            "resolvedType": "int"
+          },
+          {
+            "name": "dwTmpStat",
+            "dataType": "uint32_t",
+            "size": 4,
+            "storage": "EAX:4",
+            "stackOffset": null,
+            "resolvedType": null
+          },
+          {
+            "name": "nTmpVal",
+            "dataType": "uint32_t",
+            "size": 4,
+            "storage": "EAX:4",
+            "stackOffset": null,
+            "resolvedType": "uint32_t"
+          },
+          {
+            "name": "eRoomLevelId",
+            "dataType": "eD2LevelId",
+            "size": 4,
+            "storage": "EAX:4",
+            "stackOffset": null,
+            "resolvedType": "eD2LevelId"
+          },
+          {
+            "name": "nScaledStat",
+            "dataType": "int32_t",
+            "size": 4,
+            "storage": "EAX:4",
+            "stackOffset": null,
+            "resolvedType": "int32_t"
+          },
+          {
+            "name": "nTmpInt",
+            "dataType": "int",
+            "size": 4,
+            "storage": "EDI:4",
+            "stackOffset": null,
+            "resolvedType": "int"
+          },
+          {
+            "name": "pStatsEx",
+            "dataType": "D2StatListExStrc *",
+            "size": 4,
+            "storage": "EAX:4",
+            "stackOffset": null,
+            "resolvedType": "D2StatListExStrc *"
+          },
+          {
+            "name": "pNpcInventory",
+            "dataType": "D2InventoryStrc *",
+            "size": 4,
+            "storage": "EAX:4",
+            "stackOffset": null,
+            "resolvedType": "D2InventoryStrc *"
+          },
+          {
+            "name": "pSkillsList",
+            "dataType": "D2SkillListStrc *",
+            "size": 4,
+            "storage": "EAX:4",
+            "stackOffset": null,
+            "resolvedType": "D2SkillListStrc *"
+          },
+          {
+            "name": "nPropRoll",
+            "dataType": "uint32_t",
+            "size": 4,
+            "storage": "EAX:4",
+            "stackOffset": null,
+            "resolvedType": "uint32_t"
+          },
+          {
+            "name": "nSkillMode",
+            "dataType": "undefined4",
+            "size": 4,
+            "storage": "ECX:4",
+            "stackOffset": null,
+            "resolvedType": null
+          },
+          {
+            "name": "pSkill",
+            "dataType": "D2SkillStrc *",
+            "size": 4,
+            "storage": "EAX:4",
+            "stackOffset": null,
+            "resolvedType": "D2SkillStrc *"
+          },
+          {
+            "name": "nMonLevel",
+            "dataType": "int",
+            "size": 4,
+            "storage": "Stack[-0x8]:4",
+            "stackOffset": -8,
+            "resolvedType": "int"
+          },
+          {
+            "name": "nPlayerCount",
+            "dataType": "int",
+            "size": 4,
+            "storage": "Stack[-0xc]:4",
+            "stackOffset": -12,
+            "resolvedType": null
+          },
+          {
+            "name": "nMonClassId",
+            "dataType": "int",
+            "size": 4,
+            "storage": "Stack[-0x10]:4",
+            "stackOffset": -16,
+            "resolvedType": "int"
+          },
+          {
+            "name": "uMonTxt",
+            "dataType": "D2MonStatsExTxtSlot",
+            "size": 4,
+            "storage": "Stack[-0x14]:4",
+            "stackOffset": -20,
+            "resolvedType": null
+          },
+          {
+            "name": "nHpRoll",
+            "dataType": "undefined4",
+            "size": 4,
+            "storage": "Stack[-0x18]:4",
+            "stackOffset": -24,
+            "resolvedType": null
+          },
+          {
+            "name": "nSkillLoopIdx",
+            "dataType": "undefined4",
+            "size": 4,
+            "storage": "Stack[-0x20]:4",
+            "stackOffset": -32,
+            "resolvedType": null
+          },
+          {
+            "name": "pSkillEntry",
+            "dataType": "undefined4",
+            "size": 4,
+            "storage": "Stack[-0x24]:4",
+            "stackOffset": -36,
+            "resolvedType": null
+          },
+          {
+            "name": "monLevelData",
+            "dataType": "D2MonsterLevelDataStrc",
+            "size": 4,
+            "storage": "Stack[-0x28]:4",
+            "stackOffset": -40,
+            "resolvedType": "D2MonsterLevelDataStrc"
+          },
+          {
+            "name": "sMonStats",
+            "dataType": "D2MonStatsInitStrc",
+            "size": 56,
+            "storage": "Stack[-0x60]:56",
+            "stackOffset": -96,
+            "resolvedType": null
+          },
+          {
+            "name": "pMonStatsTxt",
+            "dataType": "D2MonStatsTxt *",
+            "size": 4,
+            "storage": "HASH:5fc2823b82:4",
+            "stackOffset": null,
+            "resolvedType": null
+          },
+          {
+            "name": "unionfacet2_573d33",
+            "dataType": "D2MonStatsExTxtSlot",
+            "size": 4,
+            "storage": "HASH:4160a30d5278:4",
+            "stackOffset": null,
+            "resolvedType": null
+          },
+          {
+            "name": "unionfacet2_573d78",
+            "dataType": "D2UnitDataUnion *",
+            "size": 4,
+            "storage": "HASH:404129543c90:4",
+            "stackOffset": null,
+            "resolvedType": null
+          },
+          {
+            "name": "unionfacet2_573d87",
+            "dataType": "D2UnitDataUnion *",
+            "size": 4,
+            "storage": "HASH:4041f7513a61:4",
+            "stackOffset": null,
+            "resolvedType": null
+          },
+          {
+            "name": "unionfacet2_573da5",
+            "dataType": "D2UnitDataUnion *",
+            "size": 4,
+            "storage": "HASH:4041fd6a5dd4:4",
+            "stackOffset": null,
+            "resolvedType": null
+          },
+          {
+            "name": "byDifficultyIdx",
+            "dataType": "byte",
+            "size": 1,
+            "storage": "HASH:5fd353a2c2:1",
+            "stackOffset": null,
+            "resolvedType": null
+          },
+          {
+            "name": "nStatLayer",
+            "dataType": "int32_t",
+            "size": 4,
+            "storage": "HASH:3f4f8fd2f3:4",
+            "stackOffset": null,
+            "resolvedType": null
+          },
+          {
+            "name": "dwHpRegenRaw",
+            "dataType": "uint32_t",
+            "size": 4,
+            "storage": "HASH:5f8e3119f9:4",
+            "stackOffset": null,
+            "resolvedType": null
+          },
+          {
+            "name": "nErrorLine",
+            "dataType": "uint32_t",
+            "size": 4,
+            "storage": "HASH:3f0c07ff5d:4",
+            "stackOffset": null,
+            "resolvedType": null
+          },
+          {
+            "name": "unionfacet2_574149",
+            "dataType": "D2MonStatsExTxtSlot",
+            "size": 4,
+            "storage": "HASH:5260ec15947b:4",
+            "stackOffset": null,
+            "resolvedType": null
+          },
+          {
+            "name": "nSeedHigh",
+            "dataType": "undefined8",
+            "size": 8,
+            "storage": "HASH:41f66a2f444:8",
+            "stackOffset": null,
+            "resolvedType": null
+          }
+        ],
+        "tags": [
+          {
+            "type": "signedness"
+          },
+          {
+            "type": "llm-typed"
+          },
+          {
+            "type": "llm-artifact-fix"
+          },
+          {
+            "type": "verified-2026-10-25"
+          },
+          {
+            "type": "callee-signature-changed"
+          },
+          {
+            "type": "halt-returns"
+          },
+          {
+            "type": "nishimura-contrib"
+          },
+          {
+            "type": "contrib-commitwill"
+          },
+          {
+            "type": "x64-typing"
+          }
+        ],
+        "decompiled": "\n/* WARNING: Enum \"eCollisionFlags\": Some values do not have unique names */\n/* WARNING: Enum \"eD2TimerType\": Some values do not have unique names */\n/* WARNING: Enum \"eD2TimerTypeDWORD\": Some values do not have unique names */\n/* @function MONSTER_InitStats\n   @address Game.exe.ram:00573cb0\n   @date 2026.06.20\n   @params\n     pGame: Stack[0x4]:4 (SGAMEDATA *)\n     pRoom: Stack[0x8]:4 (D2RoomStrc *)\n     pMonRegionField: Stack[0xc]:4 (D2MonsterRegionFieldStrc *)\n     pUnit: ESI:4 (D2UnitStrc *)\n   @description Server-side: fully initializes a spawned monster's stats/skills/inventory. Bails\n   unless pUnit is a valid UNIT_MONSTER with MonStats/MonStatsEx records. Rolls component\n   appearance, applies act-boss name bytes (classId 0x137/0x138), computes level/difficulty scaling\n   (player-count multipliers), then SETs resistances, block, attack/velocity/animrate, HP (rolled\n   min..max + player% bonus, capped 0x7FFFFF, x256), armorclass, experience and HP-regen via\n   STATLIST_SetUnitStat. Applies difficulty scaling, attaches a second stat list, creates player or\n   NPC inventory, builds the skills list (8 skills from MonStatsEx with level bonus + mode), sets\n   CANBEATTACKED/PETIGNORE flags, rolls up-to-6 random monster properties (MonProp txt,\n   per-difficulty chance), and equips summon items. Halts on bad HP-regen value. */\n\nvoid D2Game::Monster::Monster::MONSTER_InitStats\n               (SGAMEDATA *pGame,D2RoomStrc *pRoom,D2MonsterRegionFieldStrc *pMonRegionField,\n               D2UnitStrc *pUnit)\n\n{\n  D2SeedStrc DVar1;\n  int nMonStatsExId;\n  uint32_t dwTmpStat;\n  uint32_t nTmpVal;\n  eD2LevelId eRoomLevelId;\n  int32_t nScaledStat;\n  void *nAddress;\n  D2StatListExStrc *pStatsEx;\n  D2InventoryStrc *pNpcInventory;\n  D2SkillListStrc *pSkillsList;\n  D2SkillStrc *pSkill;\n  int nTmpInt;\n  D2MonsterRegionFieldStrc *pDVar2;\n  uint16_t nLayer;\n  D2MonStatsInitStrc sMonStats;\n  D2MonsterLevelDataStrc monLevelData;\n  D2MonStatsExTxtSlot uMonTxt;\n  int nMonClassId;\n  int nPlayerCount;\n  int nMonLevel;\n  D2MonStatsTxt *pMonStatsTxt;\n  int32_t nStatLayer;\n  uint32_t nErrorLine;\n  uint32_t dwHpRegenRaw;\n  byte byDifficultyIdx;\n  \n  if (pUnit == (D2UnitStrc *)0x0) {\n    return;\n  }\n  nTmpInt = pUnit->nClassId;\n  if (pUnit->eUnitType != UNIT_MONSTER) {\n    return;\n  }\n  if ((pUnit->pUnitData).pUnitDataMonster == (D2UnitDataMonsterStrc *)0x0) {\n    return;\n  }\n  pMonStatsTxt = ((pUnit->pUnitData).pUnitDataMonster)->pMonStatsTxt;\n  if (pMonStatsTxt == (D2MonStatsTxt *)0x0) {\n    return;\n  }\n  if (nTmpInt < 0) {\n    return;\n  }\n  if (D2Common::ITEMS::Items::sgptDataTable->nTxtMonStatsSize <= nTmpInt) {\n    return;\n  }\n  nMonStatsExId = (int)D2Common::ITEMS::Items::sgptDataTable->pTxtMonStats[nTmpInt].MonStatsEx;\n  if (nMonStatsExId < 0) {\n    return;\n  }\n  if (D2Common::ITEMS::Items::sgptDataTable->nTxtMonStatsExSize <= nMonStatsExId) {\n    return;\n  }\n  uMonTxt.pMonStats2Txt = D2Common::ITEMS::Items::sgptDataTable->pTxtMonStatsEx + nMonStatsExId;\n                    /* uMonTxt (Stack[-0x14]) holds a D2MonStats2Txt* here (IMUL 0x134 off\n                       sgptDataTable+0xa90) until the isAtt test at 00574146;\n                       it is reused for a D2MonPropTxt* from 00574174 on, hence union\n                       D2MonStatsExTxtSlot. */\n  if (uMonTxt.pMonStats2Txt == (D2MonStats2Txt *)0x0) {\n    return;\n  }\n  nMonClassId = nTmpInt;\n  D2Game::Monster::Monster::MONSTER_RollComponentAppearance(pMonRegionField,pUnit);\n  if (D2Common::ITEMS::Items::sgptDataTable->nTxtMonStatsSize <= nTmpInt) {\n    nTmpInt = -1;\n  }\n  if (nTmpInt == 0x137) {\n    nTmpVal = D2Common::Seed::UNIT_GetModuloFromSeed(&pUnit->sSeed,4);\n    if ((pUnit->eUnitType == UNIT_MONSTER) &&\n       ((pUnit->pUnitData).pUnitDataMonster != (D2UnitDataMonsterStrc *)0x0)) {\n      ((pUnit->pUnitData).pUnitDataMonster)->Components[10] = (byte)nTmpVal;\n    }\n  }\n  else if ((nTmpInt == 0x138) &&\n          (dwTmpStat = D2Common::Seed::UNIT_GetModuloFromSeed(&pUnit->sSeed,4),\n          pUnit->eUnitType == UNIT_MONSTER)) {\n    if ((pUnit->pUnitData).pUnitDataMonster != (D2UnitDataMonsterStrc *)0x0) {\n      ((pUnit->pUnitData).pUnitDataMonster)->Components[10] = (byte)dwTmpStat;\n    }\n    if ((pUnit->eUnitType == UNIT_MONSTER) &&\n       ((pUnit->pUnitData).pUnitDataMonster != (D2UnitDataMonsterStrc *)0x0)) {\n      ((pUnit->pUnitData).pUnitDataMonster)->Components[0xb] = (byte)dwTmpStat;\n    }\n  }\n  D2Game::Monster::Monster::MONSTER_InitLevelDifficultyScaling(pGame,&monLevelData,pRoom,pUnit);\n                    /* pMonRegionField (Stack[0xc], [EBP+0x10]) is dead after\n                       MONSTER_RollComponentAppearance at 00573d43; from here the slot holds the\n                       0..2 difficulty index (pGame->nDifficulty clamped to 2, 0 for mercenaries)\n                       and is read as that index up to 0057417d.\n                       VC8 reused the parameter home for a separate local; Ghidra cannot split a\n                       mapped stack parameter. */\n  byDifficultyIdx = pGame->nDifficulty;\n  if (byDifficultyIdx != 0) {\n    if (1 < byDifficultyIdx) {\n      pMonRegionField = (D2MonsterRegionFieldStrc *)&DAT_00000002;\n      goto init_stats_for_difficulty;\n    }\n    if (byDifficultyIdx != 0) {\n      pMonRegionField = (D2MonsterRegionFieldStrc *)(uint)byDifficultyIdx;\n      goto init_stats_for_difficulty;\n    }\n  }\n  pMonRegionField = (D2MonsterRegionFieldStrc *)0x0;\ninit_stats_for_difficulty:\n  nTmpVal = D2Common::Monsters::MONSTERS::MONSTER_GetMercType(pUnit);\n  if (nTmpVal != 0) {\n    pMonRegionField = (D2MonsterRegionFieldStrc *)0x0;\n  }\n  nPlayerCount = 1;\n  if (0 < (int)monLevelData.nPlayerMultiplyer3) {\n    nPlayerCount = monLevelData.nPlayerMultiplyer3;\n  }\n  nMonLevel = (int)pMonStatsTxt->aLevel[(int)pMonRegionField];\n  nTmpInt = pGame->bExpansion;\n  if ((((nTmpInt != 0) && (pMonRegionField != (D2MonsterRegionFieldStrc *)0x0)) &&\n      ((Fog::BitBuffer::gadwBitMasks[2] & (byte)pMonStatsTxt->field_0xc) == 0)) &&\n     ((Fog::BitBuffer::gadwBitMasks[6] & (byte)pMonStatsTxt->field_0xc) == 0)) {\n    pDVar2 = pMonRegionField;\n    eRoomLevelId = D2Common::DUNGEON::Dungeon::DRLGROOM_GetLevelIdFromRoom(pRoom);\n    nMonLevel = D2Common::DATATBLS::LvlTbls::TXT_Levels_GetMonLvlForDifficulty\n                          (eRoomLevelId,(eD2Difficulty)pDVar2,nTmpInt);\n  }\n  D2Common::Stats::StatsEx::AllocStatListEx\n            (pUnit,0,D2Game::ITEMS::ItemMode::STATSLISTEX_FunctionCallback,pGame);\n  D2Common::Stats::StatsEx::STATLIST_SetUnitStat(pUnit,UNITSTAT_level,nMonLevel,0);\n  D2Common::Stats::StatsEx::STATLIST_SetUnitStat(pUnit,UNITSTAT_monster_playercount,nPlayerCount,0);\n  D2Common::Stats::StatsEx::STATLIST_SetUnitStat\n            (pUnit,UNITSTAT_damageresist,(int)pMonStatsTxt->aResDm[(int)pMonRegionField],0);\n  D2Common::Stats::StatsEx::STATLIST_SetUnitStat\n            (pUnit,UNITSTAT_magicresist,(int)pMonStatsTxt->aResMa[(int)pMonRegionField],0);\n  D2Common::Stats::StatsEx::STATLIST_SetUnitStat\n            (pUnit,UNITSTAT_fireresist,(int)pMonStatsTxt->aResFi[(int)pMonRegionField],0);\n  D2Common::Stats::StatsEx::STATLIST_SetUnitStat\n            (pUnit,UNITSTAT_lightresist,(int)pMonStatsTxt->aResLi[(int)pMonRegionField],0);\n  D2Common::Stats::StatsEx::STATLIST_SetUnitStat\n            (pUnit,UNITSTAT_coldresist,(int)pMonStatsTxt->aResCo[(int)pMonRegionField],0);\n  D2Common::Stats::StatsEx::STATLIST_SetUnitStat\n            (pUnit,UNITSTAT_poisonresist,(int)pMonStatsTxt->aResPo[(int)pMonRegionField],0);\n  D2Common::Stats::StatsEx::STATLIST_SetUnitStat\n            (pUnit,UNITSTAT_toblock,\n             (uint)(pMonRegionField[3].aArray[0].aComponentVariants + 3)[(int)pMonStatsTxt],0);\n  D2Common::Stats::StatsEx::STATLIST_SetUnitStat(pUnit,UNITSTAT_attackrate,100,0);\n  D2Common::Stats::StatsEx::STATLIST_SetUnitStat(pUnit,UNITSTAT_velocitypercent,0x4b,0);\n  D2Common::Stats::StatsEx::STATLIST_SetUnitStat(pUnit,UNITSTAT_other_animrate,100,0);\n  D2Common::Stats::StatsEx::STATLIST_SetUnitStat(pUnit,UNITSTAT_last_sent_hp_pct,0x80,0);\n  if ((pGame->nGameType != SGAMETYPE_BNET_HOST) ||\n     (pRoom = (D2RoomStrc *)0x0, pGame->eGameType != GAMETYPE_SINGLEPLAYER)) {\n    pRoom = (D2RoomStrc *)0x1;\n  }\n  compiler::memset(&sMonStats,0,0x38);\n  D2Common::DATATBLS::MonsterTbls::MONSTER_CalculateLevelScaledStats\n            (pUnit->nClassId,(int32_t)pRoom,(uint32_t)pMonRegionField,nMonLevel,7,&sMonStats);\n  nTmpVal = D2Common::Seed::RANDOM_RandomNumberSelector\n                      (&pUnit->sSeed,(sMonStats.nMaxHP - sMonStats.nMinHP) + 1);\n  nScaledStat = D2Common::DATATBLS::DataTbls::D2ApplyPercent\n                          (nTmpVal + sMonStats.nMinHP,monLevelData.nPlayerMultiplyer,100);\n  nTmpInt = nTmpVal + sMonStats.nMinHP + nScaledStat;\n  if (0x7fffff < nTmpInt) {\n    nTmpInt = 0x7fffff;\n  }\n  nTmpInt = nTmpInt * 0x100;\n  D2Common::Stats::StatsEx::STATLIST_SetUnitStat(pUnit,UNITSTAT_maxhp,nTmpInt,0);\n  D2Common::Stats::StatsEx::STATLIST_SetUnitStat(pUnit,UNITSTAT_hitpoints,nTmpInt,0);\n  D2Common::Stats::StatsEx::STATLIST_SetUnitStat(pUnit,UNITSTAT_armorclass,sMonStats.nAC,0);\n  nLayer = 0;\n  nScaledStat = D2Common::DATATBLS::DataTbls::D2ApplyPercent\n                          (sMonStats.nExp,monLevelData.nPlayerMultiplyer2,100);\n  D2Common::Stats::StatsEx::STATLIST_SetUnitStat\n            (pUnit,UNITSTAT_experience,nScaledStat + sMonStats.nExp,nLayer);\n  dwHpRegenRaw = pMonStatsTxt->DamageRegen;\n  if ((int)dwHpRegenRaw < 0) {\n    nErrorLine = 0xde;\n  }\n  else {\n    if ((dwHpRegenRaw & 0xfffff000) == 0) {\n      nScaledStat = 0;\n      if (dwHpRegenRaw != 0) {\n        if ((int)(0x7fffffff / (longlong)(int)dwHpRegenRaw) < nTmpInt) {\n          nScaledStat = (nTmpInt >> 0xc) * dwHpRegenRaw;\n        }\n        else {\n          nScaledStat = (int)(dwHpRegenRaw * nTmpInt) >> 0xc;\n        }\n      }\n      D2Common::Stats::StatsEx::STATLIST_SetUnitStat(pUnit,UNITSTAT_hpregen,nScaledStat,0);\n      D2Common::Monsters::MONSTERS::MONSTER_ApplyDifficultyScaling\n                (pUnit,pGame->bExpansion,pGame->nDifficulty);\n      pStatsEx = (D2StatListExStrc *)\n                 D2Common::Stats::StatsEx::AllocStatList\n                           (pGame->pMemoryPool,1,0,UNIT_MONSTER,pUnit->nUnitGUID);\n      D2Common::Stats::StatsEx::STATLIST_AttachStatListToUnit(pUnit,pStatsEx,1);\n      if ((pMonStatsTxt->field_0xf & (byte)Fog::BitBuffer::gadwBitMasks[0]) != 0) {\n        if ((pMonStatsTxt->field_0xd & (byte)Fog::BitBuffer::gadwBitMasks[1]) == 0) {\n          D2Common::INVENTORY::Inventory::STRUCT_CreatePlayerInventory\n                    ((D2PoolManagerStrc *)0x0,pUnit);\n        }\n        else {\n          nScaledStat = D2Common::DATATBLS::MonsterTbls::ValidateClassId(nMonClassId);\n          pNpcInventory = D2Game::UNIT::sunitproxy::SUNITPROXY_GetNpcInventory(pGame,nScaledStat);\n          pUnit->pInventory = pNpcInventory;\n        }\n      }\n      pSkillsList = D2Common::Skills::Skills::STRUCT_CreateSkillsList(pGame->pMemoryPool);\n      pUnit->pSkillsList = pSkillsList;\n      pRoom = (D2RoomStrc *)pMonStatsTxt->aSkill;\n      nTmpInt = 0;\n      do {\n        if ((-1 < *(short *)&pRoom->ppRoomList) && ('\\0' < pMonStatsTxt->aSkLvl[nTmpInt])) {\n          D2Game::SKILLS::SkillsServer::SetSkill\n                    (pUnit,(int)*(short *)&pRoom->ppRoomList,\n                     (int)pMonStatsTxt->aSkLvl[nTmpInt] + monLevelData.nMonsterSkillBonus,0);\n          if (-1 < pMonStatsTxt->aSkMode[nTmpInt]) {\n            nTmpVal = (uint32_t)pMonStatsTxt->aSkMode[nTmpInt];\n            pSkill = D2Common::Skills::Skills::SKILLS_GetSkillByEnum\n                               (pUnit,(int)*(short *)&pRoom->ppRoomList);\n            D2Common::Skills::Skills::SetSkillMode(pSkill,nTmpVal);\n          }\n        }\n        pRoom = (D2RoomStrc *)((int)&pRoom->ppRoomList + 2);\n        nTmpInt = nTmpInt + 1;\n      } while (nTmpInt < 8);\n      D2Common::Monsters::MONSTERS::MONSTERS_OnInitMonster_NoOp\n                (pUnit,monLevelData.nMonsterSkillBonus);\n      if (((uMonTxt.pMonStats2Txt)->field_0x5 & (byte)Fog::BitBuffer::gadwBitMasks[1]) != 0) {\n        pUnit->eUnitFlags = pUnit->eUnitFlags | UNITFLAG_CANBEATTACKED;\n      }\n      if ((pMonStatsTxt->field_0xe & (byte)Fog::BitBuffer::gadwBitMasks[3]) != 0) {\n        pUnit->eUnitFlags = pUnit->eUnitFlags | UNITFLAG_PETIGNORE;\n      }\n      uMonTxt.pMonPropTxt = D2Game::Monster::Monster::MONSTER_GetMonPropTxtRecord(pUnit->nClassId);\n                    /* uMonTxt now holds a D2MonPropTxt* (MONSTER_GetMonPropTxtRecord); see\n                       00573d35. */\n      if (uMonTxt.pMonPropTxt != (D2MonPropTxt *)0x0) {\n        pRoom = (D2RoomStrc *)((uMonTxt.pMonPropTxt)->entry + (int)pMonRegionField);\n        nPlayerCount = 0;\n        do {\n          if ((int)pRoom->ppRoomList < 0) break;\n          if ((uMonTxt.pMonPropTxt)->chance[(int)pMonRegionField][nPlayerCount] == '\\0') {\nLAB_005741f6:\n            D2Common::ITEMS::ItemMods::ITEMMOD_ApplyPropertyToUnitStatsExpansion\n                      (0,(D2UnitStrc *)0x0,pUnit,(void *)0x0,0,0,(D2SetsTxtFStrc *)pRoom,0,0x40,\n                       (D2UnitStrc *)0x0);\n          }\n          else {\n            DVar1 = (D2SeedStrc)\n                    ((ulonglong)(pUnit->sSeed).nSeedLow * 0x6ac690c5 +\n                    (ulonglong)(pUnit->sSeed).nSeedHigh);\n            pUnit->sSeed = DVar1;\n            if ((int)(DVar1.nSeedLow + (int)(((ulonglong)DVar1 & 0xffffffff) / 100) * -100) <\n                (int)(uint)(byte)(uMonTxt.pMonPropTxt)->chance[(int)pMonRegionField][nPlayerCount])\n            goto LAB_005741f6;\n          }\n          pRoom = (D2RoomStrc *)&pRoom->pRoomEx;\n          nPlayerCount = nPlayerCount + 1;\n        } while (nPlayerCount < 6);\n      }\n      D2Game::SKILLS::SkillAss::SKILLASS_EquipSummonItems\n                (pGame,(D2UnitStrc *)0x0,pUnit,0xffffffff,nMonLevel,nMonLevel,1);\n      return;\n    }\n    nErrorLine = 0xdf;\n  }\n  nAddress = Fog::Src::ErrorManager::GetInstructionPointer();\n  Fog::Src::ErrorManager::ERROR_UnrecoverableInternalError_Halt(\"\",nAddress,nErrorLine);\n                    /* WARNING: Subroutine does not return */\n  compiler::exit(-1);\n}\n\n"
+      }
+    },
+    {
+      "function": {
+        "name": "DAMAGE_ApplyDamageToUnit",
+        "address": "0057c6c0",
+        "entryPoint": "0057c6c0",
+        "signature": "void DAMAGE_ApplyDamageToUnit(SGAMEDATA * pGame, D2UnitStrc * pUnit, D2UnitStrc * pVictim, int32_t bApplyDefenseReduction, D2DamageStrc * pDamage)",
+        "returnType": "void",
+        "callingConvention": "__fastcall",
+        "size": 702,
+        "isThunk": false,
+        "isExternal": false,
+        "hasVarArgs": false,
+        "namespace": "D2Game::UNIT::SUnitDmg",
+        "comment": "@function DAMAGE_ApplyDamageToUnit\n@address Game.exe.ram:0057c6c0\n@date 2026.06.20\n@calling __fastcall\n@description Core server-side damage-application routine. Validates the attacker can hit the victim (UNITS_CheckIfCanAttackTarget, town/killable rules) then optionally applies defensive reduction, dispatches hit/got-hit unit events, clamps physical damage to current HP, runs life/mana leech, healing, then subtracts total damage from the victim's hitpoints (clamping the sub-256 remainder to 0). Also applies drain (mana/stamina) and status effects: stun, cold, freeze, poison, burning. Sets wResultFlags death bit (2) when HP reaches 0, otherwise schedules HP-regen events for monsters and clears Assassin charge-up states; dispatches death events on kill. Mutates pDamage and victim stats in place.",
+        "sourceFile": null,
+        "sourceLine": null,
+        "sourceInfo": null,
+        "parameters": [
+          {
+            "name": "pGame",
+            "dataType": "SGAMEDATA *",
+            "size": 4,
+            "ordinal": 0,
+            "storage": "ECX:4",
+            "stackOffset": null,
+            "resolvedType": null
+          },
+          {
+            "name": "pUnit",
+            "dataType": "D2UnitStrc *",
+            "size": 4,
+            "ordinal": 1,
+            "storage": "EDX:4",
+            "stackOffset": null,
+            "resolvedType": null
+          },
+          {
+            "name": "pVictim",
+            "dataType": "D2UnitStrc *",
+            "size": 4,
+            "ordinal": 2,
+            "storage": "Stack[0x4]:4",
+            "stackOffset": 4,
+            "resolvedType": null
+          },
+          {
+            "name": "bApplyDefenseReduction",
+            "dataType": "int32_t",
+            "size": 4,
+            "ordinal": 3,
+            "storage": "Stack[0x8]:4",
+            "stackOffset": 8,
+            "resolvedType": null
+          },
+          {
+            "name": "pDamage",
+            "dataType": "D2DamageStrc *",
+            "size": 4,
+            "ordinal": 4,
+            "storage": "Stack[0xc]:4",
+            "stackOffset": 12,
+            "resolvedType": null
+          }
+        ],
+        "localVariables": [
+          {
+            "name": "bCanAttack",
+            "dataType": "uint32_t",
+            "size": 4,
+            "storage": "EAX:4",
+            "stackOffset": null,
+            "resolvedType": null
+          },
+          {
+            "name": "pRoom",
+            "dataType": "D2RoomStrc *",
+            "size": 4,
+            "storage": "EAX:4",
+            "stackOffset": null,
+            "resolvedType": "D2RoomStrc *"
+          },
+          {
+            "name": "bIsInTown",
+            "dataType": "bool",
+            "size": 1,
+            "storage": "AL:1",
+            "stackOffset": null,
+            "resolvedType": null
+          },
+          {
+            "name": "pMonStats",
+            "dataType": "D2MonStatsTxt *",
+            "size": 4,
+            "storage": "EAX:4",
+            "stackOffset": null,
+            "resolvedType": "D2MonStatsTxt *"
+          },
+          {
+            "name": "nCurrentHp",
+            "dataType": "int32_t",
+            "size": 4,
+            "storage": "EAX:4",
+            "stackOffset": null,
+            "resolvedType": null
+          },
+          {
+            "name": "nHpClamped",
+            "dataType": "SGAMEDATA *",
+            "size": 4,
+            "storage": "ECX:4",
+            "stackOffset": null,
+            "resolvedType": "SGAMEDATA *"
+          },
+          {
+            "name": "nPhysDamage",
+            "dataType": "int",
+            "size": 4,
+            "storage": "EAX:4",
+            "stackOffset": null,
+            "resolvedType": "int"
+          },
+          {
+            "name": "nNewHpCalc",
+            "dataType": "int32_t",
+            "size": 4,
+            "storage": "EAX:4",
+            "stackOffset": null,
+            "resolvedType": "int32_t"
+          },
+          {
+            "name": "nNewHp",
+            "dataType": "int32_t",
+            "size": 4,
+            "storage": "EAX:4",
+            "stackOffset": null,
+            "resolvedType": null
+          },
+          {
+            "name": "nDamageOrHp",
+            "dataType": "int",
+            "size": 4,
+            "storage": "EAX:4",
+            "stackOffset": null,
+            "resolvedType": "int"
+          },
+          {
+            "name": "bIsInTownLocal",
+            "dataType": "undefined4",
+            "size": 4,
+            "storage": "Stack[-0x8]:4",
+            "stackOffset": -8,
+            "resolvedType": null
+          },
+          {
+            "name": "pAttackerType",
+            "dataType": "undefined4",
+            "size": 4,
+            "storage": "Stack[-0xc]:4",
+            "stackOffset": -12,
+            "resolvedType": null
+          },
+          {
+            "name": "eVictimType",
+            "dataType": "eD2UnitType",
+            "size": 4,
+            "storage": "Stack[-0x10]:4",
+            "stackOffset": -16,
+            "resolvedType": "eD2UnitType"
+          },
+          {
+            "name": "pTarget",
+            "dataType": "undefined4",
+            "size": 4,
+            "storage": "HASH:3f17e12b5c:4",
+            "stackOffset": null,
+            "resolvedType": null
+          },
+          {
+            "name": "bIsInTownOrKillable",
+            "dataType": "BOOL",
+            "size": 4,
+            "storage": "HASH:ff3ae99dc0:4",
+            "stackOffset": null,
+            "resolvedType": "BOOL"
+          }
+        ],
+        "tags": [
+          {
+            "type": "callee-signature-changed"
+          }
+        ],
+        "decompiled": "\n/* WARNING: Enum \"eCollisionFlags\": Some values do not have unique names */\n/* WARNING: Enum \"eD2TimerType\": Some values do not have unique names */\n/* WARNING: Enum \"eD2TimerTypeDWORD\": Some values do not have unique names */\n/* @function DAMAGE_ApplyDamageToUnit\n   @address Game.exe.ram:0057c6c0\n   @date 2026.06.20\n   @calling __fastcall\n   @description Core server-side damage-application routine. Validates the attacker can hit the\n   victim (UNITS_CheckIfCanAttackTarget, town/killable rules) then optionally applies defensive\n   reduction, dispatches hit/got-hit unit events, clamps physical damage to current HP, runs\n   life/mana leech, healing, then subtracts total damage from the victim's hitpoints (clamping the\n   sub-256 remainder to 0). Also applies drain (mana/stamina) and status effects: stun, cold,\n   freeze, poison, burning. Sets wResultFlags death bit (2) when HP reaches 0, otherwise schedules\n   HP-regen events for monsters and clears Assassin charge-up states; dispatches death events on\n   kill. Mutates pDamage and victim stats in place. */\n\nvoid __fastcall\nD2Game::UNIT::SUnitDmg::DAMAGE_ApplyDamageToUnit\n          (SGAMEDATA *pGame,D2UnitStrc *pUnit,D2UnitStrc *pVictim,int32_t bApplyDefenseReduction,\n          D2DamageStrc *pDamage)\n\n{\n  D2UnitStrc *pUnit_00;\n  bool bIsInTown;\n  uint32_t bCanAttack;\n  D2RoomStrc *pRoom;\n  D2MonStatsTxt *pMonStats;\n  int32_t nCurrentHp;\n  int nPhysDamage;\n  int32_t nNewHpCalc;\n  int32_t nNewHp;\n  int nDamageOrHp;\n  uint32_t eEventType;\n  eD2UnitType eVictimType;\n  BOOL bIsInTownOrKillable;\n  \n  pUnit_00 = pVictim;\n  bCanAttack = D2Game::UNIT::SUnit::UNITS_CheckIfCanAttackTarget(pGame,pUnit,pVictim);\n  if (((bCanAttack == 0) && ((pDamage->dwHitFlags & 0x1000U) == 0)) ||\n     (pRoom = D2Common::Units::Units::UNITS_GetRoom(pVictim), pRoom == (D2RoomStrc *)0x0)) {\n    pDamage->wResultFlags = pDamage->wResultFlags & 0xfffc;\n    return;\n  }\n  pRoom = D2Common::Units::Units::UNITS_GetRoom(pVictim);\n  bIsInTownOrKillable = D2Common::DUNGEON::Dungeon::DRLGROOM_IsRoomInTown(pRoom);\n  if ((bIsInTownOrKillable != 0) &&\n     (((pUnit == (D2UnitStrc *)0x0 || (pUnit->eUnitType != UNIT_MONSTER)) ||\n      ((pMonStats = D2Common::DATATBLS::MonsterTbls::TXT_MonStats_GetLine(pUnit->nClassId),\n       pMonStats == (D2MonStatsTxt *)0x0 ||\n       ((pMonStats->field_0xd & (byte)Fog::BitBuffer::gadwBitMasks[2]) == 0)))))) {\n    pDamage->wResultFlags = pDamage->wResultFlags & 0xfffd;\n    return;\n  }\n  if (pUnit == (D2UnitStrc *)0x0) {\n    pVictim = (D2UnitStrc *)&DAT_00000006;\n  }\n  else {\n    pVictim = (D2UnitStrc *)pUnit->eUnitType;\n  }\n  if (pUnit_00 == (D2UnitStrc *)0x0) {\n    eVictimType = UNIT_COUNT;\n  }\n  else {\n    eVictimType = pUnit_00->eUnitType;\n    if ((eVictimType == UNIT_MONSTER) &&\n       (bIsInTownOrKillable =\n             D2Common::DATATBLS::MonsterTbls::TXT_MonStats_GetFlagsByBitOffset\n                       (pUnit_00->nClassId,killable), bIsInTownOrKillable == 0)) {\n      return;\n    }\n  }\n  bIsInTownOrKillable = D2Game::UNIT::SUnit::CheckForModeZeroDeath(pUnit_00);\n  if (bIsInTownOrKillable != 0) {\n    return;\n  }\n  D2Common::Units::Units::StoreLastAttacker(pUnit_00,pUnit);\n  if (bApplyDefenseReduction != 0) {\n    D2Game::UNIT::SUnitDmg::DAMAGE_ApplyDefensiveReduction(pGame,pUnit,pUnit_00,pDamage);\n  }\n  if (((pDamage->wResultFlags & 0x20U) == 0) && ((pDamage->wResultFlags & 1U) != 0)) {\n    if (bApplyDefenseReduction == 0) {\n      D2Game::UNIT::SUnitEvent::UNITEVENT_DispatchEventsByType(pGame,5,pUnit,pUnit_00,pDamage);\n      eEventType = 1;\n    }\n    else {\n      if ((pDamage->dwHitFlags & 0x20U) == 0) goto clamp_and_apply_damage;\n      if (-1 < (char)pDamage->dwHitFlags) {\n        D2Game::UNIT::SUnitEvent::UNITEVENT_DispatchEventsByType(pGame,6,pUnit,pUnit_00,pDamage);\n      }\n      eEventType = 2;\n    }\n    D2Game::UNIT::SUnitEvent::UNITEVENT_DispatchEventsByType\n              (pGame,eEventType,pUnit_00,pUnit,pDamage);\n  }\nclamp_and_apply_damage:\n  nDamageOrHp = pDamage->dwPhysDamage;\n  nCurrentHp = D2Common::Stats::StatsEx::STATSEX_GetCurrentStat(pUnit_00,UNITSTAT_hitpoints,0);\n  if (nCurrentHp <= nDamageOrHp) {\n    nDamageOrHp = D2Common::Stats::StatsEx::STATSEX_GetCurrentStat(pUnit_00,UNITSTAT_hitpoints,0);\n  }\n  pDamage->dwPhysDamage = nDamageOrHp;\n  D2Game::UNIT::SUnitDmg::DAMAGE_ApplyLifeAndManaLeech(pGame,pUnit_00,pUnit,pDamage);\n  if ((pVictim == (D2UnitStrc *)0x1) && ((pDamage->wResultFlags & 1) != 0)) {\n    D2Game::Monsters::Monsters::MONSTER_DispatchUModOnAttack(pGame,pUnit);\n  }\n  D2Game::UNIT::SUnitDmg::DAMAGE_ApplyHealingToUnit(pDamage->dwAbsLife,pUnit_00);\n  nDamageOrHp = pDamage->dwDmgTotal;\n  if (0 < nDamageOrHp) {\n    nPhysDamage = D2Common::Stats::StatsEx::STATSEX_GetCurrentStat(pUnit_00,UNITSTAT_hitpoints,0);\n    nNewHpCalc = nPhysDamage - nDamageOrHp;\n    if (nNewHpCalc < 0x100) {\n      nNewHpCalc = 0;\n    }\n    D2Common::Stats::StatsEx::STATLIST_SetUnitStat(pUnit_00,UNITSTAT_hitpoints,nNewHpCalc,0);\n  }\n  D2Game::UNIT::SUnitDmg::DAMAGE_DrainManaFromUnit(pDamage->dwManaLeech,pUnit_00);\n  D2Game::UNIT::SUnitDmg::DAMAGE_DrainStaminaFromUnit(pDamage->dwStamLeech,pUnit_00);\n  D2Game::UNIT::SUnitDmg::DAMAGE_ApplyStun(pUnit,pDamage->dwStunLen,pUnit_00);\n  D2Game::UNIT::SUnitDmg::DAMAGE_ApplyCold(pUnit,pDamage->dwColdLength,pUnit_00);\n  D2Game::UNIT::SUnitDmg::DAMAGE_ApplyFreeze(pUnit,pDamage->dwFrzLength,pUnit_00);\n  D2Game::UNIT::SUnitDmg::DAMAGE_ApplyPoison\n            (pUnit,pDamage->dwPoisDamage,pDamage->dwPoisLength,pUnit_00);\n  D2Game::UNIT::SUnitDmg::DAMAGE_ApplyBurning(pUnit,pDamage->dwBurnDmg,pDamage->dwBurnLen,pUnit_00);\n  nNewHp = D2Common::Stats::StatsEx::STATSEX_GetCurrentStat(pUnit_00,UNITSTAT_hitpoints,0);\n  if (nNewHp < 1) {\n    pDamage->wResultFlags = pDamage->wResultFlags | 2;\n  }\n  else {\n    pDamage->wResultFlags = pDamage->wResultFlags & 0xfffd;\n    if ((pDamage->dwDmgTotal != 0) && (eVictimType == UNIT_MONSTER)) {\n      nDamageOrHp = D2Common::Stats::StatsEx::STATSEX_GetCurrentStat(pUnit_00,UNITSTAT_hpregen,0);\n      if (nDamageOrHp != 0) {\n        D2Game::GAME::Event::EVENT_RemoveUnitTimersByType\n                  (pGame,pUnit_00,UNITEVENTCALLBACK_STATREGEN ,0);\n        D2Game::GAME::Event::SetEvent(pGame,pUnit_00,3,pGame->dwGameFrame + 1,0,0);\n      }\n      D2Game::SKILLS::SkillAss::SKILLASS_ClearAllChargeUpStates(pUnit_00);\n    }\n  }\n  if (((pDamage->wResultFlags & 0x20U) == 0) && ((pDamage->wResultFlags & 2U) != 0)) {\n    D2Game::UNIT::SUnitEvent::UNITEVENT_DispatchEventsByType(pGame,10,pUnit_00,pUnit,pDamage);\n    D2Game::UNIT::SUnitEvent::UNITEVENT_DispatchEventsByType(pGame,9,pUnit,pUnit_00,pDamage);\n  }\n  return;\n}\n\n"
+      },
+      "expected": "// Core server-side damage-application routine. Validates the attacker can hit the victim (UNITS_CheckIfCanAttackTarget, town/killable rules) then optionally applies defensive reduction, dispatches hit/got-hit unit events, clamps physical damage to current HP, runs life/mana leech, healing, then subtracts total damage from the victim's hitpoints (clamping the sub-256 remainder to 0). Also applies drain (mana/stamina) and status effects: stun, cold, freeze, poison, burning. Sets wResultFlags death bit (2) when HP reaches 0, otherwise schedules HP-regen events for monsters and clears Assassin charge-up states; dispatches death events on kill. Mutates pDamage and victim stats in place.\n// 1.14d: 0057c6c0\nvoid __fastcall DAMAGE_ApplyDamageToUnit(SGAMEDATA * pGame, D2UnitStrc * pUnit, D2UnitStrc * pVictim, int32_t bApplyDefenseReduction, D2DamageStrc * pDamage) {\n    bool bIsInTown;\n    D2RoomStrc* pRoom;\n    D2MonStatsTxt* pMonStats;\n    int32_t nNewHpCalc;\n    int nDamageOrHp;\n    uint32_t eEventType;\n    eD2UnitType eVictimType;\n    D2UnitStrc* pUnit_00;\n    pUnit_00 = pVictim;\n    uint32_t bCanAttack;\n    bCanAttack = D2Game::UNIT::SUnit::UNITS_CheckIfCanAttackTarget(pGame, pUnit, pVictim);\n    if (!bCanAttack && !(pDamage->dwHitFlags & 0x1000U) || (pRoom = D2Common::Units::UNITS_GetRoom(pVictim) , !pRoom)) {\n      pDamage->wResultFlags &= 0xfffc;\n      return;\n    }\n\n    pRoom = D2Common::Units::UNITS_GetRoom(pVictim);\n    BOOL bIsInTownOrKillable;\n    bIsInTownOrKillable = D2Common::DUNGEON::Dungeon::DRLGROOM_IsRoomInTown(pRoom);\n    if (bIsInTownOrKillable && (!pUnit || pUnit->eUnitType != UNIT_MONSTER || (pMonStats = D2Common::DATATBLS::MonsterTbls::TXT_MonStats_GetLine(pUnit->nClassId) , !pMonStats || !(pMonStats->field_0xd & (uint8_t)Fog::BitBuffer::gadwBitMasks[2])))) {\n      pDamage->wResultFlags &= 0xfffd;\n      return;\n    }\n    if (!pUnit) {\n      pVictim = (D2UnitStrc*)0x6;\n    } else {\n      pVictim = (D2UnitStrc*)pUnit->eUnitType;\n    }\n    if (!pUnit_00) {\n      eVictimType = UNIT_COUNT;\n    } else {\n      eVictimType = pUnit_00->eUnitType;\n      if (eVictimType == UNIT_MONSTER) {\n        bIsInTownOrKillable = D2Common::DATATBLS::MonsterTbls::TXT_MonStats_GetFlagsByBitOffset(pUnit_00->nClassId, killable);\n        if (!bIsInTownOrKillable) {\n          return;\n        }\n      }\n    }\n\n    bIsInTownOrKillable = D2Game::UNIT::SUnit::CheckForModeZeroDeath(pUnit_00);\n    if (bIsInTownOrKillable) {\n      return;\n    }\n\n    D2Common::Units::StoreLastAttacker(pUnit_00, pUnit);\n    if (bApplyDefenseReduction) {\n      D2Game::UNIT::SUnitDmg::DAMAGE_ApplyDefensiveReduction(pGame, pUnit, pUnit_00, pDamage);\n    }\n    if (!(pDamage->wResultFlags & 0x20U) && pDamage->wResultFlags & 1U) {\n      if (!bApplyDefenseReduction) {\n        D2Game::UNIT::SUnitEvent::UNITEVENT_DispatchEventsByType(pGame, 5, pUnit, pUnit_00, pDamage);\n        eEventType = 1;\n      } else {\n        if (!(pDamage->dwHitFlags & 0x20U)) {\n          goto clamp_and_apply_damage;\n        }\n        if (-1 < (char)pDamage->dwHitFlags) {\n          D2Game::UNIT::SUnitEvent::UNITEVENT_DispatchEventsByType(pGame, 6, pUnit, pUnit_00, pDamage);\n        }\n\n        eEventType = 2;\n      }\n\n      D2Game::UNIT::SUnitEvent::UNITEVENT_DispatchEventsByType(pGame, eEventType, pUnit_00, pUnit, pDamage);\n    }\n\n    clamp_and_apply_damage:\n    nDamageOrHp = pDamage->dwPhysDamage;\n    int32_t nCurrentHp = D2Common::Stats::StatsEx::STATSEX_GetCurrentStat(pUnit_00, UNITSTAT_hitpoints, 0);\n    if (nCurrentHp <= nDamageOrHp) {\n      nDamageOrHp = D2Common::Stats::StatsEx::STATSEX_GetCurrentStat(pUnit_00, UNITSTAT_hitpoints, 0);\n    }\n\n    pDamage->dwPhysDamage = nDamageOrHp;\n    D2Game::UNIT::SUnitDmg::DAMAGE_ApplyLifeAndManaLeech(pGame, pUnit_00, pUnit, pDamage);\n    if (pVictim == (D2UnitStrc*)0x1 && pDamage->wResultFlags & 1) {\n      D2Game::Monsters::MONSTER_DispatchUModOnAttack(pGame, pUnit);\n    }\n\n    D2Game::UNIT::SUnitDmg::DAMAGE_ApplyHealingToUnit(pDamage->dwAbsLife, pUnit_00);\n    nDamageOrHp = pDamage->dwDmgTotal;\n    if (0 < nDamageOrHp) {\n      int nPhysDamage;\n      nPhysDamage = D2Common::Stats::StatsEx::STATSEX_GetCurrentStat(pUnit_00, UNITSTAT_hitpoints, 0);\n      nNewHpCalc = nPhysDamage - nDamageOrHp;\n      if (nNewHpCalc < 0x100) {\n        nNewHpCalc = 0;\n      }\n\n      D2Common::Stats::StatsEx::STATLIST_SetUnitStat(pUnit_00, UNITSTAT_hitpoints, nNewHpCalc, 0);\n    }\n\n    D2Game::UNIT::SUnitDmg::DAMAGE_DrainManaFromUnit(pDamage->dwManaLeech, pUnit_00);\n    D2Game::UNIT::SUnitDmg::DAMAGE_DrainStaminaFromUnit(pDamage->dwStamLeech, pUnit_00);\n    D2Game::UNIT::SUnitDmg::DAMAGE_ApplyStun(pUnit, pDamage->dwStunLen, pUnit_00);\n    D2Game::UNIT::SUnitDmg::DAMAGE_ApplyCold(pUnit, pDamage->dwColdLength, pUnit_00);\n    D2Game::UNIT::SUnitDmg::DAMAGE_ApplyFreeze(pUnit, pDamage->dwFrzLength, pUnit_00);\n    D2Game::UNIT::SUnitDmg::DAMAGE_ApplyPoison(pUnit, pDamage->dwPoisDamage, pDamage->dwPoisLength, pUnit_00);\n    D2Game::UNIT::SUnitDmg::DAMAGE_ApplyBurning(pUnit, pDamage->dwBurnDmg, pDamage->dwBurnLen, pUnit_00);\n    int32_t nNewHp = D2Common::Stats::StatsEx::STATSEX_GetCurrentStat(pUnit_00, UNITSTAT_hitpoints, 0);\n    if (nNewHp < 1) {\n      pDamage->wResultFlags |= 2;\n    } else {\n      pDamage->wResultFlags &= 0xfffd;\n      if (pDamage->dwDmgTotal && eVictimType == UNIT_MONSTER) {\n        nDamageOrHp = D2Common::Stats::StatsEx::STATSEX_GetCurrentStat(pUnit_00, UNITSTAT_hpregen, 0);\n        if (nDamageOrHp) {\n          D2Game::GAME::Event::EVENT_RemoveUnitTimersByType(pGame, pUnit_00, UNITEVENTCALLBACK_STATREGEN, 0);\n          D2Game::GAME::Event::SetEvent(pGame, pUnit_00, 3, pGame->dwGameFrame + 1, 0, 0);\n        }\n\n        D2Game::SKILLS::SkillAss::SKILLASS_ClearAllChargeUpStates(pUnit_00);\n      }\n    }\n    if (!(!(pDamage->wResultFlags & 0x20U) && pDamage->wResultFlags & 2U)) {\n      return;\n    }\n\n    D2Game::UNIT::SUnitEvent::UNITEVENT_DispatchEventsByType(pGame, 10, pUnit_00, pUnit, pDamage);\n    D2Game::UNIT::SUnitEvent::UNITEVENT_DispatchEventsByType(pGame, 9, pUnit, pUnit_00, pDamage);\n}"
+    },
+    {
+      "function": {
+        "name": "DAMAGE_ApplyLifeAndManaLeech",
+        "address": "0057c420",
+        "entryPoint": "0057c420",
+        "signature": "void DAMAGE_ApplyLifeAndManaLeech(SGAMEDATA * pGame, D2UnitStrc * pDefender, D2UnitStrc * pAttacker, D2DamageStrc * pDmgStrc)",
+        "returnType": "void",
+        "callingConvention": "__stdcall",
+        "size": 666,
+        "isThunk": false,
+        "isExternal": false,
+        "hasVarArgs": false,
+        "namespace": "D2Game::UNIT::SUnitDmg",
+        "comment": "@function DAMAGE_ApplyLifeAndManaLeech\n@address Game.exe.ram:0057c420\n@date 2026.09.05\n@params\n  pGame: EDX:4 (SGAMEDATA *)\n  pDefender: Stack[0x4]:4 (D2UnitStrc *)\n  pAttacker: EBX:4 (D2UnitStrc *)\n  pDmgStrc: EAX:4 (D2DamageStrc *)\n@description LEECH CALCULATION: % of physical damage dealt, AFTER DR.\n\nLife/Mana leech = (physical_damage_dealt * leech%) / 64\nApplied AFTER defensive reduction (DR, resist).\n\nDifficulty penalty:\n  Normal = 100% (full leech)\n  Nightmare = 50% (/2)\n  Hell = 25% (/4)\n\nMonster drain penalty: target's stat reduces leech effectiveness.\n\nKEY: Leech is from physical damage only, not elemental.\nKEY: Calculated post-resist, so resists double-penalize leech.\n\nConnects offensive damage \u2192 attacker HP/mana restoration.\n@sourcefile .\\UNIT\\SUnitDmg.cpp\n@sourcefile-basis Blizzard __FILE__ literal referenced from inside this function's body (1 site: 0057c5c8). First-party 1.14d evidence, not inferred and not from D2R.",
+        "sourceFile": null,
+        "sourceLine": null,
+        "sourceInfo": "@function DAMAGE_ApplyLifeAndManaLeech\n@address Game.exe.ram:0057c420\n@date 2026.09.05\n@params\n  pGame: EDX:4 (SGAMEDATA *)\n  pDefender: Stack[0x4]:4 (D2UnitStrc *)\n  pAttacker: EBX:4 (D2UnitStrc *)\n  pDmgStrc: EAX:4 (D2DamageStrc *)\n@description LEECH CALCULATION: % of physical damage dealt, AFTER DR.\n\nLife/Mana leech = (physical_damage_dealt * leech%) / 64\nApplied AFTER defensive reduction (DR, resist).\n\nDifficulty penalty:\n  Normal = 100% (full leech)\n  Nightmare = 50% (/2)\n  Hell = 25% (/4)\n\nMonster drain penalty: target's stat reduces leech effectiveness.\n\nKEY: Leech is from physical damage only, not elemental.\nKEY: Calculated post-resist, so resists double-penalize leech.\n\nConnects offensive damage \u2192 attacker HP/mana restoration.\n@sourcefile .\\UNIT\\SUnitDmg.cpp\n@sourcefile-basis Blizzard __FILE__ literal referenced from inside this function's body (1 site: 0057c5c8). First-party 1.14d evidence, not inferred and not from D2R.",
+        "parameters": [
+          {
+            "name": "pGame",
+            "dataType": "SGAMEDATA *",
+            "size": 4,
+            "ordinal": 0,
+            "storage": "EDX:4",
+            "stackOffset": null,
+            "resolvedType": null
+          },
+          {
+            "name": "pDefender",
+            "dataType": "D2UnitStrc *",
+            "size": 4,
+            "ordinal": 1,
+            "storage": "Stack[0x4]:4",
+            "stackOffset": 4,
+            "resolvedType": null
+          },
+          {
+            "name": "pAttacker",
+            "dataType": "D2UnitStrc *",
+            "size": 4,
+            "ordinal": 2,
+            "storage": "EBX:4",
+            "stackOffset": null,
+            "resolvedType": null
+          },
+          {
+            "name": "pDmgStrc",
+            "dataType": "D2DamageStrc *",
+            "size": 4,
+            "ordinal": 3,
+            "storage": "EAX:4",
+            "stackOffset": null,
+            "resolvedType": null
+          }
+        ],
+        "localVariables": [
+          {
+            "name": "pGameFromUnit",
+            "dataType": "SGAMEDATA *",
+            "size": 4,
+            "storage": "EAX:4",
+            "stackOffset": null,
+            "resolvedType": "SGAMEDATA *"
+          },
+          {
+            "name": "pDiffLevels",
+            "dataType": "D2DifficultyLevelsTxt *",
+            "size": 4,
+            "storage": "EAX:4",
+            "stackOffset": null,
+            "resolvedType": "D2DifficultyLevelsTxt *"
+          },
+          {
+            "name": "nLeechAmount",
+            "dataType": "int32_t",
+            "size": 4,
+            "storage": "EAX:4",
+            "stackOffset": null,
+            "resolvedType": null
+          },
+          {
+            "name": "uMercType",
+            "dataType": "uint32_t",
+            "size": 4,
+            "storage": "EAX:4",
+            "stackOffset": null,
+            "resolvedType": null
+          },
+          {
+            "name": "nMercType",
+            "dataType": "uint32_t",
+            "size": 4,
+            "storage": "EAX:4",
+            "stackOffset": null,
+            "resolvedType": "uint32_t"
+          },
+          {
+            "name": "nLifeLeechAmt",
+            "dataType": "int32_t",
+            "size": 4,
+            "storage": "ECX:4",
+            "stackOffset": null,
+            "resolvedType": null
+          },
+          {
+            "name": "nStamLeechAmt",
+            "dataType": "int32_t",
+            "size": 4,
+            "storage": "EAX:4",
+            "stackOffset": null,
+            "resolvedType": null
+          },
+          {
+            "name": "nMaxHp",
+            "dataType": "int",
+            "size": 4,
+            "storage": "EDI:4",
+            "stackOffset": null,
+            "resolvedType": "int"
+          },
+          {
+            "name": "nMaxHpCap",
+            "dataType": "int32_t",
+            "size": 4,
+            "storage": "EAX:4",
+            "stackOffset": null,
+            "resolvedType": null
+          },
+          {
+            "name": "nCurHp",
+            "dataType": "int",
+            "size": 4,
+            "storage": "EAX:4",
+            "stackOffset": null,
+            "resolvedType": "int"
+          },
+          {
+            "name": "eUnitType",
+            "dataType": "eD2UnitType",
+            "size": 4,
+            "storage": "Stack[-0x8]:4",
+            "stackOffset": -8,
+            "resolvedType": "eD2UnitType"
+          },
+          {
+            "name": "eAnimMode",
+            "dataType": "uD2UnitMode",
+            "size": 4,
+            "storage": "Stack[-0xc]:4",
+            "stackOffset": -12,
+            "resolvedType": "uD2UnitMode"
+          },
+          {
+            "name": "nManaStat",
+            "dataType": "int32_t",
+            "size": 4,
+            "storage": "Stack[-0x10]:4",
+            "stackOffset": -16,
+            "resolvedType": "int32_t"
+          },
+          {
+            "name": "pDefenderSaved",
+            "dataType": "D2UnitStrc *",
+            "size": 4,
+            "storage": "HASH:3fe5adeb10:4",
+            "stackOffset": null,
+            "resolvedType": "D2UnitStrc *"
+          },
+          {
+            "name": "pMonStats",
+            "dataType": "D2MonStatsTxt *",
+            "size": 4,
+            "storage": "HASH:5f7d38b5d1:4",
+            "stackOffset": null,
+            "resolvedType": "D2MonStatsTxt *"
+          }
+        ],
+        "tags": [
+          {
+            "type": "llm-named"
+          },
+          {
+            "type": "llm-typed"
+          },
+          {
+            "type": "llm-artifact-fix"
+          }
+        ],
+        "decompiled": "\n/* WARNING: Enum \"eCollisionFlags\": Some values do not have unique names */\n/* WARNING: Enum \"eD2TimerType\": Some values do not have unique names */\n/* WARNING: Enum \"eD2TimerTypeDWORD\": Some values do not have unique names */\n/* @function DAMAGE_ApplyLifeAndManaLeech\n   @address Game.exe.ram:0057c420\n   @date 2026.09.05\n   @params\n     pGame: EDX:4 (SGAMEDATA *)\n     pDefender: Stack[0x4]:4 (D2UnitStrc *)\n     pAttacker: EBX:4 (D2UnitStrc *)\n     pDmgStrc: EAX:4 (D2DamageStrc *)\n   @description LEECH CALCULATION: % of physical damage dealt, AFTER DR.\n   \n   Life/Mana leech = (physical_damage_dealt * leech%) / 64\n   Applied AFTER defensive reduction (DR, resist).\n   \n   Difficulty penalty:\n     Normal = 100% (full leech)\n     Nightmare = 50% (/2)\n     Hell = 25% (/4)\n   \n   Monster drain penalty: target's stat reduces leech effectiveness.\n   \n   KEY: Leech is from physical damage only, not elemental.\n   KEY: Calculated post-resist, so resists double-penalize leech.\n   \n   Connects offensive damage \u2192 attacker HP/mana restoration.\n   @sourcefile .\\UNIT\\SUnitDmg.cpp\n   @sourcefile-basis Blizzard __FILE__ literal referenced from inside this function's body (1 site:\n   0057c5c8). First-party 1.14d evidence, not inferred and not from D2R. */\n\nvoid D2Game::UNIT::SUnitDmg::DAMAGE_ApplyLifeAndManaLeech\n               (SGAMEDATA *pGame,D2UnitStrc *pDefender,D2UnitStrc *pAttacker,D2DamageStrc *pDmgStrc)\n\n{\n  SGAMEDATA *pGameFromUnit;\n  D2DifficultyLevelsTxt *pDiffLevels;\n  int32_t nLeechAmount;\n  uint32_t uMercType;\n  uint32_t nMercType;\n  int32_t nStamLeechAmt;\n  int32_t nMaxHpCap;\n  int nCurHp;\n  int32_t nLifeLeechAmt;\n  int nMaxHp;\n  int32_t nManaStat;\n  uD2UnitMode eAnimMode;\n  eD2UnitType eUnitType;\n  D2UnitStrc *pDefenderSaved;\n  D2MonStatsTxt *pMonStats;\n  \n  pDefenderSaved = pDefender;\n  if ((pDmgStrc->dwLifeLeech == 0) && (pDmgStrc->dwManaLeech == 0)) {\n    return;\n  }\n  if ((pDefender == (D2UnitStrc *)0x0) || (pDefender->eUnitType != UNIT_MONSTER)) {\n    pDefender = (D2UnitStrc *)0x64;\n  }\n  else {\n    if ((pDefender->pUnitData).pUnitDataMonster == (D2UnitDataMonsterStrc *)0x0) {\n      return;\n    }\n    pMonStats = ((pDefender->pUnitData).pUnitDataMonster)->pMonStatsTxt;\n    if (pMonStats == (D2MonStatsTxt *)0x0) {\n      return;\n    }\n    pDefender = (D2UnitStrc *)(uint)pMonStats->aDrain[pGame->nDifficulty];\n    if (pDefender == (D2UnitStrc *)0x0) {\n      return;\n    }\n  }\n  pDmgStrc->dwLifeLeech = pDmgStrc->dwLifeLeech << 6;\n  pDmgStrc->dwManaLeech = pDmgStrc->dwManaLeech << 6;\n  if (pAttacker == (D2UnitStrc *)0x0) {\n    eUnitType = UNIT_COUNT;\napply_monster_drain:\n    if (pAttacker == (D2UnitStrc *)0x0) {\n      nManaStat = -1;\n      eAnimMode.ePlayerMode = Death;\n    }\n    else {\n      nManaStat = pAttacker->nClassId;\n      eAnimMode = pAttacker->eAnimMode;\n    }\n    D2Common::Skills::Skills::SKILLS_GetStateTransformGfx\n              (pAttacker,&eUnitType,&nManaStat,(int *)&eAnimMode.ePlayerMode,\".\\\\UNIT\\\\SUnitDmg.cpp\"\n               ,0x64c);\n    if (eUnitType != UNIT_PLAYER) {\n      nManaStat = D2Common::Stats::StatsEx::STATSEX_GetCurrentStat(pDefenderSaved,UNITSTAT_mana,0);\n      eAnimMode.ePlayerMode =\n           D2Common::Stats::StatsEx::STATSEX_GetCurrentStat(pDefenderSaved,UNITSTAT_stamina,0);\n      nLifeLeechAmt = (int)(pDmgStrc->dwLifeLeech + (pDmgStrc->dwLifeLeech >> 0x1f & 0x3fU)) >> 6;\n      nMaxHp = (int)(pDmgStrc->dwManaLeech + (pDmgStrc->dwManaLeech >> 0x1f & 0x3fU)) >> 6;\n      pDmgStrc->dwLifeLeech = nLifeLeechAmt;\n      pDmgStrc->dwManaLeech = nMaxHp;\n      if (pDmgStrc->dwPhysDamage <= nLifeLeechAmt) {\n        nLifeLeechAmt = pDmgStrc->dwPhysDamage;\n      }\n      if (nManaStat <= nMaxHp) {\n        nMaxHp = nManaStat;\n      }\n      nStamLeechAmt = eAnimMode.ePlayerMode;\n      if (pDmgStrc->dwStamLeech < (int)eAnimMode.ePlayerMode) {\n        nStamLeechAmt = pDmgStrc->dwStamLeech;\n      }\n      nMaxHp = nLifeLeechAmt + nMaxHp + nStamLeechAmt;\n      if (nMaxHp == 0) {\n        return;\n      }\n      if (pDefender != (D2UnitStrc *)0x64) {\n        nMaxHp = D2Common::DATATBLS::DataTbls::D2ApplyPercent(nMaxHp,(int32_t)pDefender,100);\n      }\n      nMaxHpCap = D2Common::Stats::StatsEx::STATLIST_GetMaxLifeFromUnit(pAttacker);\n      nCurHp = D2Common::Stats::StatsEx::STATSEX_GetCurrentStat(pAttacker,UNITSTAT_hitpoints,0);\n      if (nMaxHpCap - nCurHp <= nMaxHp) {\n        nMaxHp = nMaxHpCap - nCurHp;\n      }\n      if (nMaxHp < 1) {\n        return;\n      }\n      D2Common::Stats::StatsEx::STATLIST_AddUnitStat(pAttacker,UNITSTAT_hitpoints,nMaxHp,0);\n      goto set_leech_overlay;\n    }\n  }\n  else if (pAttacker->eUnitType == UNIT_PLAYER) {\n    pGameFromUnit = D2Game::UNIT::SUnit::GetGamePointer(pAttacker);\n    pDiffLevels = D2Common::DATATBLS::DataTbls::GetDifficultyLevels\n                            ((uint)pGameFromUnit->nDifficulty);\n    if (pDiffLevels->LifeStealDivisor != 0) {\n      pDmgStrc->dwLifeLeech = pDmgStrc->dwLifeLeech / pDiffLevels->LifeStealDivisor;\n    }\n    if (pDiffLevels->ManaStealDivisor != 0) {\n      pDmgStrc->dwManaLeech = pDmgStrc->dwManaLeech / pDiffLevels->ManaStealDivisor;\n    }\n  }\n  else if ((pAttacker->eUnitType != UNIT_MONSTER) ||\n          (nMercType = D2Common::Monsters::MONSTERS::MONSTER_GetMercType(pAttacker), nMercType == 0)\n          ) {\n    eUnitType = pAttacker->eUnitType;\n    goto apply_monster_drain;\n  }\n  nManaStat = pDmgStrc->dwPhysDamage;\n  eUnitType = UNIT_PLAYER;\n  if (0 < nManaStat) {\n    if (pDmgStrc->dwManaLeech != 0) {\n      nLeechAmount = D2Common::DATATBLS::DataTbls::D2ApplyPercent\n                               (nManaStat,pDmgStrc->dwManaLeech,100);\n      if (pDefender != (D2UnitStrc *)0x64) {\n        nLeechAmount = D2Common::DATATBLS::DataTbls::D2ApplyPercent\n                                 (nLeechAmount,(int32_t)pDefender,100);\n      }\n      D2Game::UNIT::SUnitDmg::DAMAGE_ApplyManaToUnit\n                ((int)(nLeechAmount + (nLeechAmount >> 0x1f & 0x3fU)) >> 6,pAttacker);\n      eUnitType = UNIT_MONSTER;\n    }\n    if (pDmgStrc->dwLifeLeech == 0) {\n      if (eUnitType == UNIT_PLAYER) {\n        return;\n      }\n    }\n    else {\n      nMaxHp = D2Common::DATATBLS::DataTbls::D2ApplyPercent(nManaStat,pDmgStrc->dwLifeLeech,100);\n      if (pDefender != (D2UnitStrc *)0x64) {\n        nMaxHp = D2Common::DATATBLS::DataTbls::D2ApplyPercent(nMaxHp,(int32_t)pDefender,100);\n      }\n      D2Game::UNIT::SUnitDmg::DAMAGE_ApplyHealingToUnit\n                ((int)(nMaxHp + (nMaxHp >> 0x1f & 0x3fU)) >> 6,pAttacker);\n      if (eUnitType == UNIT_PLAYER) {\nset_leech_overlay:\n        D2Common::Units::Units::SetOverlay(pAttacker,0x97,0);\n        return;\n      }\n      uMercType = D2Common::Seed::UNIT_GetModuloFromSeed(&pAttacker->sSeed,2);\n      if (uMercType == 0) {\n        D2Common::Units::Units::SetOverlay(pAttacker,0x97,0);\n        return;\n      }\n    }\n    D2Common::Units::Units::SetOverlay(pAttacker,0x98,0);\n  }\n  return;\n}\n\n"
+      },
+      "expected": "// LEECH CALCULATION: % of physical damage dealt, AFTER DR.\n// Life/Mana leech = (physical_damage_dealt * leech%) / 64\n// Applied AFTER defensive reduction (DR, resist).\n// Difficulty penalty:\n//   Normal = 100% (full leech)\n//   Nightmare = 50% (/2)\n//   Hell = 25% (/4)\n// Monster drain penalty: target's stat reduces leech effectiveness.\n// KEY: Leech is from physical damage only, not elemental.\n// KEY: Calculated post-resist, so resists double-penalize leech.\n// Connects offensive damage \u2192 attacker HP/mana restoration.\n// @sourcefile .\\UNIT\\SUnitDmg.cpp\n// 1.14d: 0057c420\nvoid __stdcall DAMAGE_ApplyLifeAndManaLeech(SGAMEDATA * pGame, D2UnitStrc * pDefender, D2UnitStrc * pAttacker, D2DamageStrc * pDmgStrc) {\n    SGAMEDATA* pGameFromUnit;\n    D2DifficultyLevelsTxt* pDiffLevels;\n    uint32_t uMercType;\n    uint32_t nMercType;\n    int32_t nStamLeechAmt;\n    int32_t nMaxHpCap;\n    int nCurHp;\n    int32_t nLifeLeechAmt;\n    int nMaxHp;\n    int32_t nManaStat;\n    uD2UnitMode eAnimMode;\n    eD2UnitType eUnitType;\n    D2MonStatsTxt* pMonStats;\n    int32_t nDefender;\n    D2UnitStrc* pDefenderSaved;\n    pDefenderSaved = pDefender;\n    if (!pDmgStrc->dwLifeLeech && !pDmgStrc->dwManaLeech) {\n      return;\n    }\n    if (!pDefender || pDefender->eUnitType != UNIT_MONSTER) {\n      nDefender = 0x64;\n    } else {\n      if (!pDefender->pUnitData.pUnitDataMonster) {\n        return;\n      }\n\n      pMonStats = pDefender->pUnitData.pUnitDataMonster->pMonStatsTxt;\n      if (!pMonStats) {\n        return;\n      }\n\n      nDefender = (int32_t)(uint32_t)pMonStats->aDrain[pGame->nDifficulty];\n      if (!nDefender) {\n        return;\n      }\n    }\n\n    pDmgStrc->dwLifeLeech <<= 6;\n    pDmgStrc->dwManaLeech <<= 6;\n    if (!pAttacker) {\n      eUnitType = UNIT_COUNT;\n      apply_monster_drain:\n      if (!pAttacker) {\n        nManaStat = -1;\n        eAnimMode.ePlayerMode = Death;\n      } else {\n        nManaStat = pAttacker->nClassId;\n        eAnimMode = pAttacker->eAnimMode;\n      }\n      D2Common::Skills::SKILLS_GetStateTransformGfx(pAttacker, &eUnitType, &nManaStat, (int*)&eAnimMode.ePlayerMode, \".\\\\UNIT\\\\SUnitDmg.cpp\", 0x64c);\n      if (eUnitType != UNIT_PLAYER) {\n        nManaStat = D2Common::Stats::StatsEx::STATSEX_GetCurrentStat(pDefenderSaved, UNITSTAT_mana, 0);\n        eAnimMode.ePlayerMode = D2Common::Stats::StatsEx::STATSEX_GetCurrentStat(pDefenderSaved, UNITSTAT_stamina, 0);\n        nLifeLeechAmt = pDmgStrc->dwLifeLeech / 64;\n        nMaxHp = pDmgStrc->dwManaLeech / 64;\n        pDmgStrc->dwLifeLeech = nLifeLeechAmt;\n        pDmgStrc->dwManaLeech = nMaxHp;\n        if (pDmgStrc->dwPhysDamage <= nLifeLeechAmt) {\n          nLifeLeechAmt = pDmgStrc->dwPhysDamage;\n        }\n        if (nManaStat <= nMaxHp) {\n          nMaxHp = nManaStat;\n        }\n\n        nStamLeechAmt = eAnimMode.ePlayerMode;\n        if (pDmgStrc->dwStamLeech < (int)eAnimMode.ePlayerMode) {\n          nStamLeechAmt = pDmgStrc->dwStamLeech;\n        }\n\n        nMaxHp = nLifeLeechAmt + nMaxHp + nStamLeechAmt;\n        if (!nMaxHp) {\n          return;\n        }\n        if (nDefender != 0x64) {\n          nMaxHp = D2Common::DATATBLS::DataTbls::D2ApplyPercent(nMaxHp, nDefender, 100);\n        }\n\n        nMaxHpCap = D2Common::Stats::StatsEx::STATLIST_GetMaxLifeFromUnit(pAttacker);\n        nCurHp = D2Common::Stats::StatsEx::STATSEX_GetCurrentStat(pAttacker, UNITSTAT_hitpoints, 0);\n        if (nMaxHpCap - nCurHp <= nMaxHp) {\n          nMaxHp = nMaxHpCap - nCurHp;\n        }\n        if (nMaxHp < 1) {\n          return;\n        }\n\n        D2Common::Stats::StatsEx::STATLIST_AddUnitStat(pAttacker, UNITSTAT_hitpoints, nMaxHp, 0);\n        goto set_leech_overlay;\n      }\n    } else if (pAttacker->eUnitType == UNIT_PLAYER) {\n      pGameFromUnit = D2Game::UNIT::SUnit::GetGamePointer(pAttacker);\n      pDiffLevels = D2Common::DATATBLS::DataTbls::GetDifficultyLevels((uint32_t)pGameFromUnit->nDifficulty);\n      if (pDiffLevels->LifeStealDivisor) {\n        pDmgStrc->dwLifeLeech /= pDiffLevels->LifeStealDivisor;\n      }\n      if (pDiffLevels->ManaStealDivisor) {\n        pDmgStrc->dwManaLeech /= pDiffLevels->ManaStealDivisor;\n      }\n    } else if (pAttacker->eUnitType != UNIT_MONSTER || (nMercType = D2Common::Monsters::MONSTERS::MONSTER_GetMercType(pAttacker) , !nMercType)) {\n      eUnitType = pAttacker->eUnitType;\n      goto apply_monster_drain;\n    }\n\n    nManaStat = pDmgStrc->dwPhysDamage;\n    eUnitType = UNIT_PLAYER;\n    if (0 >= nManaStat) {\n      return;\n    }\n    if (pDmgStrc->dwManaLeech) {\n      int32_t nLeechAmount;\n      nLeechAmount = D2Common::DATATBLS::DataTbls::D2ApplyPercent(nManaStat, pDmgStrc->dwManaLeech, 100);\n      if (nDefender != 0x64) {\n        nLeechAmount = D2Common::DATATBLS::DataTbls::D2ApplyPercent(nLeechAmount, nDefender, 100);\n      }\n\n      D2Game::UNIT::SUnitDmg::DAMAGE_ApplyManaToUnit(nLeechAmount / 64, pAttacker);\n      eUnitType = UNIT_MONSTER;\n    }\n    if (!pDmgStrc->dwLifeLeech) {\n      if (eUnitType == UNIT_PLAYER) {\n        return;\n      }\n    } else {\n      nMaxHp = D2Common::DATATBLS::DataTbls::D2ApplyPercent(nManaStat, pDmgStrc->dwLifeLeech, 100);\n      if (nDefender != 0x64) {\n        nMaxHp = D2Common::DATATBLS::DataTbls::D2ApplyPercent(nMaxHp, nDefender, 100);\n      }\n\n      D2Game::UNIT::SUnitDmg::DAMAGE_ApplyHealingToUnit(nMaxHp / 64, pAttacker);\n      if (eUnitType == UNIT_PLAYER) {\n        set_leech_overlay:\n        D2Common::Units::SetOverlay(pAttacker, 0x97, 0);\n        return;\n      }\n\n      uMercType = D2Common::Seed::UNIT_GetModuloFromSeed(&pAttacker->sSeed, 2);\n      if (!uMercType) {\n        D2Common::Units::SetOverlay(pAttacker, 0x97, 0);\n        return;\n      }\n    }\n\n    D2Common::Units::SetOverlay(pAttacker, 0x98, 0);\n}"
+    }
+  ]
+}
