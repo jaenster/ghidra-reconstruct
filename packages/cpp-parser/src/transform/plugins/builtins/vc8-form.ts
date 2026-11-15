@@ -204,6 +204,11 @@ import { builtinTruthSite } from './truth-form-safety.js';
  *                        must be ordinary 32-bit integers of the same signedness. The statements must be
  *                        adjacent; aliases, declaration specifiers, labels, jumps,
  *                        lambdas and a return that reads V are refused.
+ *   nullinit(V,@F)       move one ordinary outer-block pointer initialized to literal
+ *                        null immediately before the unique earlier standalone call F.
+ *                        No value read or call moves: only a private null initialization.
+ *                        Ambiguous/shadowed bindings, address exposure, complex types,
+ *                        labels, jumps, lambdas and intervening control/type declarations refuse.
  *   tsel(C[,i])          the i-th `if (C) { V1 = A1; ... } else { V1 = B1; ... }` storing the
  *                        same locals in both arms, followed by a call statement reading each
  *                        Vk once as a whole argument, is written with each read `C ? Ak : Bk`;
@@ -450,6 +455,7 @@ export type Vc8Form =
   | { op: 'coalesce'; name: string; from?: string }
   | { op: 'recordwalk'; name: string; index: number }
   | { op: 'cache'; expr: string; name: string; type?: string; anchor?: string; count?: number }
+  | { op: 'nullinit'; name: string; before: string }
   | { op: 'own'; name: string; type: string; rename?: string; live?: boolean }
   | { op: 'guards'; split: number; index: number }
   | { op: 'merge-guards'; index: number }
@@ -554,7 +560,7 @@ export interface Vc8FormOptions {
   selectTables?: Vc8FormTables;
 }
 
-const OPS = new Set(['zerolife', 'nullfault32', 'swdefault', 'seq', 'fold', 'join', 'coalesce', 'recordwalk', 'cache', 'own', 'guards', 'merge-guards', 'retval', 'branchret', 'width', 'boolflag', 'retwiden', 'arms',
+const OPS = new Set(['zerolife', 'nullfault32', 'swdefault', 'seq', 'fold', 'join', 'coalesce', 'recordwalk', 'cache', 'nullinit', 'own', 'guards', 'merge-guards', 'retval', 'branchret', 'width', 'boolflag', 'retwiden', 'arms',
   'nest', 'merge-tail', 'tailguard', 'tailcopy', 'continue', 'dup', 'tarms', 'zero', 'nonzero', 'bool', 'cmp', 'swap', 'ifsel', 'clamp', 'split', 'select', 'decl', 'unselect', 'tsel', 'hoist',
   'nestcall', 'fill', 'elems', 'copy', 'shift', 'ptrwalk', 'rowptr', 'acc', 'retvar', 'onecall', 'roundup', 'swmerge', 'switch', 'dec', 'opas', 'range', 'castout', 'signbit', 'nullfield', 'zinit', 'znew', 'swclamp', 'retbase', 'postdec']);
 
@@ -619,6 +625,9 @@ export function parseVc8Form(text: string): Vc8Form | undefined {
         return { op: 'cache', expr: args[0], name: args[1], type: args[2], anchor: args[3].slice(1), count: int(args[4], NaN) };
       }
       return undefined;
+    case 'nullinit':
+      return args.length === 1 && /^[A-Za-z_]\w*$/.test(args[0]) && anchor && /^(?:::)?[A-Za-z_]\w*(?:::[A-Za-z_]\w*)*$/.test(anchor)
+        ? { op: 'nullinit', name: args[0], before: anchor } : undefined;
     case 'own': {
       // `own(V,T[,N],live)`: the initializer is read, and a compile matched the original
       // with it dropped all the same.
@@ -2536,6 +2545,58 @@ function doDecl(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'decl' }>): void {
     return;
   }
   refuse(`no block declares both ${f.name} and ${f.before}`);
+}
+
+function doNullinit(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'nullinit' }>): void {
+  const body = fn.body!;
+  const declarations = [...walk(body)].filter(({ node }) => node.kind === NodeKind.VariableDecl && (node as VariableDecl).name.name === f.name);
+  if (declarations.length !== 1 || fn.parameters.some(p => p.name?.name === f.name)) refuse(`${f.name} is not one unshadowed local`);
+  const from = body.statements.findIndex(s => declOf(s)?.name.name === f.name);
+  if (from < 0) refuse(`${f.name} is not an outer-block declaration`);
+  const d = declOf(body.statements[from])!;
+  if (d.specifiers.length || d.attributes.length || d.directInit || d.copyListInit || d.bitWidth) refuse(`${f.name} has declaration specifiers or special initialization`);
+  if (d.type.kind !== NodeKind.PointerType || /[<([&]|\b(?:const|volatile|restrict|_Atomic|decltype|typeof)\b/.test(emit(d.type as never))) refuse(`${f.name} is not an ordinary object pointer`);
+  if ([...walk(d.type)].some(({ node }) => [NodeKind.ArrayType, NodeKind.FunctionType, NodeKind.ReferenceType, NodeKind.RValueReferenceType, NodeKind.MemberPointerType].includes(node.kind))) refuse(`${f.name} has a complex pointee type`);
+  const value = d.initializer && unparen(d.initializer as Expression);
+  if (!value || !(value.kind === NodeKind.NullptrLiteral || value.kind === NodeKind.IntegerLiteral && (value as IntegerLiteralExpr).value === 0n)) refuse(`${f.name} is not initialized to literal null`);
+  if (addressTaken(fn, f.name)) refuse(`${f.name}'s address is taken`);
+  const before = norm(f.before);
+  if (localNames(fn).has(before)) refuse(`${f.before} names a local callable`);
+  const calls: Array<{ node: CallExpr; statement: Statement }> = [];
+  for (const statement of body.statements) {
+    if (statement.kind !== NodeKind.ExprStmt) continue;
+    const e = unparen((statement as ExprStmt).expression);
+    if (e.kind === NodeKind.CallExpr && norm(calleeName((e as CallExpr).callee) ?? '') === before) calls.push({ node: e as CallExpr, statement });
+  }
+  const allCalls = [...walk(body)].filter(({ node }) => node.kind === NodeKind.CallExpr && norm(calleeName((node as CallExpr).callee) ?? '') === before);
+  if (calls.length !== 1 || allCalls.length !== 1) refuse(`${f.before} is not one standalone outer-block call`);
+  const to = body.statements.indexOf(calls[0].statement);
+  if (to >= from) refuse(`${f.name} is not after ${f.before}`);
+  if (body.statements.slice(0, from).some(s => mentions(s, f.name))) refuse(`${f.name} is named before its declaration`);
+  for (const { node } of walk(body)) {
+    if ([NodeKind.GotoStmt, NodeKind.LabelStmt, NodeKind.LambdaExpr, NodeKind.AsmDecl, NodeKind.TryStmt, NodeKind.SehTryStmt].includes(node.kind)) refuse('nullinit does not model jumps, lambdas, assembly or exception blocks');
+    if (node.kind === NodeKind.VariableDecl) {
+      const other = node as VariableDecl;
+      if (other !== d && other.initializer && mentions(other.initializer, f.name) && emit(other.type as never).includes('&')) refuse(`${f.name} initializes a reference`);
+    }
+    const castType = (node as unknown as { type?: TypeNode }).type;
+    if (castType && /CastExpr$/.test(node.kind) && mentions(node, f.name) && emit(castType as never).includes('&')) refuse(`${f.name} is cast to a reference`);
+    if (node.kind !== NodeKind.CallExpr || !mentions(node, f.name)) continue;
+    const call = node as CallExpr;
+    if (mentions(call.callee, f.name)) refuse(`${f.name} is used as a callable`);
+    for (const arg of call.arguments) {
+      if (!mentions(arg, f.name)) continue;
+      const a = unparen(arg);
+      if (a.kind !== NodeKind.CStyleCastExpr || !isId(unparen((a as CStyleCastExpr).expression), f.name) || !/^(?:u?int(?:8|16|32|64)_t|u?intptr_t|uint|int|unsignedint|long|unsignedlong)$/.test(text((a as CStyleCastExpr).type))) refuse(`${f.name} is passed without an explicit integer value cast`);
+    }
+  }
+  for (const s of body.statements.slice(to, from)) {
+    if (s.kind === NodeKind.ExprStmt) continue;
+    const other = declOf(s);
+    if (!other || mentions(d.type, other.name.name)) refuse('nullinit crosses control, multiple or type declarations');
+  }
+  const [statement] = body.statements.splice(from, 1);
+  body.statements.splice(to, 0, statement);
 }
 
 function doSelect(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'select' }>): void {
@@ -5107,7 +5168,7 @@ const APPLY: { [K in Vc8Form['op']]: (fn: FunctionDecl, f: Extract<Vc8Form, { op
   zerolife: doZeroLife,
   nullfault32: doNullfault32,
   swdefault: (fn, f) => { const why = restoreSwitchDefault(fn, f.expr, f.values, f.index, selectTables); if (why) refuse(why); },
-  seq: doSeq, fold: doFold, join: doJoin, coalesce: doCoalesce, recordwalk: doRecordwalk, cache: doCache, own: doOwn, guards: doGuards, 'merge-guards': doMergeGuards,
+  seq: doSeq, fold: doFold, join: doJoin, coalesce: doCoalesce, recordwalk: doRecordwalk, cache: doCache, nullinit: doNullinit, own: doOwn, guards: doGuards, 'merge-guards': doMergeGuards,
   retval: doRetval, branchret: doBranchret, width: doWidth, boolflag: doBoolflag, retwiden: doRetwiden, arms: doArms,
   nest: doNest, 'merge-tail': doMergeTail, tailguard: doTailguard, tailcopy: doTailcopy, continue: doContinue, dup: doDup, tarms: doTarms, zero: doZero, nonzero: doNonzero,
   bool: doBool,
