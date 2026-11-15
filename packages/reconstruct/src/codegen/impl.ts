@@ -3841,6 +3841,7 @@ function transformDecompiledCode(
         structLayouts: context?.funcPtrArgCasts?.structLayouts,
         aggregateSizes: context?.funcPtrArgCasts?.aggregateSizes,
         typedefTargets: context?.funcPtrArgCasts?.typedefTargets,
+        thisName: enclosing.thisName,
       };
     }
     // Masks a MOVZX computed, tagged before any pass reshapes the printed `&`.
