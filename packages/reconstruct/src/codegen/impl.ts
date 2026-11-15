@@ -4605,6 +4605,7 @@ function transformDecompiledCode(
           structLayouts: context?.funcPtrArgCasts?.structLayouts,
           aggregateSizes: context?.funcPtrArgCasts?.aggregateSizes,
           aggregateMembers: context?.funcPtrArgCasts?.aggregateMembers,
+          aggregateSizes: context?.funcPtrArgCasts?.aggregateSizes,
           unionNames: context?.funcPtrArgCasts?.unionNames,
           accessors: context?.accessorTwins,
           ...(context?.funcPtrArgCasts?.outParams ? {

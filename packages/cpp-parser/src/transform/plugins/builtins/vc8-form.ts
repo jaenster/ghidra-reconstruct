@@ -140,6 +140,10 @@ import { builtinTruthSite } from './truth-form-safety.js';
  *   dup(S)               the expression statement S after an if/else (an else-if chain
  *                        with a final else) is written at the end of every arm instead;
  *                        refused when an arm can leave.
+ *                        Also copies a typed pointer-field store immediately before a
+ *                        disjoint field's bare return guard into both paths. The store
+ *                        occurs once per path; volatile/overlapping fields and unstable
+ *                        field-address aliases or value bindings refuse this shape.
  *   hoist(S[,i])         the plain store S that begins the arm of an if with no else is
  *                        written just before the if (the decompiler sinks a store into the
  *                        only branch that reads it; the source as often wrote it above
@@ -423,6 +427,7 @@ import type {
   TypeNode, UnaryExpr, VariableDecl,
 } from '../../../ast/nodes.js';
 import { parse } from '../../../parser/index.js';
+import { duplicateStoreBeforeReturnGuard } from './duplicate-guard-store.js';
 import { emit } from '../../../emit/index.js';
 import { isKeywordString } from '../../../lexer/keywords.js';
 import { cloneNode } from '../../transformer.js';
@@ -524,6 +529,7 @@ export interface Vc8Accessor {
 
 /** The tables vc8-form reads: select-argument's, and the accessors `acc` writes. */
 export type Vc8FormTables = SelectArgumentOptions & RecordWalkTables & {
+  aggregateSizes?: Record<string, number>;
   accessors?: Vc8Accessor[];
   /**
    * Bytes a callee stores through argument `index` (a non-null `&local`) on every path
@@ -2571,6 +2577,7 @@ function doDup(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'dup' }>): void {
       if (s.kind === NodeKind.ExprStmt && text((s as ExprStmt).expression) === w && b.statements[k - 1].kind === NodeKind.IfStmt) hits.push({ b, k });
     }
   }
+  if (hits.length === 0 && duplicateStoreBeforeReturnGuard(fn, w, selectTables)) return;
   if (hits.length !== 1) refuse(`${hits.length} statements ${f.stmt} after an if`);
   const { b, k } = hits[0];
   const arms: Array<{ holder: IfStmt; key: 'thenBranch' | 'elseBranch' }> = [];
