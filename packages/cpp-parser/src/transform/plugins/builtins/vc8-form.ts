@@ -14,6 +14,13 @@ import { builtinTruthSite } from './truth-form-safety.js';
  *
  * The forms (each argument is printed text; whitespace is ignored when comparing):
  *
+ *   precount(C,P)       move C++ from the condition of an empty guarded pointer walk
+ *                        before the getter in its init and update. C is a private,
+ *                        zero-initialized signed word, read only by the final return.
+ *                        Both calls must be proven ordinary nonvolatile pointer-field
+ *                        reads on a non-null argument from the actual callee body.
+ *                        Aliases, conversions, observable counts and unclear guards refuse.
+ *
  *   swdefault(S,K1,...,Kn[,@i]) restore a measured group of missing integral cases
  *                        taking the switch's existing terminal default return. Enum
  *                        aliases and promoted selector ranges are checked; unclear
@@ -437,6 +444,7 @@ import { coalesceLocal } from './copy-coalesce.js';
 import { initializerIsDead } from './store-liveness.js';
 import { recordWalk, type RecordWalkTables } from './record-walk.js';
 import { guardedPostDecrement } from './guarded-post-decrement.js';
+import { precount, type PrecountTables } from './precount.js';
 import { restoreSwitchDefault, switchDefaultValue } from './switch-default.js';
 import { countdownFieldPtrwalk } from './countdown-field-ptrwalk.js';
 
@@ -502,7 +510,8 @@ export type Vc8Form =
   | { op: 'znew'; name: string; size?: string }
   | { op: 'swclamp'; name: string }
   | { op: 'retbase'; param: string; name: string }
-  | { op: 'postdec'; counter: string; name: string };
+  | { op: 'postdec'; counter: string; name: string }
+  | { op: 'precount'; counter: string; cursor: string };
 
 /**
  * A header inline that reads one field of a struct through a pointer, or returns a
@@ -523,7 +532,7 @@ export interface Vc8Accessor {
 }
 
 /** The tables vc8-form reads: select-argument's, and the accessors `acc` writes. */
-export type Vc8FormTables = SelectArgumentOptions & RecordWalkTables & {
+export type Vc8FormTables = SelectArgumentOptions & RecordWalkTables & PrecountTables & {
   accessors?: Vc8Accessor[];
   /**
    * Bytes a callee stores through argument `index` (a non-null `&local`) on every path
@@ -556,7 +565,7 @@ export interface Vc8FormOptions {
 
 const OPS = new Set(['zerolife', 'nullfault32', 'swdefault', 'seq', 'fold', 'join', 'coalesce', 'recordwalk', 'cache', 'own', 'guards', 'merge-guards', 'retval', 'branchret', 'width', 'boolflag', 'retwiden', 'arms',
   'nest', 'merge-tail', 'tailguard', 'tailcopy', 'continue', 'dup', 'tarms', 'zero', 'nonzero', 'bool', 'cmp', 'swap', 'ifsel', 'clamp', 'split', 'select', 'decl', 'unselect', 'tsel', 'hoist',
-  'nestcall', 'fill', 'elems', 'copy', 'shift', 'ptrwalk', 'rowptr', 'acc', 'retvar', 'onecall', 'roundup', 'swmerge', 'switch', 'dec', 'opas', 'range', 'castout', 'signbit', 'nullfield', 'zinit', 'znew', 'swclamp', 'retbase', 'postdec']);
+  'nestcall', 'fill', 'elems', 'copy', 'shift', 'ptrwalk', 'rowptr', 'acc', 'retvar', 'onecall', 'roundup', 'swmerge', 'switch', 'dec', 'opas', 'range', 'castout', 'signbit', 'nullfield', 'zinit', 'znew', 'swclamp', 'retbase', 'postdec', 'precount']);
 
 /** Split at commas outside brackets and parentheses. For cache, the third argument is a
  * type, so commas inside its template arguments also belong to that argument. */
@@ -687,6 +696,8 @@ export function parseVc8Form(text: string): Vc8Form | undefined {
       return { op: 'znew', name: args[0], ...(args.length === 2 ? { size: args[1] } : {}) };
     case 'postdec':
       return !anchor && args.length === 2 && args.every(a => /^[A-Za-z_]\w*$/.test(a) && !isKeywordString(a)) && args[0] !== args[1] ? { op: 'postdec', counter: args[0], name: args[1] } : undefined;
+    case 'precount':
+      return !anchor && args.length === 2 && args.every(a => /^[A-Za-z_]\w*$/.test(a) && !isKeywordString(a)) && args[0] !== args[1] ? { op: 'precount', counter: args[0], cursor: args[1] } : undefined;
     case 'retbase':
       return !anchor && args.length === 2 && args.every(a => /^[A-Za-z_]\w*$/.test(a)) && args[0] !== args[1] ? { op: 'retbase', param: args[0], name: args[1] } : undefined;
     case 'roundup': {
@@ -5123,6 +5134,7 @@ const APPLY: { [K in Vc8Form['op']]: (fn: FunctionDecl, f: Extract<Vc8Form, { op
     if ('why' in result) refuse(result.why);
     else fn.body = result.body;
   },
+  precount: (fn, f) => { const why = precount(fn, f.counter, f.cursor, selectTables); if (why) refuse(why); },
 };
 
 /**

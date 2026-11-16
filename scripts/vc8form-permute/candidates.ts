@@ -28,11 +28,14 @@ import { pathToFileURL } from 'node:url';
 import { parse, emit, NodeKind, applyVc8Forms, definitionOf, parseVc8Form, type Vc8Form } from '../../packages/cpp-parser/dist/index.js';
 import type { ASTNode, FunctionDecl, TranslationUnit } from '../../packages/cpp-parser/dist/index.js';
 import { vc8FormSpec, vc8formBodyHash } from '../../packages/reconstruct/src/codegen/vc8form-spec.js';
-import { normalizeSignatureType } from '../../packages/reconstruct/src/codegen/platform-types.js';
+import { normalizeSignatureType, platformDeclaredFunctionNames } from '../../packages/reconstruct/src/codegen/platform-types.js';
 import { respellPlaceholderType } from '../../packages/reconstruct/src/codegen/placeholder-types.js';
 import { emittedMemberNames } from '../../packages/reconstruct/src/codegen/header.js';
 import { accessorTwins } from '../../packages/reconstruct/src/codegen/accessor-twins.js';
 import { registerEnumTypedefTargets } from '../../packages/reconstruct/src/codegen/enum-width.js';
+import { createNonNullFieldGetterOracle } from '../../packages/reconstruct/src/codegen/non-null-field-getters.js';
+import type { ExtractedDataType, ExtractedFunction } from '../../packages/reconstruct/src/types.js';
+import type { Vc8FormTables } from '../../packages/cpp-parser/dist/index.js';
 import type { Vc8Accessor } from '../../packages/cpp-parser/dist/index.js';
 
 type N = ASTNode & Record<string, any>;
@@ -65,6 +68,7 @@ const body = (tu: TranslationUnit) => emit(tu as never).trimEnd();
 interface Field { name: string; dataType: string; offset: number; size: number; bitSize?: number }
 let structs = new Map<string, { kind: string; fields?: Field[]; typedefOf?: string }>();
 let globals = new Map<string, string>();
+const modelTypes: ExtractedDataType[] = [];
 /** Typedef and enum names to the integer type the tree declares them as (castout reads a return type's width). */
 const typedefTargets: Record<string, string> = {};
 const ambiguousEnumValues = new Set<string>();
@@ -81,6 +85,7 @@ const accTables: {
   structFieldOffsets: Record<string, Record<string, number>>;
   targetLanguageId?: string;
   targetPointerSize?: number;
+  nonNullFieldRead?: Vc8FormTables['nonNullFieldRead'];
 } = { structFields: {}, structLayouts: {}, aggregateMembers: {}, unionNames: [], enumValues: {}, accessors: [], typedefTargets, structFieldOffsets: {} };
 
 function loadTypes(path?: string) {
@@ -95,6 +100,7 @@ function loadTypes(path?: string) {
   for (const l of readFileSync(path, 'utf8').split('\n')) {
     if (!l) continue;
     const t = JSON.parse(l);
+    modelTypes.push(t);
     if (t.kind === 'ENUM' && Array.isArray(t.values)) for (const v of t.values) {
       if (ambiguousEnumValues.has(v.name)) continue;
       const known = accTables.enumValues[v.name];
@@ -130,9 +136,33 @@ async function loadAccessors(typesPath?: string) {
   if (!typesPath) return;
   const path = typesPath.replace(/dataTypes\.ndjson$/, 'functions.ndjson');
   const hosts: any[] = [];
+  const callees: ExtractedFunction[] = [];
+  const needsGetters = !onlyOps || onlyOps.has('precount');
   const rl = createInterface({ input: createReadStream(path) });
-  for await (const l of rl) if (l.includes('"inline-host"')) hosts.push(JSON.parse(l));
+  for await (const l of rl) {
+    if (!l || (!needsGetters && !l.includes('"inline-host"'))) continue;
+    const fn = JSON.parse(l);
+    if (l.includes('"inline-host"')) hosts.push(fn);
+    if (needsGetters) callees.push(fn);
+  }
   accTables.accessors = accessorTwins(hosts, accTables);
+  if (needsGetters) {
+    // Use the production body-proof producer with unambiguous model spellings.
+    // The collector needs no other generator cast tables for this contract.
+    const byKey = new Map<string, ExtractedFunction | null>(), headerOwned = platformDeclaredFunctionNames();
+    for (const fn of callees) {
+      if (!fn.name || fn.platform) continue;
+      const parts = (fn.namespace ? `${fn.namespace}::${fn.name}` : fn.name).split('::');
+      for (let i = 0; i < parts.length; i++) {
+        const key = parts.slice(i).join('::');
+        if (headerOwned.has(key)) continue;
+        const seen = byKey.get(key);
+        byKey.set(key, seen === undefined ? fn : seen && seen.address === fn.address ? seen : null);
+      }
+    }
+    const oracle = createNonNullFieldGetterOracle(new Map([...byKey].filter((e): e is [string, ExtractedFunction] => e[1] !== null)), modelTypes);
+    accTables.nonNullFieldRead = (callee, argc) => oracle.read(callee, argc);
+  }
 }
 
 async function loadGlobals(path?: string) {
@@ -282,6 +312,17 @@ function sites(c: Ctx, maxAnchors: number): string[] {
     while (postUsed.has(name)) name = `nRemaining${k++}`;
     postUsed.add(name);
     out.add(`postdec(${counter},${name})`);
+  }
+
+  // precount: the proof, including the actual callee's non-null body, decides.
+  for (const n of all) {
+    if (n.kind !== NodeKind.ForStmt || !n.condition || !n.init || n.init.kind !== NodeKind.ExprStmt) continue;
+    const cond = unparen(n.condition), init = unparen(n.init.expression);
+    const parts = cond.kind === NodeKind.CommaExpr ? cond.expressions : cond.kind === NodeKind.BinaryExpr && cond.operator === ',' ? [cond.left, cond.right] : [];
+    const inc = parts.length === 2 ? unparen(parts[0]) : undefined;
+    if (!inc || ![NodeKind.UnaryExpr, NodeKind.PostfixExpr].includes(inc.kind) || inc.operator !== '++' || inc.operand.kind !== NodeKind.Identifier
+        || init.kind !== NodeKind.AssignExpr || init.operator !== '=' || init.left.kind !== NodeKind.Identifier) continue;
+    out.add(`precount(${inc.operand.name},${init.left.name})`);
   }
 
   // seq: adjacent stores, every other order of each run of two to four.

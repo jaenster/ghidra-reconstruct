@@ -815,6 +815,7 @@ export interface FuncPtrArgCastTables {
   outParams?: import('./out-params.js').OutParamOracle;
   /** Each callee's reach through each pointer parameter, read from its own body (param-reach.ts). */
   paramReach?: import('./param-reach.js').ParamReachOracle;
+  nonNullFieldGetters?: import('./non-null-field-getters.js').NonNullFieldGetterOracle;
   /** Every enum type name. */
   enumTypes?: string[];
   /** Enums with no negative member: unsigned in Ghidra's type system. */
@@ -4607,6 +4608,12 @@ function transformDecompiledCode(
           aggregateMembers: context?.funcPtrArgCasts?.aggregateMembers,
           unionNames: context?.funcPtrArgCasts?.unionNames,
           accessors: context?.accessorTwins,
+          ...(context?.funcPtrArgCasts?.nonNullFieldGetters ? {
+            nonNullFieldRead: (callee: string, count: number) => {
+              const fact = context.funcPtrArgCasts!.nonNullFieldGetters!.read(callee, count);
+              return fact && !context.overrides?.get(fact.functionAddress) ? fact : null;
+            },
+          } : {}),
           ...(context?.funcPtrArgCasts?.outParams ? {
             outParamWidth: (callee: string, index: number) => context.funcPtrArgCasts!.outParams!.outParamWidthDocumented(callee, index),
             typeSize: (spelling: string) => context.funcPtrArgCasts!.outParams!.typeSize(spelling),

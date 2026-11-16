@@ -1,0 +1,627 @@
+{
+  "provenance": {
+    "source": "dd289669c82a03e993a928b2b0f2c724a1cc731d",
+    "generatorBase": "ad73d788be4614e8a294587afa868afeb5391eba",
+    "recordedAt": "2026-11-16T14:31:21.919Z",
+    "scope": "Current caller/getter metadata and structure fields. This local diagnostic form exercises unmerged support; it is not an approved database tag."
+  },
+  "fn": {
+    "name": "GetUnitCount",
+    "address": "0052dbc0",
+    "entryPoint": "0052dbc0",
+    "signature": "int32_t GetUnitCount(D2UnitStrc * * ppUnitBuckets)",
+    "returnType": "int32_t",
+    "callingConvention": "__cdecl",
+    "size": 62,
+    "isThunk": false,
+    "isExternal": false,
+    "hasVarArgs": false,
+    "namespace": "D2Game::GAME::Server",
+    "comment": "@function GetUnitCount\n@address Game.exe.ram:0052dbc0\n@date 2026.06.09\n@params\n  ppUnitBuckets: EBX:4 (D2UnitStrc * *)\n@description Diablo 2 1.14d reverse team\nhttps://blizzhackers.dev\n\nFunction uses custom registers for function arguments!\n[D2UnitStrc * * ppUnitBuckets@EBX:4]",
+    "sourceFile": null,
+    "sourceLine": null,
+    "sourceInfo": null,
+    "parameters": [
+      {
+        "name": "ppUnitBuckets",
+        "dataType": "D2UnitStrc * *",
+        "size": 4,
+        "ordinal": 0,
+        "storage": "EBX:4",
+        "stackOffset": null,
+        "resolvedType": null
+      }
+    ],
+    "localVariables": [
+      {
+        "name": "nCount",
+        "dataType": "int",
+        "size": 4,
+        "storage": "ESI:4",
+        "stackOffset": null,
+        "resolvedType": "int"
+      },
+      {
+        "name": "nBucketIdx",
+        "dataType": "int",
+        "size": 4,
+        "storage": "EDI:4",
+        "stackOffset": null,
+        "resolvedType": "int"
+      },
+      {
+        "name": "pCurUnit",
+        "dataType": "D2UnitStrc *",
+        "size": 4,
+        "storage": "EAX:4",
+        "stackOffset": null,
+        "resolvedType": "D2UnitStrc *"
+      },
+      {
+        "name": "local_8",
+        "dataType": "uint8_t",
+        "size": 1,
+        "storage": "Stack[-0x8]:1",
+        "stackOffset": -8,
+        "resolvedType": null
+      }
+    ],
+    "tags": [
+      {
+        "type": "llm-typed"
+      },
+      {
+        "type": "llm-artifact-fix"
+      }
+    ],
+    "decompiled": "\n/* WARNING: Enum \"eCollisionFlags\": Some values do not have unique names */\n/* WARNING: Enum \"eD2TimerType\": Some values do not have unique names */\n/* WARNING: Enum \"eD2TimerTypeDWORD\": Some values do not have unique names */\n/* @function GetUnitCount\n   @address Game.exe.ram:0052dbc0\n   @date 2026.06.09\n   @params\n     ppUnitBuckets: EBX:4 (D2UnitStrc * *)\n   @description Diablo 2 1.14d reverse team\n   https://blizzhackers.dev\n   \n   Function uses custom registers for function arguments!\n   [D2UnitStrc * * ppUnitBuckets@EBX:4] */\n\nint32_t __cdecl D2Game::GAME::Server::GetUnitCount(D2UnitStrc **ppUnitBuckets)\n\n{\n  D2UnitStrc *pCurUnit;\n  int nCount;\n  int nBucketIdx;\n  \n  nCount = 0;\n  nBucketIdx = 0;\n  do {\n                    /* The argument is an array of D2UnitStrc */\n    if (ppUnitBuckets[nBucketIdx] != (D2UnitStrc *)0x0) {\n      for (pCurUnit = D2Game::UNIT::SUnit::GetNextUnit(ppUnitBuckets[nBucketIdx]);\n          nCount = nCount + 1, pCurUnit != (D2UnitStrc *)0x0;\n          pCurUnit = D2Game::UNIT::SUnit::GetNextUnit(pCurUnit)) {\n      }\n    }\n    nBucketIdx = nBucketIdx + 1;\n  } while (nBucketIdx < 0x80);\n  return nCount;\n}\n\n"
+  },
+  "getter": {
+    "name": "GetNextUnit",
+    "address": "00552db0",
+    "entryPoint": "00552db0",
+    "signature": "D2UnitStrc * GetNextUnit(D2UnitStrc * pUnit)",
+    "returnType": "D2UnitStrc *",
+    "callingConvention": "__fastcall",
+    "size": 42,
+    "isThunk": false,
+    "isExternal": false,
+    "hasVarArgs": false,
+    "namespace": "D2Game::UNIT::SUnit",
+    "comment": "@function GetNextUnit\n@address Game.exe.ram:00552db0\n@date 2026.06.13\n@calling __fastcall\n@description Diablo 2 1.14d reverse team\nhttps://blizzhackers.dev\n2022.01.09 - dzik",
+    "sourceFile": null,
+    "sourceLine": null,
+    "sourceInfo": null,
+    "parameters": [
+      {
+        "name": "pUnit",
+        "dataType": "D2UnitStrc *",
+        "size": 4,
+        "ordinal": 0,
+        "storage": "ECX:4",
+        "stackOffset": null,
+        "resolvedType": null
+      }
+    ],
+    "localVariables": [
+      {
+        "name": "nAddress",
+        "dataType": "undefined4",
+        "size": 4,
+        "storage": "EAX:4",
+        "stackOffset": null,
+        "resolvedType": "void *"
+      },
+      {
+        "name": "nLine",
+        "dataType": "int32_t",
+        "size": 4,
+        "storage": "HASH:3f7cee57f3:4",
+        "stackOffset": null,
+        "resolvedType": null
+      }
+    ],
+    "tags": [
+      {
+        "type": "halt-returns"
+      },
+      {
+        "type": "llm-type-fix"
+      }
+    ],
+    "decompiled": "\n/* WARNING: Enum \"eCollisionFlags\": Some values do not have unique names */\n/* WARNING: Enum \"eD2TimerType\": Some values do not have unique names */\n/* WARNING: Enum \"eD2TimerTypeDWORD\": Some values do not have unique names */\n/* @function GetNextUnit\n   @address Game.exe.ram:00552db0\n   @date 2026.06.13\n   @calling __fastcall\n   @description Diablo 2 1.14d reverse team\n   https://blizzhackers.dev\n   2022.01.09 - dzik */\n\nD2UnitStrc * __fastcall D2Game::UNIT::SUnit::GetNextUnit(D2UnitStrc *pUnit)\n\n{\n  void *nAddress;\n  int32_t nLine;\n  \n  if (pUnit == (D2UnitStrc *)0x0) {\n    nLine = 0xde;\n    nAddress = Fog::Src::ErrorManager::GetInstructionPointer();\n    Fog::Src::ErrorManager::ERROR_UnrecoverableInternalError_Halt(\"\",nAddress,nLine);\n                    /* WARNING: Subroutine does not return */\n    compiler::exit(-1);\n  }\n  return pUnit->pListNext;\n}\n\n"
+  },
+  "unitType": {
+    "name": "D2UnitStrc",
+    "category": "/",
+    "size": 244,
+    "description": "",
+    "alignment": 1,
+    "type": "structure",
+    "fields": [
+      {
+        "name": "eUnitType",
+        "dataType": "eD2UnitType",
+        "offset": 0,
+        "size": 4,
+        "comment": "0=PLAYER 1=MONSTER 2=OBJECT 3=MISSILE 4=ITEM 5=WARP",
+        "bitOffset": null,
+        "bitSize": null
+      },
+      {
+        "name": "nClassId",
+        "dataType": "int",
+        "offset": 4,
+        "size": 4,
+        "comment": "hcIdx from PlrClass/MonStats/Objects/Missiles/Items/LvlWarps txt",
+        "bitOffset": null,
+        "bitSize": null
+      },
+      {
+        "name": "pMemory",
+        "dataType": "D2PoolManagerStrc *",
+        "offset": 8,
+        "size": 4,
+        "comment": null,
+        "bitOffset": null,
+        "bitSize": null
+      },
+      {
+        "name": "nUnitGUID",
+        "dataType": "int",
+        "offset": 12,
+        "size": 4,
+        "comment": null,
+        "bitOffset": null,
+        "bitSize": null
+      },
+      {
+        "name": "eAnimMode",
+        "dataType": "uD2UnitMode",
+        "offset": 16,
+        "size": 4,
+        "comment": null,
+        "bitOffset": null,
+        "bitSize": null
+      },
+      {
+        "name": "pUnitData",
+        "dataType": "D2UnitDataUnion",
+        "offset": 20,
+        "size": 4,
+        "comment": null,
+        "bitOffset": null,
+        "bitSize": null
+      },
+      {
+        "name": "nAct",
+        "dataType": "eAct",
+        "offset": 24,
+        "size": 1,
+        "comment": null,
+        "bitOffset": null,
+        "bitSize": null
+      },
+      {
+        "name": "unk0x19",
+        "dataType": "byte[3]",
+        "offset": 25,
+        "size": 3,
+        "comment": "alignment padding",
+        "bitOffset": null,
+        "bitSize": null
+      },
+      {
+        "name": "pDrlgAct",
+        "dataType": "D2DrlgActStrc *32",
+        "offset": 28,
+        "size": 4,
+        "comment": null,
+        "bitOffset": null,
+        "bitSize": null
+      },
+      {
+        "name": "sSeed",
+        "dataType": "D2SeedStrc",
+        "offset": 32,
+        "size": 8,
+        "comment": null,
+        "bitOffset": null,
+        "bitSize": null
+      },
+      {
+        "name": "nInitSeed",
+        "dataType": "int",
+        "offset": 40,
+        "size": 4,
+        "comment": null,
+        "bitOffset": null,
+        "bitSize": null
+      },
+      {
+        "name": "pPath",
+        "dataType": "D2PathUnion",
+        "offset": 44,
+        "size": 4,
+        "comment": null,
+        "bitOffset": null,
+        "bitSize": null
+      },
+      {
+        "name": "pAnimSeq",
+        "dataType": "D2AnimSeqStrc *",
+        "offset": 48,
+        "size": 4,
+        "comment": null,
+        "bitOffset": null,
+        "bitSize": null
+      },
+      {
+        "name": "nSeqFrameCount",
+        "dataType": "int",
+        "offset": 52,
+        "size": 4,
+        "comment": null,
+        "bitOffset": null,
+        "bitSize": null
+      },
+      {
+        "name": "nSeqFrame",
+        "dataType": "int",
+        "offset": 56,
+        "size": 4,
+        "comment": null,
+        "bitOffset": null,
+        "bitSize": null
+      },
+      {
+        "name": "nSeqAnimSpeed",
+        "dataType": "uint32_t",
+        "offset": 60,
+        "size": 4,
+        "comment": null,
+        "bitOffset": null,
+        "bitSize": null
+      },
+      {
+        "name": "nSeqMode",
+        "dataType": "uint32_t",
+        "offset": 64,
+        "size": 4,
+        "comment": null,
+        "bitOffset": null,
+        "bitSize": null
+      },
+      {
+        "name": "nGfxCurrentFrame",
+        "dataType": "int",
+        "offset": 68,
+        "size": 4,
+        "comment": "nSeqCurrentFramePrecise - 8-bit fixed point",
+        "bitOffset": null,
+        "bitSize": null
+      },
+      {
+        "name": "nFrameCount",
+        "dataType": "int32_t",
+        "offset": 72,
+        "size": 4,
+        "comment": "frame count in 8-bit fixed point (frames << 8); compared signed (UpdateFrame, AdvanceAnimFrame) and shifted with SAR",
+        "bitOffset": null,
+        "bitSize": null
+      },
+      {
+        "name": "nAnimSpeed",
+        "dataType": "short",
+        "offset": 76,
+        "size": 2,
+        "comment": null,
+        "bitOffset": null,
+        "bitSize": null
+      },
+      {
+        "name": "nActionFrame",
+        "dataType": "byte",
+        "offset": 78,
+        "size": 1,
+        "comment": null,
+        "bitOffset": null,
+        "bitSize": null
+      },
+      {
+        "name": "unk0x4F",
+        "dataType": "byte",
+        "offset": 79,
+        "size": 1,
+        "comment": "alignment padding",
+        "bitOffset": null,
+        "bitSize": null
+      },
+      {
+        "name": "pAnimData",
+        "dataType": "D2AnimDataRecordStrc *",
+        "offset": 80,
+        "size": 4,
+        "comment": null,
+        "bitOffset": null,
+        "bitSize": null
+      },
+      {
+        "name": "pGfxInfo",
+        "dataType": "D2GfxInfoStrc *",
+        "offset": 84,
+        "size": 4,
+        "comment": null,
+        "bitOffset": null,
+        "bitSize": null
+      },
+      {
+        "name": "pGfxDataCopy",
+        "dataType": "undefined *",
+        "offset": 88,
+        "size": 4,
+        "comment": "D2GfxDataStrc* - copy of pGfxInfo",
+        "bitOffset": null,
+        "bitSize": null
+      },
+      {
+        "name": "pStatsEx",
+        "dataType": "D2StatListExStrc *",
+        "offset": 92,
+        "size": 4,
+        "comment": null,
+        "bitOffset": null,
+        "bitSize": null
+      },
+      {
+        "name": "pInventory",
+        "dataType": "D2InventoryStrc *",
+        "offset": 96,
+        "size": 4,
+        "comment": null,
+        "bitOffset": null,
+        "bitSize": null
+      },
+      {
+        "name": "uSideData",
+        "dataType": "D2UnionData0x64",
+        "offset": 100,
+        "size": 48,
+        "comment": "server/client union 0x64-0x90",
+        "bitOffset": null,
+        "bitSize": null
+      },
+      {
+        "name": "eOwnerType",
+        "dataType": "eD2UnitType",
+        "offset": 148,
+        "size": 4,
+        "comment": null,
+        "bitOffset": null,
+        "bitSize": null
+      },
+      {
+        "name": "nOwnerGUID",
+        "dataType": "uint32_t",
+        "offset": 152,
+        "size": 4,
+        "comment": null,
+        "bitOffset": null,
+        "bitSize": null
+      },
+      {
+        "name": "eKillerType",
+        "dataType": "eD2UnitType",
+        "offset": 156,
+        "size": 4,
+        "comment": null,
+        "bitOffset": null,
+        "bitSize": null
+      },
+      {
+        "name": "nKillerGUID",
+        "dataType": "uint32_t",
+        "offset": 160,
+        "size": 4,
+        "comment": null,
+        "bitOffset": null,
+        "bitSize": null
+      },
+      {
+        "name": "pHoverText",
+        "dataType": "D2HoverTextStrc *",
+        "offset": 164,
+        "size": 4,
+        "comment": null,
+        "bitOffset": null,
+        "bitSize": null
+      },
+      {
+        "name": "pSkillsList",
+        "dataType": "D2SkillListStrc *",
+        "offset": 168,
+        "size": 4,
+        "comment": null,
+        "bitOffset": null,
+        "bitSize": null
+      },
+      {
+        "name": "pCombat",
+        "dataType": "undefined *",
+        "offset": 172,
+        "size": 4,
+        "comment": "D2CombatStrc*",
+        "bitOffset": null,
+        "bitSize": null
+      },
+      {
+        "name": "dwLastHitClass",
+        "dataType": "uint32_t",
+        "offset": 176,
+        "size": 4,
+        "comment": null,
+        "bitOffset": null,
+        "bitSize": null
+      },
+      {
+        "name": "unk0xB4",
+        "dataType": "uint32_t",
+        "offset": 180,
+        "size": 4,
+        "comment": "unknown",
+        "bitOffset": null,
+        "bitSize": null
+      },
+      {
+        "name": "dwDropItemCode",
+        "dataType": "uint32_t",
+        "offset": 184,
+        "size": 4,
+        "comment": "4CC item code set by quest/object systems e.g. ' 2mc' ' bks'",
+        "bitOffset": null,
+        "bitSize": null
+      },
+      {
+        "name": "unk0xBC",
+        "dataType": "uint32_t",
+        "offset": 188,
+        "size": 4,
+        "comment": "unknown[0]",
+        "bitOffset": null,
+        "bitSize": null
+      },
+      {
+        "name": "unk0xC0",
+        "dataType": "uint32_t",
+        "offset": 192,
+        "size": 4,
+        "comment": "unknown[1]",
+        "bitOffset": null,
+        "bitSize": null
+      },
+      {
+        "name": "eUnitFlags",
+        "dataType": "eD2UnitFlags",
+        "offset": 196,
+        "size": 4,
+        "comment": "dwFlags",
+        "bitOffset": null,
+        "bitSize": null
+      },
+      {
+        "name": "eUnitFlagsEx",
+        "dataType": "eD2UnitFlagsEx",
+        "offset": 200,
+        "size": 4,
+        "comment": "dwFlagEx",
+        "bitOffset": null,
+        "bitSize": null
+      },
+      {
+        "name": "pUnused0xCC",
+        "dataType": "undefined *",
+        "offset": 204,
+        "size": 4,
+        "comment": "may be quest related",
+        "bitOffset": null,
+        "bitSize": null
+      },
+      {
+        "name": "nNodeTableIndex",
+        "dataType": "int",
+        "offset": 208,
+        "size": 4,
+        "comment": "dwNodeIndex",
+        "bitOffset": null,
+        "bitSize": null
+      },
+      {
+        "name": "dwTickCount",
+        "dataType": "uint32_t",
+        "offset": 212,
+        "size": 4,
+        "comment": null,
+        "bitOffset": null,
+        "bitSize": null
+      },
+      {
+        "name": "pServerCmd",
+        "dataType": "D2ServerCmdStrc *",
+        "offset": 216,
+        "size": 4,
+        "comment": "dwSrvTickCount(server) / pPacketList(client)",
+        "bitOffset": null,
+        "bitSize": null
+      },
+      {
+        "name": "pTimerList",
+        "dataType": "D2TimerStrc *",
+        "offset": 220,
+        "size": 4,
+        "comment": "head of this unit's timer list (D2TimerStrc.pNextTimerOnUnit chain)",
+        "bitOffset": null,
+        "bitSize": null
+      },
+      {
+        "name": "pChangeNextUnit",
+        "dataType": "D2UnitStrc *",
+        "offset": 224,
+        "size": 4,
+        "comment": "pUnitNext_0 - change list next",
+        "bitOffset": null,
+        "bitSize": null
+      },
+      {
+        "name": "pListNext",
+        "dataType": "D2UnitStrc *",
+        "offset": 228,
+        "size": 4,
+        "comment": "pUnitNext - hash table next",
+        "bitOffset": null,
+        "bitSize": null
+      },
+      {
+        "name": "pRoomNext",
+        "dataType": "D2UnitStrc *",
+        "offset": 232,
+        "size": 4,
+        "comment": "pRoomFirstUnit - room unit list next",
+        "bitOffset": null,
+        "bitSize": null
+      },
+      {
+        "name": "pMsgFirst",
+        "dataType": "D2SUnitMsgStrc *",
+        "offset": 236,
+        "size": 4,
+        "comment": "SUnitMsgActual",
+        "bitOffset": null,
+        "bitSize": null
+      },
+      {
+        "name": "pMsgLast",
+        "dataType": "D2SUnitMsgStrc *",
+        "offset": 240,
+        "size": 4,
+        "comment": "SUnitMsgQueue",
+        "bitOffset": null,
+        "bitSize": null
+      }
+    ],
+    "values": null,
+    "underlyingType": null,
+    "returnType": null,
+    "parameters": null,
+    "callingConvention": null,
+    "effectiveCallingConvention": null,
+    "hasUnknownCallingConvention": null,
+    "hasVarArgs": false,
+    "kind": "STRUCTURE"
+  },
+  "options": {
+    "transformPreset": "full"
+  },
+  "tag": "precount(nCount,pCurUnit);ev=096733d633;bh=62-8c68b7e9;dh=7f0b2946",
+  "baseline": "// 1.14d: 0052dbc0\nstatic int32_t GetUnitCount(D2UnitStrc * * ppUnitBuckets) {\n    D2UnitStrc* pCurUnit;\n    int nCount = 0;\n    int nBucketIdx = 0;\n    do {\n      /* The argument is an array of D2UnitStrc */ if (ppUnitBuckets[nBucketIdx]) {\n        for (pCurUnit = D2Game::UNIT::SUnit::GetNextUnit(ppUnitBuckets[nBucketIdx]); nCount++ , pCurUnit != 0; pCurUnit = D2Game::UNIT::SUnit::GetNextUnit(pCurUnit)) {}\n      }\n\n      nBucketIdx++;\n    } while (nBucketIdx < 0x80);\n\n    return nCount;\n}",
+  "candidate": "// 1.14d: 0052dbc0\nstatic int32_t GetUnitCount(D2UnitStrc * * ppUnitBuckets) {\n    D2UnitStrc* pCurUnit;\n    int nCount = 0;\n    int nBucketIdx = 0;\n    do {\n      /* The argument is an array of D2UnitStrc */ if (ppUnitBuckets[nBucketIdx]) {\n        for (nCount++, pCurUnit = D2Game::UNIT::SUnit::GetNextUnit(ppUnitBuckets[nBucketIdx]); pCurUnit != 0; nCount++, pCurUnit = D2Game::UNIT::SUnit::GetNextUnit(pCurUnit)) {}\n      }\n\n      nBucketIdx++;\n    } while (nBucketIdx < 0x80);\n\n    return nCount;\n}"
+}
