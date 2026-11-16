@@ -355,3 +355,24 @@ describe('compare-form in codegen', () => {
     assert.doesNotMatch(out, /0x1450/);
   });
 });
+
+describe('a masked equality read by a signed Jcc', () => {
+  const masked = (p: Omit<Partial<CompareSite>, 'user'> & { user: string; text: string; opcode: string }) =>
+    site({ k: 0n, size: 8, width: 1, fp: ['e', 'c:0'], bKind: 'bit', setter: { at: '004e14fd', mnemonic: 'TEST' }, ...p });
+  // SKILLSMON_CreateMissileWithSeed 004e14d0: TEST AL,3; JLE, printed `(nSeedLow & 3) != 0`.
+  it('decides TEST x,mask; JLE as a signed > 0', () => {
+    const d = decide(masked({ text: '!=', opcode: 'INT_NOTEQUAL', user: 'JLE' }))!;
+    assert.deepStrictEqual({ op: d.op, signed: d.signed, masked: d.masked, width: d.width, swap: d.swap }, { op: '>', signed: true, masked: true, width: 1, swap: false });
+  });
+  it('decides == 0 as <= 0, and a SETG as a set', () => {
+    assert.strictEqual(decide(masked({ text: '==', opcode: 'INT_EQUAL', user: 'JG' }))!.op, '<=');
+    const s = decide(masked({ text: '!=', opcode: 'INT_NOTEQUAL', user: 'SETG', width: 4 }))!;
+    assert.strictEqual(s.op, '>'); assert.strictEqual(s.set, true);
+  });
+  it('gives an equality Jcc, an unsigned one, a CMP or a TEST x,x no masked decision', () => {
+    for (const user of ['JZ', 'JNZ', 'JBE', 'JL', 'JGE']) assert.notStrictEqual(decide(masked({ text: '!=', opcode: 'INT_NOTEQUAL', user }))?.masked, true, user);
+    assert.notStrictEqual(decide(masked({ text: '!=', opcode: 'INT_NOTEQUAL', user: 'JLE', bKind: 'z' }))?.masked, true);
+    assert.notStrictEqual(decide(masked({ text: '!=', opcode: 'INT_NOTEQUAL', user: 'JLE', setter: { at: '0', mnemonic: 'CMP' } }))?.masked, true);
+    assert.notStrictEqual(decide(masked({ text: '!=', opcode: 'INT_NOTEQUAL', user: 'JLE', k: 1n }))?.masked, true);
+  });
+});

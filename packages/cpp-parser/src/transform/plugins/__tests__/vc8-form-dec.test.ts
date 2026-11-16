@@ -82,4 +82,41 @@ describe('vc8-form dec: Rule 3 of Redivivus #241', () => {
     assert.ok(site.applied, site.why);
     assert.strictEqual(out, 'int f() { int v = get(); v -= 1; if (v > 0 && ready()) set(v); return 0; }');
   });
+
+  // Live Win Ghidra 005c6530 ITEMEVENT_BloodGolemLifeSteal (Redivivus #536): the leech
+  // amount minus the owner's heal is computed once, ahead of the owner test.
+  describe('a local amount', () => {
+    const golem = 'int f(void *pOwner) { int32_t v = get(); int32_t k = heal(v); if (pOwner && v - k > 0) { add(pOwner, v - k); } return 1; }';
+    it('parses a local name as the amount', () => {
+      assert.deepStrictEqual(parseVc8Form('dec(nLeechDmg,nOwnerHealAmt)'), { op: 'dec', name: 'nLeechDmg', amount: 0, by: 'nOwnerHealAmt' });
+      for (const tag of ['dec(v,v)', 'dec(v,int)', 'dec(v,p->k)']) assert.strictEqual(parseVc8Form(tag), undefined, tag);
+    });
+    it('decrements by the local before a pure owner test', () => {
+      const { out, site } = run(golem, 'dec(v,k)');
+      assert.ok(site.applied, site.why);
+      assert.strictEqual(out, 'int f(void* pOwner) { int32_t v = get(); int32_t k = heal(v); v -= k; if (pOwner && v > 0) { add(pOwner, v); } return 1; }');
+    });
+    it('accepts int and int32_t as one type', () => {
+      const { site } = run(golem.replace('int32_t k', 'int k'), 'dec(v,k)');
+      assert.ok(site.applied, site.why);
+    });
+    const refusesK = (source: string) => {
+      const { out, site } = run(source, 'dec(v,k)');
+      assert.strictEqual(site.applied, false, out);
+      assert.strictEqual(out, flat(emit(parse(source) as AnyNode)));
+    };
+    it('refuses an amount of another signedness or width', () => {
+      refusesK(golem.replace('int32_t k', 'uint32_t k'));
+      refusesK(golem.replace('int32_t k', 'short k'));
+    });
+    it('refuses an amount stored after the decrement, escaped, or a parameter', () => {
+      refusesK('int f(void *pOwner) { int32_t v = get(); int32_t k = heal(v); if (pOwner && v - k > 0) { k = 0; add(pOwner, v - k); } return 1; }');
+      refusesK('int f(void *pOwner) { int32_t v = get(); int32_t k = heal(v); keep(&k); if (pOwner && v - k > 0) { add(pOwner, v - k); } return 1; }');
+      refusesK('int f(void *pOwner, int32_t k) { int32_t v = get(); if (pOwner && v - k > 0) { add(pOwner, v - k); } return 1; }');
+    });
+    it('refuses an impure or V-reading arm before the first read', () => {
+      refusesK('int f(void *pOwner) { int32_t v = get(); int32_t k = heal(v); if (ready() && v - k > 0) { add(pOwner, v - k); } return 1; }');
+      refusesK('int f(void *pOwner) { int32_t v = get(); int32_t k = heal(v); if (v && v - k > 0) { add(pOwner, v - k); } return 1; }');
+    });
+  });
 });
