@@ -167,6 +167,27 @@ import { builtinTruthSite } from './truth-form-safety.js';
  *                        jumps back into (Q05_Callback13_PlayerStartedGame 00595860,
  *                        `je 005958b0`). Refused when the arm always leaves, T holds a
  *                        label or a static declaration, or C may compare floating point.
+ *   swtail(S[,i])        the switch on S followed by the rest T of its block, which ends in
+ *                        a return (or is the end of a void function), is written with T and
+ *                        a `return;` in place of every `break;` that leaves the switch, and T
+ *                        after it goes: the switch counterpart of tailcopy. Blizzard wrote
+ *                        the tail in each case; VC8 cross-jumps the copies, keeps one, and
+ *                        the other cases jump back into it after loading what differs
+ *                        (RENDERER_GLIDE_SetDrawMode 0050abf0, case 4 `mov ecx, 3; jmp
+ *                        0050ac0e`). A 32-bit int local the decompiler merged the cases'
+ *                        values into - declared without a value, stored only an int
+ *                        literal once in each breaking case after its last label, read
+ *                        only in T - is written as that literal in each copy, and goes.
+ *                        Refused unless the switch has a default and its last statement
+ *                        leaves, every break out of it is a whole case statement, and T
+ *                        holds no label, declaration of its own, static or break.
+ *   andguard(Q[,i])      `if (P) { D if (Q) X S } else E`, X always leaving and D only
+ *                        declarations without a value that only X names, is written
+ *                        `if (P && Q) { D X } if (P) { S } else E` (no if when S and E are
+ *                        empty): the test VC8 makes back to back (UI_FormatPlayerNameAnd-
+ *                        Status 00452af0, `test esi, esi` then the mode compare). P is
+ *                        evaluated again where Q is false: refused unless P reads only
+ *                        nonvolatile locals and constants and Q calls and stores nothing.
  *   continue(C[,i])      the guard `if (C) J` that ends a loop body is written
  *                        `if (!C) continue;` followed by J's statements.
  *   select(C[,i])        the guard `if (C) return A;` followed by its block's last
@@ -214,6 +235,12 @@ import { builtinTruthSite } from './truth-form-safety.js';
  *                        known integer type of at most 32 bits.
  *   ifsel(V)             `V = C ? A : B;` (or the declaration of V so initialized) is
  *                        written `if (C) { V = A; } else { V = B; }`.
+ *   sel(V[,i])           the inverse: `if (C) { V = A; } else { V = B; }` is written
+ *                        `V = C ? A : B;`. Either way only the chosen value is evaluated;
+ *                        V must be a local or parameter of an integer type of at most 32
+ *                        bits and A and B integers of at most 32 bits, so the select's
+ *                        common type changes nothing V stores (UI_FormatPlayerNameAndStatus
+ *                        00452af0, with tarms). Without i the only such if on V.
  *   clamp(V[,i])         the i-th adjacent `V = E; if (V op L) V = L;` (also a
  *                        declaration initialized from E) is written as one select
  *                        `V = E !op L ? E : L;`. Without i, only one site may fit.
@@ -500,6 +527,9 @@ export type Vc8Form =
   | { op: 'merge-tail'; cond: string; index: number }
   | { op: 'tailguard'; cond: string; index: number }
   | { op: 'tailcopy'; cond: string; index: number }
+  | { op: 'swtail'; expr: string; index: number }
+  | { op: 'andguard'; cond: string; index: number }
+  | { op: 'sel'; name: string; index: number }
   | { op: 'continue'; cond: string; index: number }
   | { op: 'dup'; stmt: string }
   | { op: 'hoist'; stmt: string; index: number }
@@ -593,7 +623,7 @@ export interface Vc8FormOptions {
 
 const OPS = new Set(['zerolife', 'nullfault32', 'swdefault', 'seq', 'movestore', 'sinkstore', 'fold', 'join', 'coalesce', 'recordwalk', 'cache', 'own', 'guards', 'merge-guards', 'retval', 'branchret', 'width', 'boolflag', 'retwiden', 'arms',
   'nest', 'merge-tail', 'tailguard', 'tailcopy', 'continue', 'dup', 'tarms', 'zero', 'nonzero', 'bool', 'cmp', 'swap', 'ifsel', 'clamp', 'split', 'select', 'decl', 'unselect', 'tsel', 'hoist',
-  'nestcall', 'fill', 'elems', 'copy', 'shift', 'ptrwalk', 'rowptr', 'acc', 'retvar', 'onecall', 'roundup', 'swmerge', 'switch', 'dec', 'opas', 'range', 'castout', 'signbit', 'nullfield', 'zinit', 'znew', 'swclamp', 'retbase', 'postdec']);
+  'nestcall', 'fill', 'elems', 'copy', 'shift', 'ptrwalk', 'rowptr', 'acc', 'retvar', 'onecall', 'roundup', 'swmerge', 'switch', 'dec', 'opas', 'range', 'castout', 'signbit', 'nullfield', 'zinit', 'znew', 'swclamp', 'retbase', 'postdec', 'swtail', 'andguard', 'sel']);
 
 /** Split at commas outside brackets and parentheses. For cache, the third argument is a
  * type, so commas inside its template arguments also belong to that argument. */
@@ -708,7 +738,7 @@ export function parseVc8Form(text: string): Vc8Form | undefined {
       if (anchor || args.length < 1 || args.length > 2 || !(i >= 0) || !/^[A-Za-z_]\w*$/.test(args[0])) return undefined;
       return { op: m[1], name: args[0], index: i } as Vc8Form;
     }
-    case 'nest': case 'merge-tail': case 'tailguard': case 'tailcopy': case 'continue': case 'select': case 'tsel': {
+    case 'nest': case 'merge-tail': case 'tailguard': case 'tailcopy': case 'continue': case 'select': case 'tsel': case 'andguard': {
       const i = int(args[1], 1);
       if (anchor || args.length < 1 || args.length > 2 || !(i >= 1) || args[0] === '') return undefined;
       return { op: m[1], cond: args[0], index: i } as Vc8Form;
@@ -780,6 +810,16 @@ export function parseVc8Form(text: string): Vc8Form | undefined {
       return { op: 'hoist', stmt: args[0], index: i };
     }
     case 'ifsel': return args.length === 1 && !anchor ? { op: 'ifsel', name: args[0] } : undefined;
+    case 'sel': {
+      const i = int(args[1], 0);
+      return !anchor && args.length >= 1 && args.length <= 2 && /^[A-Za-z_]\w*$/.test(args[0]) && !isKeywordString(args[0]) && i >= 0
+        ? { op: 'sel', name: args[0], index: i } : undefined;
+    }
+    case 'swtail': {
+      const i = int(args[1], 1);
+      if (anchor || args.length < 1 || args.length > 2 || !(i >= 1) || args[0] === '') return undefined;
+      return { op: 'swtail', expr: args[0], index: i };
+    }
     case 'clamp': {
       const i = int(args[1], 0);
       return !anchor && args.length >= 1 && args.length <= 2 && /^[A-Za-z_$][\w$]*$/.test(args[0]) && i >= 0
@@ -2547,6 +2587,259 @@ function doTailcopy(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'tailcopy' }>): 
   if (last.kind !== NodeKind.ReturnStmt) copy.push({ kind: NodeKind.ReturnStmt } as unknown as Statement);
   const guard = { ...s, condition: negateWrap(s.condition), thenBranch: { kind: NodeKind.CompoundStmt, statements: copy } as unknown as CompoundStmt } as IfStmt;
   b.statements.splice(k, 1, guard, asBlock(s.thenBranch));
+}
+
+/** The statement under a run of case, default and goto labels, and the label that holds it. */
+function underLabels(s: Statement): { holder?: { statement: Statement }; stmt: Statement } {
+  let holder: { statement: Statement } | undefined;
+  let cur = s;
+  while (cur.kind === NodeKind.CaseStmt || cur.kind === NodeKind.DefaultStmt || cur.kind === NodeKind.LabelStmt) {
+    holder = cur as unknown as { statement: Statement };
+    cur = holder.statement;
+  }
+  return { holder, stmt: cur };
+}
+
+const labeled = (s: Statement) => s.kind === NodeKind.CaseStmt || s.kind === NodeKind.DefaultStmt || s.kind === NodeKind.LabelStmt;
+
+/** Whether a statement of a switch body ends its path: what is under its labels leaves. */
+const endsPath = (s: Statement) => { const u = underLabels(s).stmt; return JUMPS.has(u.kind) || leaves(u) || noReturnCall(u); };
+
+/** The `int` spellings a literal of type int stands in for without a conversion. */
+const PLAIN_INT = new Set(['int', 'int32_t', 'signedint', 'signed', 'INT']);
+
+/** A plain `int` literal (or its negation), within int. */
+function intLiteral(e: Expression): boolean {
+  const x = unparen(e);
+  if (x.kind === NodeKind.IntegerLiteral) return !(x as IntegerLiteralExpr).suffix && (x as IntegerLiteralExpr).value <= 0x7fffffffn;
+  return x.kind === NodeKind.UnaryExpr && (x as UnaryExpr).operator === '-' && intLiteral((x as UnaryExpr).operand);
+}
+
+/** Copy the tail after a switch into every case that breaks into it. */
+function doSwtail(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'swtail' }>): void {
+  const w = norm(f.expr);
+  let seen = 0;
+  let site: { b: CompoundStmt; k: number; s: SwitchStmt } | undefined;
+  for (const b of blocks(fn)) {
+    for (let k = 0; k < b.statements.length && !site; k++) {
+      const s = b.statements[k];
+      if (s.kind === NodeKind.SwitchStmt && text((s as SwitchStmt).condition) === w && ++seen === f.index) site = { b, k, s: s as SwitchStmt };
+    }
+    if (site) break;
+  }
+  if (!site) refuse(`no switch #${f.index} on ${f.expr}`);
+  const { b, k, s } = site!;
+  if (s.init) refuse('the switch has an init statement');
+  if (s.body.kind !== NodeKind.CompoundStmt) refuse('the switch body is no block');
+  const list = (s.body as CompoundStmt).statements;
+  const tail = b.statements.slice(k + 1);
+  if (tail.length === 0) refuse('nothing follows the switch');
+  const last = tail[tail.length - 1];
+  const voidEnd = b === fn.body && text(fn.returnType) === 'void';
+  if (last.kind !== NodeKind.ReturnStmt && !voidEnd) refuse('the block does not end in a return');
+  const why = movable(tail, false);
+  if (why) refuse(why);
+  if (tail.some(t => [...walk(t)].some(({ node }) => node.kind === NodeKind.VariableDecl
+    && (node as VariableDecl).specifiers.some(x => x === 'static' || x === 'extern')))) refuse('the tail declares a static');
+  // A break in the tail would leave the switch instead of its loop.
+  if (tail.some(breaksOut)) refuse('the tail breaks out of a loop');
+  // Only the breaks reach the tail: an unmatched value goes to the default, and the last
+  // statement does not fall out of the switch.
+  if (!list.some(x => { for (let c = x; labeled(c); c = (c as unknown as { statement: Statement }).statement) if (c.kind === NodeKind.DefaultStmt) return true; return false; }))
+    refuse('the switch has no default: an unmatched value reaches the tail');
+  if (list.length === 0 || !endsPath(list[list.length - 1])) refuse('the last case falls out of the switch');
+  const own = new Set<ASTNode>();
+  for (const { node } of walk(s.body)) if (LOOPS.has(node.kind)) for (const { node: c } of walk(node)) if (c !== node) own.add(c);
+  const breaks = [...walk(s.body)].map(x => x.node).filter(n => n.kind === NodeKind.BreakStmt && !own.has(n));
+  const at: number[] = [];
+  for (const br of breaks) {
+    const j = list.findIndex(x => underLabels(x).stmt === br);
+    if (j < 0) refuse('a break leaves the switch from inside a statement');
+    at.push(j);
+  }
+  if (at.length === 0) refuse('no case breaks into the tail');
+
+  // The merged local: an int stored one literal per breaking case, read only in the tail.
+  const folds = new Map<string, Map<number, number>>(); // name -> break index -> store index
+  const tailNames = new Set<string>();
+  for (const t of tail) for (const n of identifiers(t)) tailNames.add(n);
+  const stored = new Set<string>();
+  for (const t of tail) for (const n of storedNames(t)) stored.add(n);
+  for (const v of tailNames) {
+    if (stored.has(v) || addressTaken(fn, v)) continue;
+    if (fn.parameters.some(p => isId((p as unknown as { name?: Identifier | null }).name, v))) continue;
+    const decls = [...walk(fn.body!)].filter(x => x.node.kind === NodeKind.VariableDecl && (x.node as VariableDecl).name.name === v);
+    if (decls.length !== 1) continue;
+    const d = decls[0].node as VariableDecl;
+    if (d.initializer || d.specifiers.length > 0 || !PLAIN_INT.has(text(d.type))) continue;
+    if (!fn.body!.statements.some(x => declOf(x) === d)) continue;
+    // Each breaking case stores v once, after its last label, and nothing else names it.
+    const where = new Map<number, number>();
+    const counted = new Set<Statement>();
+    let ok = true;
+    for (const j of at) {
+      let from = j;
+      while (from > 0 && !endsPath(list[from - 1])) from--;
+      let st = -1;
+      for (let q = from; q <= j && ok; q++) {
+        // A label after the store is a way into the case that skips it.
+        if (labeled(list[q]) && st >= 0) { ok = false; break; }
+        if (q === j) break;
+        const u = underLabels(list[q]).stmt;
+        if (!mentions(u, v)) continue;
+        const a = storeOf(u);
+        if (st >= 0 || !a || a.operator !== '=' || !isId(unparen(a.left), v) || !intLiteral(a.right)) { ok = false; break; }
+        st = q;
+        counted.add(list[q]);
+      }
+      if (!ok || st < 0) { ok = false; break; }
+      where.set(j, st);
+    }
+    if (!ok) continue;
+    // No other mention: the declaration, the counted stores and the tail only.
+    let others = 0;
+    for (const { node, slot } of walk(fn.body!)) {
+      if (!isId(node, v)) continue;
+      const owner = slot && !Array.isArray(slot.parent) ? (slot.parent as unknown as ASTNode) : undefined;
+      if (owner === d) continue;
+      others++;
+    }
+    let known = counted.size;
+    for (const t of tail) for (const { node } of walk(t)) if (isId(node, v)) known++;
+    if (others !== known) continue;
+    folds.set(v, where);
+  }
+  if (folds.size > 1) refuse('more than one local is merged into the tail');
+
+  const copyFor = (j: number): Statement[] => {
+    const copy = tail.map(t => cloneNode(t) as Statement);
+    if (last.kind !== NodeKind.ReturnStmt) copy.push({ kind: NodeKind.ReturnStmt } as unknown as Statement);
+    for (const [v, where] of folds) {
+      const value = (storeOf(underLabels(list[where.get(j)!]).stmt)!).right;
+      for (const c of copy) for (const { node, slot } of [...walk(c)]) if (slot && isId(node, v)) put(slot, cloneNode(value));
+    }
+    return copy;
+  };
+  // From the last break backwards, so the indexes before it stay.
+  for (const j of [...at].sort((x, y) => y - x)) {
+    const copy = copyFor(j);
+    const { holder } = underLabels(list[j]);
+    if (holder) { holder.statement = copy[0]; list.splice(j + 1, 0, ...copy.slice(1)); }
+    else list.splice(j, 1, ...copy);
+    for (const [, where] of folds) {
+      const q = where.get(j)!;
+      const u = underLabels(list[q]);
+      if (u.holder) { u.holder.statement = list[q + 1]; list.splice(q + 1, 1); }
+      else list.splice(q, 1);
+    }
+  }
+  b.statements.splice(k + 1);
+  for (const v of folds.keys()) if (!mentionsOutsideDecl(fn, v)) removeDecl(fn, v);
+}
+
+/** A condition that reads only nonvolatile locals and constants, so evaluating it again gives the same value. */
+function reevaluable(fn: FunctionDecl, e: Expression): boolean {
+  const locals = localNames(fn);
+  const volatile = new Set<string>();
+  for (const { node } of walk(fn)) {
+    if (node.kind !== NodeKind.VariableDecl && node.kind !== NodeKind.ParameterDecl) continue;
+    const d = node as unknown as { name?: Identifier | null; type: TypeNode; specifiers?: string[] };
+    if (d.name && (/\bvolatile\b/.test(emit(d.type as never)) || d.specifiers?.includes('volatile') || d.specifiers?.includes('static'))) volatile.add(d.name.name);
+  }
+  const ok = (x: Expression): boolean => {
+    x = unparen(x);
+    switch (x.kind) {
+      case NodeKind.Identifier: return locals.has((x as Identifier).name) && !volatile.has((x as Identifier).name);
+      case NodeKind.IntegerLiteral: case NodeKind.CharLiteral: case NodeKind.BoolLiteral: case NodeKind.NullptrLiteral: return true;
+      case NodeKind.CStyleCastExpr: return ok((x as CStyleCastExpr).expression);
+      case NodeKind.UnaryExpr: return ['!', '-', '~'].includes((x as UnaryExpr).operator) && ok((x as UnaryExpr).operand);
+      case NodeKind.BinaryExpr: {
+        const b = x as BinaryExpr;
+        return ['==', '!=', '<', '<=', '>', '>=', '&&', '||', '&', '|', '^', '+', '-'].includes(b.operator) && ok(b.left) && ok(b.right);
+      }
+    }
+    return false;
+  };
+  return ok(e);
+}
+
+/** Lift a nested leaving guard into `P && Q`. */
+function doAndguard(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'andguard' }>): void {
+  const { b, k, s } = nthIf(fn, f.cond, f.index);
+  if (s.isConstexpr) refuse('the if is constexpr');
+  const parents = parentsOf(fn);
+  const outer = parents.get(b);
+  if (!outer || outer.kind !== NodeKind.IfStmt || (outer as IfStmt).thenBranch !== b) refuse('the if is not in the arm of an outer if');
+  const o = outer as IfStmt;
+  if (o.init || o.isConstexpr) refuse('the outer if has an init or is constexpr');
+  const ob = parents.get(o);
+  if (!ob || ob.kind !== NodeKind.CompoundStmt) refuse('the outer if is not in a block');
+  const os = (ob as CompoundStmt).statements;
+  const ok = os.indexOf(o);
+  if (ok < 0) refuse('the outer if is not in a block');
+  if (!leaves(s.thenBranch)) refuse('the guarded arm does not always leave');
+  const why = movable(stmtsOf(s.thenBranch), true);
+  if (why) refuse(why);
+  const decls = b.statements.slice(0, k);
+  const rest = b.statements.slice(k + 1);
+  for (const x of decls) {
+    if (x.kind !== NodeKind.DeclStmt) refuse('a statement other than a declaration comes before the guard');
+    for (const dd of (x as DeclStmt).declarations) {
+      if (dd.kind !== NodeKind.VariableDecl) refuse('a declaration that is no variable comes before the guard');
+      const d = dd as VariableDecl;
+      if (d.initializer || d.specifiers.length > 0) refuse(`${d.name.name} is declared with a value or a specifier`);
+      if (mentions(s.condition, d.name.name) || rest.some(r => mentions(r, d.name.name)) || (o.elseBranch && mentions(o.elseBranch, d.name.name)))
+        refuse(`${d.name.name} is named outside the guarded arm`);
+    }
+  }
+  if (!reevaluable(fn, o.condition)) refuse('the outer condition may not give the same value twice');
+  if (effects(s.condition)) refuse('the guard condition calls or stores');
+  const p = unparen(o.condition);
+  const wrap = (e: Expression) => (e.kind === NodeKind.BinaryExpr && ['||', '?', '='].includes((e as BinaryExpr).operator)) || e.kind === NodeKind.ConditionalExpr
+    ? { kind: NodeKind.ParenExpr, expression: e } as unknown as Expression : e;
+  const guard = {
+    kind: NodeKind.IfStmt, isConstexpr: false,
+    condition: { kind: NodeKind.BinaryExpr, operator: '&&', left: wrap(cloneNode(p)), right: wrap(unparen(s.condition)) },
+    thenBranch: { kind: NodeKind.CompoundStmt, statements: [...decls, ...stmtsOf(s.thenBranch)] },
+  } as unknown as IfStmt;
+  const after: Statement[] = [];
+  if (rest.length > 0) after.push({ ...o, thenBranch: { ...b, statements: rest } as CompoundStmt } as IfStmt);
+  else if (o.elseBranch) after.push({ ...o, condition: negateWrap(o.condition), thenBranch: asBlock(o.elseBranch), elseBranch: undefined } as unknown as IfStmt);
+  os.splice(ok, 1, guard, ...after);
+}
+
+/** Write an if/else storing one local in both arms as one select. */
+function doSel(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'sel' }>): void {
+  const v = f.name;
+  const storeTo = (x: Statement | null | undefined): Expression | undefined => {
+    if (!x) return undefined;
+    const st = stmtsOf(x);
+    if (st.length !== 1) return undefined;
+    const a = storeOf(st[0]);
+    return a && a.operator === '=' && isId(unparen(a.left), v) ? a.right : undefined;
+  };
+  const hits: Array<{ b: CompoundStmt; k: number; s: IfStmt; a: Expression; e: Expression }> = [];
+  for (const b of blocks(fn)) b.statements.forEach((x, k) => {
+    if (x.kind !== NodeKind.IfStmt) return;
+    const s = x as IfStmt;
+    if (!s.elseBranch || s.elseBranch.kind === NodeKind.IfStmt) return;
+    const a = storeTo(s.thenBranch), e = storeTo(s.elseBranch);
+    if (a && e) hits.push({ b, k, s, a, e });
+  });
+  const hit = f.index === 0 ? (hits.length === 1 ? hits[0] : refuse(`${hits.length} if/else store pairs into ${v}`)) : (hits[f.index - 1] ?? refuse(`no if/else #${f.index} storing ${v}`));
+  const { b, k, s, a, e } = hit;
+  if (s.init || s.isConstexpr) refuse('the if has an init or is constexpr');
+  const vt = intType(declaredType(fn, v) ?? '', false);
+  if (!vt || vt.w > 4) refuse(`${v} is not known to be an integer of at most 32 bits`);
+  const tables = selectTables;
+  const shapeOf = createExprShape(localTypesOf(fn), {
+    globalTypes: tables?.globalTypes ?? {}, enclosingVarTypes: tables?.enclosingVarTypes ?? {},
+    structFields: tables?.structFields ?? {}, fieldTypes: tables?.fieldTypes ?? {},
+    returnTypes: tables?.functionReturnTypes ?? {}, resolve: (n: string) => tables?.typedefTargets?.[n],
+  });
+  for (const x of [a, e]) if (!integral32(x, shapeOf)) refuse(`${text(x)} is not known to be an integer of at most 32 bits`);
+  const sel = { kind: NodeKind.ConditionalExpr, condition: s.condition, thenExpr: a, elseExpr: e } as unknown as ConditionalExpr;
+  b.statements.splice(k, 1, { kind: NodeKind.ExprStmt, expression: { kind: NodeKind.AssignExpr, operator: '=', left: { kind: NodeKind.Identifier, name: v }, right: sel } } as unknown as Statement);
 }
 
 function doContinue(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'continue' }>): void {
@@ -5561,6 +5854,7 @@ const APPLY: { [K in Vc8Form['op']]: (fn: FunctionDecl, f: Extract<Vc8Form, { op
   retvar: doRetvar, onecall: doOnecall, roundup: doRoundup, opas: doOpas, swmerge: doSwmerge, dec: doDec, switch: doSwitch,
   range: doRange, castout: doCastout, signbit: doSignbit,
   zinit: doZinit, znew: doZnew, swclamp: doSwclamp, retbase: doRetbase,
+  swtail: doSwtail, andguard: doAndguard, sel: doSel,
   postdec: (fn, f) => {
     const result = guardedPostDecrement(fn, f.counter, f.name);
     if ('why' in result) refuse(result.why);
