@@ -87,6 +87,8 @@ export function compareFormDecision(site: CompareSite): CompareFormOutcome {
   if (form.text !== site.text) return { reason: `printed ${site.text} for ${site.opcode}` };
   const sign = signTest(site, form);
   if (sign) return sign;
+  const masked = maskedSignedTruth(site);
+  if (masked) return masked;
   const reused = flagsReusedPair(site, form);
   if (reused) return reused;
   if (!site.user || !site.setter || !site.onPair) return { reason: 'no CMP/TEST and Jcc pair' };
@@ -247,6 +249,32 @@ function heldZeroEquality(site: CompareSite, cc: string, base: Omit<CompareFormD
     return { decision: { ...base, op: rel === '==' ? '<=' : '>', swap, delta: 0, k, unsigned: true } };
   }
   return { reason: `${rel} ${site.k} against a register read by J${cc}` };
+}
+
+/**
+ * An equality of a masked value with 0 whose flags come from `TEST x,mask` and are read by a
+ * signed JLE/JG (or SETLE/SETG): VC8 branches on a signed compare only for an ordered source
+ * compare, so the source was `(int)(x & mask) > 0` (or `<= 0`), which it narrows to the
+ * TEST (SKILLSMON_CreateMissileWithSeed 004e14d0: `TEST AL,3; JLE`). The decision is the
+ * signed `> 0`/`<= 0`; the pass writes it only where the printed operand is `x & K` with a
+ * literal K below the sign bit at the TEST's width, where the masked value is in 0..K and
+ * the two tests are the same.
+ */
+function maskedSignedTruth(site: CompareSite): CompareFormOutcome | null {
+  if (site.opcode !== 'INT_EQUAL' && site.opcode !== 'INT_NOTEQUAL') return null;
+  if (!site.user || site.setter?.mnemonic.toUpperCase() !== 'TEST' || site.bKind !== 'bit' || !site.onPair) return null;
+  const cc = conditionCode(site.user.mnemonic);
+  if (!cc || !['LE', 'NG', 'G', 'NLE'].includes(cc)) return null;
+  if ((site.constSide !== 0 && site.constSide !== 1) || site.k !== 0n || ![1, 2, 4].includes(site.width)) return null;
+  const swap = site.constSide === 0;
+  const rel = swap ? MIRROR[site.text] : site.text;
+  return {
+    decision: {
+      ord: site.ord, text: site.text, fp: site.fp, width: site.width, address: site.setter!.at,
+      ...(site.user.mnemonic.toUpperCase().startsWith('SET') ? { set: true } : {}),
+      op: rel === '==' ? '<=' : '>', swap, delta: 0, k: 0, signed: true, masked: true,
+    },
+  };
 }
 
 /**

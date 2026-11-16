@@ -724,3 +724,22 @@ describe('compare-signedness keeps a signed 32-bit compare signed', () => {
     assert.match(infos, /"compareWidth":2[^,]/);
   });
 });
+
+describe('a masked equality read by a signed Jcc (004e14d0 TEST AL,3; JLE)', () => {
+  const site = { text: '!=', fp: ['e', 'c:0'] as [string, string] };
+  const d = dec({ ord: 0, ...site, width: 1, op: '>', swap: false, delta: 0, k: 0, signed: true, masked: true });
+  it('writes the signed > 0 of the masked value', () => {
+    assert.match(run('void f(uint32_t s) { if ((s & 3) != 0) g(); }', [site], [d]), /if \(\(int32_t\)\(s & 3\) > 0\)/);
+    assert.match(run('void f(uint32_t s) { if ((s & 3) == 0) g(); }', [{ ...site, text: '==' }], [{ ...d, text: '==', op: '<=' }]), /if \(\(int32_t\)\(s & 3\) <= 0\)/);
+  });
+  it('keeps the equality for a mask with the sign bit at the width, or no mask', () => {
+    assert.match(run('void f(uint32_t s) { if ((s & 0x80) != 0) g(); }', [site], [d]), /\(s & 0x80\) != 0/);
+    assert.match(run('void f(uint32_t s, uint32_t m) { if ((s & m) != 0) g(); }', [site], [d]), /\(s & m\) != 0/);
+    assert.match(run('void f(uint32_t s) { if ((s | 3) != 0) g(); }', [site], [d]), /\(s \| 3\) != 0/);
+  });
+  it('agrees with the equality for every masked value', (t) => {
+    if (!hasNativeGpp()) { t.skip('no native g++'); return; }
+    const out = compileAndRun('#include <initializer_list>', 'unsigned bad = 0; for (uint64_t x = 0; x <= 0xffffffffull; x += 0x10001) { uint32_t s = (uint32_t)x; for (uint32_t k : {1u, 3u, 0x7fu, 0x7fffffffu}) { if (((s & k) != 0) != ((int32_t)(s & k) > 0)) bad++; } } printf("%u", bad);');
+    assert.strictEqual(out.trim(), '0');
+  });
+});

@@ -108,6 +108,11 @@ export interface CompareFormDecision {
    * that would make C++ compare unsigned; promoted, both have the same values.
    */
   zextPair?: boolean;
+  /**
+   * `X == 0`/`X != 0` read by a signed Jcc after `TEST x,mask`: written `(int32_t)(X) <= 0`/
+   * `> 0` only where X is `x & K`, K a literal below the sign bit at `width`.
+   */
+  masked?: boolean;
   /** The flags are read by a SETcc: the compare's 0/1 is a value, not a branch. */
   set?: boolean;
   /** An equality kept as printed whose operand the instructions loaded into a register before the CMP. */
@@ -969,6 +974,22 @@ function rewrite(be: BinaryExpr, d: CompareFormDecision, size: number, shapeOf: 
     const c = literalOf(right);
     if (!c || c.value < 0n || c.value > 0x7fffffffn || c.lit.suffix) return null;
     if (sum) left = sum;
+  }
+  if (d.masked) {
+    // `x & K` is in 0..K for any x, so with K below the sign bit `(int32_t)(x & K) > 0`
+    // holds exactly when `x & K != 0`.
+    const and = unwrapParens(left);
+    if (and.kind !== NodeKind.BinaryExpr || (and as BinaryExpr).operator !== '&' || literalOf(right)?.value !== 0n) return null;
+    const mask = literalOf((and as BinaryExpr).right) ?? literalOf((and as BinaryExpr).left);
+    if (!mask || mask.char || mask.value < 0n || mask.value >= 1n << BigInt(8 * Math.min(d.width, 4) - 1)) return null;
+    const info = { ...(be.ghidraInfo ?? {}), originalAddress: `0x${d.address}`, signedCompareWidth: d.width };
+    let cast: Expression = compareCast(left, 4, true);
+    let zero = right;
+    if (d.swap) {
+      cast = { ...cast, leadingTrivia: be.left.leadingTrivia, trailingTrivia: be.left.trailingTrivia };
+      zero = { ...right, leadingTrivia: be.right.leadingTrivia, trailingTrivia: be.right.trailingTrivia };
+    }
+    return updateNode(be, { operator: d.op as BinaryOperator, left: cast, right: zero, ghidraInfo: info } as Partial<BinaryExpr>);
   }
   const delta = d.delta ?? 0;
   let crossed = false;
