@@ -1425,6 +1425,22 @@ function doJoin(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'join' }>): void {
   // The five measured sites use int and int32_t. A same-width unsigned value is
   // not equivalent in C++ comparisons, shifts, overloads, or conversions.
   const signedWord = new Set(['int', 'int32_t', 'BOOL']);
+  const typeNames = new Set<string>();
+  const signedWordType = (spelling: string): boolean => {
+    if (!signedWord.has(spelling)) return false;
+    const seen = new Set<string>();
+    for (let i = 0; i < 8; i++) {
+      if (seen.has(spelling)) return false;
+      seen.add(spelling);
+      typeNames.add(spelling);
+      // Keep the known emitted word aliases, but an explicit typedef model
+      // must agree: BOOL can never stand for an unsigned, narrow or class type.
+      const target = spelling === 'int' ? undefined : selectTables?.typedefTargets?.[spelling];
+      if (target === undefined) return signedWord.has(spelling);
+      spelling = target.trim();
+    }
+    return false;
+  };
   const intoType = text(decl!.type);
   const parameters = fn.parameters.filter(p => p.name?.name === f.from);
   const prior = body.statements.slice(0, index)
@@ -1458,7 +1474,12 @@ function doJoin(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'join' }>): void {
     }
   }
   const fromType = parameters.length ? text(parameters[0].type) : text(prior[0]!.type);
-  if (!signedWord.has(intoType) || !signedWord.has(fromType)) refuse('joined values must both be signed 32-bit integers');
+  if (!signedWordType(intoType) || !signedWordType(fromType)) refuse('joined values must both be signed 32-bit integers');
+  for (const { node } of walk(body)) {
+    if (![NodeKind.TypedefDecl, NodeKind.TypeAliasDecl, NodeKind.StructDecl, NodeKind.UnionDecl, NodeKind.EnumDecl].includes(node.kind)) continue;
+    const name = (node as unknown as { name?: Identifier }).name;
+    if (name && typeNames.has(text(name))) refuse('a joined type is hidden by a local type declaration');
+  }
   if (body.statements.slice(0, index).some(s => mentions(s, f.into))) refuse(`${f.into} is named before its declaration`);
   if (body.statements.slice(index + 1).some(s => mentions(s, f.from))) refuse(`${f.from} is named after the join`);
   if (storedNames(init).has(f.from)) refuse(`${f.from} is written by the initializer`);

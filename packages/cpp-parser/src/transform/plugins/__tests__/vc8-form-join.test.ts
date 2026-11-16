@@ -3,25 +3,68 @@ import assert from 'node:assert/strict';
 import { parse } from '../../../parser/index.js';
 import { emit } from '../../../emit/index.js';
 import type { AnyNode, TranslationUnit } from '../../../ast/nodes.js';
-import { applyVc8Forms, parseVc8Form, type Vc8FormSite } from '../builtins/vc8-form.js';
+import { applyVc8Forms, parseVc8Form, type Vc8FormSite, type Vc8FormTables } from '../builtins/vc8-form.js';
+import { compileAndRun, hasNativeGpp } from '../../../testing/native-cpp.js';
 
 const flat = (s: string) => s.replace(/\s+/g, ' ').trim();
 
-function run(source: string, tag: string): { code: string; site: Vc8FormSite } {
+function run(source: string, tag: string, tables?: Vc8FormTables): { code: string; site: Vc8FormSite } {
   const form = parseVc8Form(tag);
   assert.ok(form, `parse ${tag}`);
   const sites: Vc8FormSite[] = [];
-  const out = applyVc8Forms(parse(source) as TranslationUnit, [{ form, tag }], s => sites.push(s));
+  const out = applyVc8Forms(parse(source) as TranslationUnit, [{ form, tag }], s => sites.push(s), tables);
   return { code: flat(emit(out as AnyNode)), site: sites[0] };
 }
 
-function refused(source: string, tag: string): void {
-  const result = run(source, tag);
+function refused(source: string, tag: string, tables?: Vc8FormTables): void {
+  const result = run(source, tag, tables);
   assert.equal(result.site.applied, false, source);
   assert.equal(result.code, flat(emit(parse(source) as AnyNode)));
 }
 
 describe('vc8-form: join', () => {
+  it('preserves signed comparisons across alias refusals and a proven signed join', { skip: !hasNativeGpp() }, () => {
+    const inputs = [
+      'int f(int x) { typedef unsigned int BOOL; BOOL y = x + 1; return y > 0; }',
+      'int f(int x) { typedef unsigned int int32_t; int32_t y = x + 1; return y > 0; }',
+      'int f(int x) { BOOL y = x + 1; return y > 0; }',
+    ];
+    const prelude = 'typedef int BOOL;\n' + inputs.map((source, i) => {
+      const result = run(source, 'join(y,x)', { typedefTargets: { BOOL: 'int', int32_t: 'int' } });
+      assert.equal(result.site.applied, i === 2);
+      return `namespace Before${i} { ${emit(parse(source) as AnyNode)} } namespace After${i} { ${result.code} }`;
+    }).join('\n');
+    const body = 'unsigned checks = 0;\n' + inputs.map((_, i) =>
+      `for (int x = -65536; x < 65536; ++x) { if (Before${i}::f(x) != After${i}::f(x)) return ${i + 1}; ++checks; }`
+    ).join('\n') + '\nstd::printf("checks=%u\\n", checks);';
+    assert.equal(compileAndRun(prelude, body, { optimize: true }), 'checks=393216\n');
+  });
+
+  it('refuses local aliases and classes that hide the word types, without changing values', () => {
+    for (const alias of ['typedef unsigned int BOOL;',
+      'typedef bool BOOL;', 'struct BOOL { int value; };', 'enum BOOL { off, on };',
+      'typedef unsigned int int32_t;']) {
+      const name = alias.includes('int32_t') ? 'int32_t' : 'BOOL';
+      refused(`int f(int x) { ${alias} ${name} y = x + 1; return y > 0; }`, 'join(y,x)',
+        { typedefTargets: { BOOL: 'int', int32_t: 'int' } });
+    }
+  });
+
+  it('honors supplied alias targets and refuses cycles or hidden intermediate aliases', () => {
+    const source = 'int f(int x) { BOOL y = x + 1; return y > 0; }';
+    for (const target of ['', 'unsigned int', 'bool', 'short', 'float', 'C', 'const int', 'volatile int', 'int&']) {
+      refused(source, 'join(y,x)', { typedefTargets: { BOOL: target } });
+    }
+    refused(source, 'join(y,x)', { typedefTargets: { BOOL: 'Alias', Alias: 'BOOL' } });
+    refused('int f() { typedef unsigned int BOOL; BOOL x = 1; int y = x + 1; return y > 0; }',
+      'join(y,x)', { typedefTargets: { BOOL: 'int' } });
+    refused('int f(int x) { typedef unsigned int Alias; BOOL y = x + 1; return y > 0; }',
+      'join(y,x)', { typedefTargets: { BOOL: 'Alias', Alias: 'int' } });
+    const result = run(source, 'join(y,x)', { typedefTargets: { BOOL: 'Alias', Alias: 'int' } });
+    assert.equal(result.site.applied, true);
+    assert.match(result.code, /x = x \+ 1; return x > 0;/);
+  });
+
   it('parses two distinct names only', () => {
     assert.deepEqual(parseVc8Form('join(nRemainingTotal,nCount)'),
       { op: 'join', into: 'nRemainingTotal', from: 'nCount' });
