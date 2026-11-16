@@ -69,7 +69,7 @@ import { calleeSpelling } from '../../cfg/out-param.js';
 import { isPure } from './pseudo-op-lower.js';
 
 export interface DeadOutSlotStoreOptions extends PluginOptions {
-  /** A callee's out-parameter width at an argument position (from its body), or null. */
+  /** Bytes written on every path for a non-null argument (all uses here pass &local), or null. */
   outParamWidth?: (callee: string, index: number) => number | null;
   /** Bytes a value of the spelled type occupies, or null. */
   typeSize?: (spelling: string) => number | null;
