@@ -33,6 +33,7 @@ import { enumMemberFact, recordEnumLookups } from './enum-lookups.js';
 import { layoutFieldType } from './layout-field-type.js';
 import { createOutParamOracle } from './out-params.js';
 import { createParamReachOracle } from './param-reach.js';
+import { createNonNullFieldGetterOracle } from './non-null-field-getters.js';
 import { lowerShiftedPointerTypedefs, shiftedPointerSpecs } from './shifted-pointers.js';
 import { respellPlaceholderTypes, respellPlaceholderType } from './placeholder-types.js';
 import { sehSubsumedSymbols, normaliseAddress } from './seh-subsumed.js';
@@ -7174,6 +7175,8 @@ export function buildFuncPtrArgCastTables(
       new Map([...functionByKey].filter((e): e is [string, ExtractedFunction] => e[1] !== null)), dataTypes),
     paramReach: createParamReachOracle(
       new Map([...functionByKey].filter((e): e is [string, ExtractedFunction] => e[1] !== null)), dataTypes, globals),
+    nonNullFieldGetters: createNonNullFieldGetterOracle(
+      new Map([...functionByKey].filter((e): e is [string, ExtractedFunction] => e[1] !== null)), dataTypes),
   };
 }
 
