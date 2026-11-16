@@ -18,9 +18,13 @@
  *                   width, which the value never needs (DRAW_SetTransparentColorRGB 00605320).
  *
  * Every rewrite keeps the value:
- *   - `a * 2^k` and `a << k` are the same bits for an integer `a` of any sign (two's
- *     complement, the build's), and the same type when the literal has no suffix: the usual
- *     conversions of promoted `a` and `int` give promoted `a`, the type of the shift.
+ *   - `a * 2^k` and `a << k` are the same value and type for a non-negative `a` when the
+ *     literal has no suffix: the usual conversions of promoted `a` and `int` give promoted
+ *     `a`, the type of the shift, and the shift is defined exactly where the product is
+ *     representable. A left shift of a negative value is undefined in C++17, so the shift is
+ *     written only where `a` is provably non-negative: its type (a parameter's or local's, or
+ *     a cast's) is unsigned, or it is a non-negative literal or a mask by one. A signed or
+ *     unknown `a` keeps the multiply; VC8 strength-reduces it to the same SHL.
  *   - `(x + a) + b` and `x + (a + b)` are the same value modulo 2^32 when both ops are 4-byte
  *     INT_ADDs (or the outer a PTRADD over a 4-byte index): the facts say so per op.
  *   - `a = a + b; x = x + a;` stores `a + b` into `a` as well: only where `a` is a 32-bit
@@ -57,6 +61,11 @@ export type ArithFact =
 export interface ArithSiteOptions extends PluginOptions {
   /** Parsed-text line -> its items in token order. Absent: nothing changes. */
   arith?: Map<number, ArithFact[]>;
+  /** Declared types of globals, fields (where every aggregate agrees), exact struct fields, typedefs. */
+  globalTypes?: Record<string, string>;
+  fieldTypes?: Record<string, string>;
+  structFields?: Record<string, Record<string, string>>;
+  typedefTargets?: Record<string, string>;
   onSite?: (e: { line: number; rule: string }) => void;
 }
 
@@ -97,15 +106,132 @@ function tie<T>(facts: ArithFact[], kind: ArithFact['kind'], nodes: T[] | undefi
 // shift-multiply
 // ============================================
 
+/** A 32-bit unsigned type: an operand of it makes the arithmetic unsigned, its shifts defined. */
+const U32 = /^(?:unsigned|unsigned int|unsigned long|uint32_t|uint|ulong|UINT|ULONG|DWORD|dword|size_t|uintptr_t)$/;
+/** A narrower unsigned type: it promotes to a non-negative int. */
+const UNARROW = /^(?:unsigned char|unsigned short|unsigned short int|uint8_t|uint16_t|uchar|ushort|byte|word|BYTE|WORD|UCHAR|USHORT|bool)$/;
+
+const CASTS = new Set<string>([NodeKind.CStyleCastExpr, NodeKind.StaticCastExpr, NodeKind.FunctionalCastExpr]);
+
+/** What the operand's sign is known to be: unsigned 32-bit, a non-negative int, or unknown. */
+type Sign = 'u32' | 'nonneg' | undefined;
+
+export interface TypeEnv {
+  locals: Map<string, string>;
+  globals: Record<string, string>;
+  fields: Record<string, string>;
+  structFields: Record<string, Record<string, string>>;
+  typedefs: Record<string, string>;
+}
+
+const spell = (t: string) => t.replace(/\b(?:const|volatile|struct|enum|class)\b/g, '').replace(/\s+/g, ' ').trim();
+
+function resolve(t: string, env: TypeEnv): string {
+  let s = spell(t);
+  for (let i = 0; i < 8 && env.typedefs[s] !== undefined && spell(env.typedefs[s]) !== s; i++) s = spell(env.typedefs[s]);
+  return s;
+}
+
+function signOfType(t: string | undefined, env: TypeEnv): Sign {
+  if (t === undefined) return undefined;
+  const s = resolve(t, env);
+  if (U32.test(s)) return 'u32';
+  if (UNARROW.test(s)) return 'nonneg';
+  return undefined;
+}
+
+/** The element type of a pointer or array spelling, `T *` / `T[N]` -> `T`. */
+function element(t: string | undefined, env: TypeEnv): string | undefined {
+  if (t === undefined) return undefined;
+  const s = resolve(t, env);
+  const m = s.match(/^(.*?)\s*(?:\*|\[[^\]]*\])$/);
+  return m ? m[1] : undefined;
+}
+
+function typeOf(e: Expression, env: TypeEnv): string | undefined {
+  e = unparen(e);
+  if (e.kind === NodeKind.Identifier) {
+    const n = (e as Identifier).name;
+    return env.locals.get(n) ?? env.globals[n];
+  }
+  if (CASTS.has(e.kind)) return emit((e as unknown as { type: TypeNode }).type as unknown as AnyNode);
+  if (e.kind === NodeKind.MemberExpr) {
+    const m = e as unknown as { object: Expression; member: Identifier; isArrow: boolean };
+    const name = m.member?.name;
+    if (!name) return undefined;
+    const ot = typeOf(m.object, env);
+    const base = ot === undefined ? undefined : (m.isArrow ? element(ot, env) : resolve(ot, env));
+    const exact = base !== undefined ? env.structFields[base]?.[name] : undefined;
+    return exact ?? env.fields[name];
+  }
+  if (e.kind === NodeKind.SubscriptExpr) return element(typeOf((e as unknown as { array: Expression }).array, env), env);
+  if (e.kind === NodeKind.UnaryExpr && (e as UnaryExpr).operator === '*') return element(typeOf((e as UnaryExpr).operand, env), env);
+  return undefined;
+}
+
+const ARITH = new Set(['+', '-', '*', '/', '%', '&', '|', '^']);
+/** Operators under which a non-negative int stays non-negative wherever the expression is defined. */
+const CLOSED = new Set(['+', '*', '/', '%', '&', '|', '^', '>>', '<<']);
+
+/**
+ * The sign of `e` as the usual arithmetic conversions give it: any 32-bit unsigned operand
+ * of an arithmetic operator makes it unsigned; a non-negative int stays so under the closed
+ * operators (where the expression is defined at all); a mask by a non-negative constant is
+ * non-negative whatever it masks.
+ */
+export function signOf(e: Expression, env: TypeEnv): Sign {
+  e = unparen(e);
+  switch (e.kind) {
+    case NodeKind.IntegerLiteral: {
+      const l = e as IntegerLiteralExpr;
+      if (/[uU]/.test(l.suffix)) return /[lL]{2}/.test(l.suffix) ? undefined : 'u32';
+      if (l.suffix !== '') return undefined;
+      if (l.value <= 0x7fffffffn) return 'nonneg';
+      return l.base !== 10 && l.value <= 0xffffffffn ? 'u32' : undefined;
+    }
+    case NodeKind.BinaryExpr: {
+      const b = e as BinaryExpr;
+      const l = signOf(b.left, env), r = signOf(b.right, env);
+      if (b.operator === '<<' || b.operator === '>>') return l;
+      if (!ARITH.has(b.operator)) return undefined;
+      if (l === 'u32' || r === 'u32') return 'u32';
+      if (b.operator === '&' && (l === 'nonneg' || r === 'nonneg')) return 'nonneg';
+      return l === 'nonneg' && r === 'nonneg' && CLOSED.has(b.operator) ? 'nonneg' : undefined;
+    }
+    case NodeKind.UnaryExpr: {
+      const u = e as UnaryExpr;
+      if (u.operator === '~' || u.operator === '-') return signOf(u.operand, env) === 'u32' ? 'u32' : undefined;
+      if (u.operator === '+') return signOf(u.operand, env);
+      return signOfType(typeOf(e, env), env);
+    }
+    case NodeKind.ConditionalExpr: {
+      const c = e as unknown as { thenExpr: Expression; elseExpr: Expression };
+      const t = signOf(c.thenExpr, env), f = signOf(c.elseExpr, env);
+      if (t === 'u32' || f === 'u32') return t && f ? 'u32' : undefined;
+      return t === 'nonneg' && f === 'nonneg' ? 'nonneg' : undefined;
+    }
+    default:
+      return signOfType(typeOf(e, env), env);
+  }
+}
+
+function envOf(fn: FunctionDecl, o: ArithSiteOptions): TypeEnv {
+  const locals = new Map<string, string>();
+  for (const [n, t] of localTypesOf(fn)) locals.set(n, emit(t as unknown as AnyNode));
+  return { locals, globals: o.globalTypes ?? {}, fields: o.fieldTypes ?? {}, structFields: o.structFields ?? {}, typedefs: o.typedefTargets ?? {} };
+}
+
 function rewriteMultiplies(fn: FunctionDecl, o: ArithSiteOptions): FunctionDecl | undefined {
   if (!fn.body || !o.arith) return undefined;
   const lines = byLine(fn.body, isBinary('*'), opPos);
   const take = new Map<string, number>();
+  let env: TypeEnv | undefined;
   for (const [line, facts] of o.arith) {
     for (const [f, b] of tie(facts, 'mul', lines.get(line)) ?? []) {
       if (f.kind !== 'mul' || f.log2 === undefined || (f.evidence !== 'shift' && f.evidence !== 'highbyte')) continue;
       const k = unparen(b.right);
       if (k.kind !== NodeKind.IntegerLiteral) continue;
+      if (!signOf(b.left, env ??= envOf(fn, o))) continue;
       const lit = k as IntegerLiteralExpr;
       // An unsuffixed literal: the multiply's type is then the promoted left operand's.
       if (lit.suffix !== '' || lit.value !== 1n << BigInt(f.log2) || lit.value > 0x7fffffffn) continue;

@@ -4203,7 +4203,13 @@ function transformDecompiledCode(
     if (arith) {
       const report = (e: { line: number; rule: string }) =>
         console.warn(`[arith-sites] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.rule} at line ${e.line}`);
-      perPluginOptions['shift-multiply'] = { arith, onSite: report };
+      // The operand's declared type decides whether the shift is defined (redivivus#511).
+      const types = context?.funcPtrArgCasts;
+      perPluginOptions['shift-multiply'] = {
+        arith, onSite: report,
+        globalTypes: types?.globalTypes, fieldTypes: types?.fieldTypes,
+        structFields: types?.structFields, typedefTargets: types?.typedefTargets,
+      };
       perPluginOptions['add-nesting'] = { arith, onSite: report };
       perPluginOptions['concat-widen'] = { arith, onSite: report };
     }

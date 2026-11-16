@@ -9,7 +9,7 @@ import { pseudoOpLowerPlugin } from '../builtins/pseudo-op-lower.js';
 type Plugin = typeof shiftMultiplyPlugin;
 
 /** One statement per line; `[...]@@` opens a line with its facts as JSON items. */
-function run(plugins: Plugin[], lines: string[]): string {
+function run(plugins: Plugin[], lines: string[], types: object = {}): string {
   const arith = new Map<number, ArithFact[]>();
   const text = lines.map((l, i) => {
     const m = l.match(/^\s*(\[.*?\])@@\s?(.*)$/);
@@ -18,7 +18,7 @@ function run(plugins: Plugin[], lines: string[]): string {
     return m[2];
   });
   let ast = parse(text.join('\n')) as unknown as AnyNode;
-  for (const p of plugins) ast = p.createTransformer({ arith })(ast as never) as unknown as AnyNode;
+  for (const p of plugins) ast = p.createTransformer({ arith, ...types })(ast as never) as unknown as AnyNode;
   return emit(ast).replace(/\s+/g, ' ');
 }
 
@@ -35,8 +35,48 @@ describe('shiftMultiplyPlugin', () => {
   });
 
   it('keeps the precedence of a shift under an addition', () => {
-    const out = run([shiftMultiplyPlugin], ['int f(int a, int b) {', `[${shl(4)}]@@ return a + b * 0x10;`, '}']);
+    const out = run([shiftMultiplyPlugin], ['int f(int a, unsigned int b) {', `[${shl(4)}]@@ return a + b * 0x10;`, '}']);
     assert.match(out, /return a \+ \(b << 4\);/);
+  });
+
+  // SKILLPAL_ApplyRedemptionEffect 005d0c40 (redivivus#511): `nCalcVal` is a signed skill
+  // calc; `nCalcVal << 8` of a negative value is undefined in C++17, the multiply is not.
+  it('keeps the multiply of a signed or unknown operand', () => {
+    const out = run([shiftMultiplyPlugin], ['int f(int nStatVal, int nCalcVal, short *p) {',
+      `[${shl(8)}]@@ nStatVal = nStatVal + nCalcVal * 0x100;`,
+      `[${shl(4)}]@@ nStatVal = nStatVal + *p * 0x10;`,
+      `[${shl(2)}]@@ nStatVal = nStatVal + (int)p[1] * 4;`,
+      'return nStatVal;', '}']);
+    assert.match(out, /nCalcVal \* 0x100/);
+    assert.match(out, /\*p \* 0x10/);
+    assert.match(out, /\(int\)p\[1\] \* 4/);
+    assert.doesNotMatch(out, /<</);
+  });
+
+  // adler32 / inflate: the operand is unsigned through its arithmetic, a field or a global.
+  it('writes the shift where unsigned arithmetic, a field or a global types the operand', () => {
+    const out = run([shiftMultiplyPlugin], ['uint32_t f(uint32_t nSum2, S *pState, int n) {',
+      `[${shl(16)}]@@ n = (nSum2 - 0xfff1) * 0x10000;`,
+      `[${shl(12)}]@@ n = n + (pState->w_bits - 8) * 0x1000;`,
+      `[${shl(5)}]@@ n = n + (gnCount - 1) * 0x20;`,
+      `[${shl(5)}]@@ n = n + (pState->nSigned - 1) * 0x20;`,
+      'return n;', '}'],
+      { structFields: { S: { w_bits: 'uint', nSigned: 'int' } }, globalTypes: { gnCount: 'DWORD' } });
+    assert.match(out, /n = nSum2 - 0xfff1 << 0x10;/);
+    assert.match(out, /\(pState->w_bits - 8 << 0xc\)/);
+    assert.match(out, /\(gnCount - 1 << 5\)/);
+    assert.match(out, /\(pState->nSigned - 1\) \* 0x20/);
+  });
+
+  it('writes the shift of an unsigned local, an unsigned cast and a mask', () => {
+    const out = run([shiftMultiplyPlugin], ['int f(int a, short *p) {', 'uint32_t u = 3;',
+      `[${shl(8)}]@@ a = a + u * 0x100;`,
+      `[${shl(8)}]@@ a = a + (ushort)p[1] * 0x100;`,
+      `[${shl(4)}]@@ a = a + (a & 0xff) * 0x10;`,
+      'return a;', '}']);
+    assert.match(out, /\(u << 8\)/);
+    assert.match(out, /\(\(ushort\)p\[1\] << 8\)/);
+    assert.match(out, /\(\(a & 0xff\) << 4\)/);
   });
 
   it('leaves a multiply the original computed otherwise, and a suffixed literal', () => {
