@@ -1531,7 +1531,9 @@ function doCache(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'cache' }>): void {
   const byAddress = f.type !== undefined && norm(f.expr).startsWith('&');
   const want = byAddress ? norm(f.expr).slice(1) : norm(f.expr);
   const locals = localNames(fn);
-  const isE = (n: ASTNode) => isExpression(n.kind) && text(n as Expression) === want;
+  // Grouping adds no evaluation. Arithmetic passes may wrap a newly derived
+  // expression, so count and replace its value node once, beneath any wrappers.
+  const isE = (n: ASTNode) => n.kind !== NodeKind.ParenExpr && isExpression(n.kind) && text(n as Expression) === want;
   const stores = (n: ASTNode) => {
     for (const { node } of walk(n)) {
       if (node.kind !== NodeKind.AssignExpr) continue;

@@ -89,4 +89,23 @@ describe('vc8-form cache: repeated anchor selection', () => {
     assert.equal(used.sites[0].applied, false);
     assert.match(used.sites[0].why!, /exists/);
   });
+
+  it('counts nested parenthesis wrappers as one expression evaluation', () => {
+    const source = body.replace(/value \* 256/g, '(((value << 8)))');
+    const { out, sites } = run(source,
+      'cache(value << 8,life,int,@maximum,1,1)',
+      'cache(value << 8,mana,int,@maximum,1,2)');
+    assert.ok(sites.every(s => s.applied), JSON.stringify(sites));
+    assert.match(out, /int life = value << 8;/);
+    assert.match(out, /int mana = value << 8;/);
+    assert.equal((out.match(/value << 8/g) ?? []).length, 2);
+  });
+
+  it('still refuses a bounded read ending inside two distinct parenthesized evaluations', () => {
+    const source = 'void f(int value) { int maximum = Max(1); Consume((value << 8) + ((value << 8)), maximum); }';
+    const { out, sites } = run(source, 'cache(value << 8,gain,int,@maximum,1,1)');
+    assert.equal(sites[0].applied, false);
+    assert.match(sites[0].why!, /do not end a statement/);
+    assert.equal(out, flat(emit(parse(source))));
+  });
 });
