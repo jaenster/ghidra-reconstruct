@@ -28,12 +28,12 @@ import { pathToFileURL } from 'node:url';
 import { parse, emit, NodeKind, applyVc8Forms, definitionOf, parseVc8Form, type Vc8Form } from '../../packages/cpp-parser/dist/index.js';
 import type { ASTNode, FunctionDecl, TranslationUnit } from '../../packages/cpp-parser/dist/index.js';
 import { vc8FormSpec, vc8formBodyHash } from '../../packages/reconstruct/src/codegen/vc8form-spec.js';
-import { normalizeSignatureType } from '../../packages/reconstruct/src/codegen/platform-types.js';
+import { normalizeSignatureType, platformDeclaredFunctionNames } from '../../packages/reconstruct/src/codegen/platform-types.js';
 import { respellPlaceholderType } from '../../packages/reconstruct/src/codegen/placeholder-types.js';
 import { emittedMemberNames } from '../../packages/reconstruct/src/codegen/header.js';
 import { accessorTwins } from '../../packages/reconstruct/src/codegen/accessor-twins.js';
 import { registerEnumTypedefTargets } from '../../packages/reconstruct/src/codegen/enum-width.js';
-import { buildFuncPtrArgCastTables } from '../../packages/reconstruct/src/codegen/index.js';
+import { createNonNullFieldGetterOracle } from '../../packages/reconstruct/src/codegen/non-null-field-getters.js';
 import type { ExtractedDataType, ExtractedFunction } from '../../packages/reconstruct/src/types.js';
 import type { Vc8FormTables } from '../../packages/cpp-parser/dist/index.js';
 import type { Vc8Accessor } from '../../packages/cpp-parser/dist/index.js';
@@ -147,9 +147,21 @@ async function loadAccessors(typesPath?: string) {
   }
   accTables.accessors = accessorTwins(hosts, accTables);
   if (needsGetters) {
-    // The same spelling/ambiguity and body-proof producer as production generation.
-    const facts = buildFuncPtrArgCastTables(callees, [], [], modelTypes, [], [], { writeEffects: false });
-    accTables.nonNullFieldRead = (callee, argc) => facts.nonNullFieldGetters!.read(callee, argc);
+    // Use the production body-proof producer with unambiguous model spellings.
+    // The collector needs no other generator cast tables for this contract.
+    const byKey = new Map<string, ExtractedFunction | null>(), headerOwned = platformDeclaredFunctionNames();
+    for (const fn of callees) {
+      if (!fn.name || fn.platform) continue;
+      const parts = (fn.namespace ? `${fn.namespace}::${fn.name}` : fn.name).split('::');
+      for (let i = 0; i < parts.length; i++) {
+        const key = parts.slice(i).join('::');
+        if (headerOwned.has(key)) continue;
+        const seen = byKey.get(key);
+        byKey.set(key, seen === undefined ? fn : seen && seen.address === fn.address ? seen : null);
+      }
+    }
+    const oracle = createNonNullFieldGetterOracle(new Map([...byKey].filter((e): e is [string, ExtractedFunction] => e[1] !== null)), modelTypes);
+    accTables.nonNullFieldRead = (callee, argc) => oracle.read(callee, argc);
   }
 }
 

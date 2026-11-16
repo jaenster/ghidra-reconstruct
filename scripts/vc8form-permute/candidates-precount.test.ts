@@ -41,5 +41,8 @@ it('discovers precount only with actual non-null callee-body evidence and roundt
       const [blocked] = run('singles', [{ id: 'one', text }]);
       assert.deepEqual(blocked.candidates, []);
     }
+    writeFileSync(join(dir, 'functions.ndjson'), [fn, { ...fn, address: '00401040' }].map(f => JSON.stringify(f)).join('\n') + '\n');
+    const [ambiguous] = run('singles', [{ id: 'one', text }]);
+    assert.deepEqual(ambiguous.candidates, []);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

@@ -19,10 +19,11 @@ const SETTER = {
 } as unknown as ExtractedFunction;
 
 const UNIT = {
-  name: 'D2UnitStrc', kind: 'STRUCTURE', size: 8,
+  name: 'D2UnitStrc', kind: 'STRUCTURE', size: 12,
   fields: [
     { name: 'dwType', dataType: 'uint32_t', offset: 0, size: 4 },
     { name: 'dwFlags', dataType: 'uint32_t', offset: 4, size: 4 },
+    { name: 'pNext', dataType: 'D2UnitStrc *', offset: 8, size: 4 },
   ],
 } as unknown as ExtractedDataType;
 
@@ -32,14 +33,20 @@ const FLAG = {
 
 describe('cast tables built without write effects', () => {
   it('equal the full build in every other table', () => {
-    const full = buildFuncPtrArgCastTables([SETTER], [FLAG], [], [UNIT], []);
-    const lean = buildFuncPtrArgCastTables([SETTER], [FLAG], [], [UNIT], [], [], { writeEffects: false });
+    const getter = { ...SETTER, name: 'UNIT_Next', address: '00620040', returnType: 'D2UnitStrc *',
+      decompiled: 'D2UnitStrc * __fastcall UNIT_Next(D2UnitStrc *pUnit) { return pUnit->pNext; }' };
+    const full = buildFuncPtrArgCastTables([SETTER, getter], [FLAG], [], [UNIT], []);
+    const lean = buildFuncPtrArgCastTables([SETTER, getter], [FLAG], [], [UNIT], [], [], { writeEffects: false });
     assert.ok(full.writeEffects && Object.keys(full.writeEffects).length > 0, 'the fixture has write effects');
     assert.strictEqual(lean.writeEffects, undefined);
     for (const key of Object.keys(full) as Array<keyof typeof full>) {
       if (key === 'writeEffects' || typeof full[key] === 'function') continue;
-      if (key === 'outParams' || key === 'paramReach') continue; // oracles: closures over the same inputs
+      if (key === 'outParams' || key === 'paramReach' || key === 'nonNullFieldGetters') continue; // oracles: closures over the same inputs
       assert.deepStrictEqual(lean[key], full[key], key);
     }
+    assert.deepStrictEqual(lean.nonNullFieldGetters!.read('UNIT_SetFlag', 1), full.nonNullFieldGetters!.read('UNIT_SetFlag', 1));
+    const proof = full.nonNullFieldGetters!.read('UNIT_Next', 1);
+    assert.strictEqual(proof?.member, 'pNext');
+    assert.deepStrictEqual(lean.nonNullFieldGetters!.read('UNIT_Next', 1), proof);
   });
 });
