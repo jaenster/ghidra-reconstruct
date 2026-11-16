@@ -4203,7 +4203,15 @@ function transformDecompiledCode(
     if (arith) {
       const report = (e: { line: number; rule: string }) =>
         console.warn(`[arith-sites] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.rule} at line ${e.line}`);
-      perPluginOptions['shift-multiply'] = { arith, onSite: report };
+      const t = context?.funcPtrArgCasts;
+      perPluginOptions['shift-multiply'] = { arith, onSite: report, integerTypes: {
+        globalTypes: t?.globalTypes,
+        fieldTypes: t?.fieldTypes,
+        structFields: t?.structFields,
+        typedefTargets: t?.typedefTargets,
+        functionReturnTypes: t?.functionReturnTypes,
+        enclosingVarTypes,
+      } };
       perPluginOptions['add-nesting'] = { arith, onSite: report };
       perPluginOptions['concat-widen'] = { arith, onSite: report };
     }

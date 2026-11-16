@@ -12,7 +12,7 @@
 /** Standard C/C++ types from <cstdint>, <cstddef>, and language primitives */
 import { globalGuardMacroLines } from './global-guards.js';
 import { SDK_PROBED_NAMES, SDK_DEFINED_TYPES, SDK_TYPEDEF_NAMES, PLATFORM_HEADER_DECLARED_TYPES, SDK_LAYOUTS } from './sdk-types.generated.js';
-import { ARTIFACT_SUPPORT_LINES, CHECK_BLOCK_SUPPORT_LINES, CONTEXT_FIELD_SUPPORT_LINES, SHIFT_COUNT_SUPPORT_LINES, UNINIT_SUPPORT_LINES, Lexer, STORM_LINK_SUPPORT_LINES, TokenKind } from '@ghidra-mcp/cpp-parser';
+import { ARTIFACT_SUPPORT_LINES, CHECK_BLOCK_SUPPORT_LINES, CONTEXT_FIELD_SUPPORT_LINES, SHIFT_COUNT_SUPPORT_LINES, SHIFT_MULTIPLY_SUPPORT_LINES, UNINIT_SUPPORT_LINES, Lexer, STORM_LINK_SUPPORT_LINES, TokenKind } from '@ghidra-mcp/cpp-parser';
 import { templateRegistry } from './templates/registry.js';
 import { rootQualifyTemplateArguments } from './templates/identity.js';
 import {
@@ -1835,6 +1835,9 @@ export function generatePlatformHeader(
   // giving one of these types a user-provided constructor de-aggregates it
   // everywhere the header reaches, which is the whole tree.
   lines.push('template <class T, class S> static inline T d2_bits_as(const S& sValue) { T tValue = T(); memcpy(&tValue, &sValue, sizeof(T) < sizeof(S) ? sizeof(T) : sizeof(S)); return tValue; }');
+  // Signed negative shifts are undefined in C++17. Preserve the promoted integer's
+  // representation and result type while performing the actual shift unsigned.
+  lines.push(...SHIFT_MULTIPLY_SUPPORT_LINES);
   lines.push('');
 
   // MSVC C++ exception-handling frame types. Not declared by any real header;

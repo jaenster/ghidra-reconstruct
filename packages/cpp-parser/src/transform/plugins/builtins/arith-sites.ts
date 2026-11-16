@@ -4,7 +4,7 @@
  *
  *   shift-multiply  `a * 2^k` whose INT_MULT came from a SHL by k, or from a byte MOV into a
  *                   high-byte register the block zeroed (`xor edx, edx; mov dh, b`), is the
- *                   shift `(a << k)`. VC8 compiles the multiply of a byte as movzx + shl and
+ *                   shift, with a defined signed-result helper where needed. VC8 compiles the multiply of a byte as movzx + shl and
  *                   the shift as the high-byte load (OBJECT_ClientFn_OperateToOpened 004bde00).
  *                   An IMUL, LEA or ADD keeps the multiply.
  *   add-nesting     `x + a + b` the p-code computes as `x + (a + b)`: INT_ADD is associative to
@@ -18,9 +18,11 @@
  *                   width, which the value never needs (DRAW_SetTransparentColorRGB 00605320).
  *
  * Every rewrite keeps the value:
- *   - `a * 2^k` and `a << k` are the same bits for an integer `a` of any sign (two's
- *     complement, the build's), and the same type when the literal has no suffix: the usual
- *     conversions of promoted `a` and `int` give promoted `a`, the type of the shift.
+ *   - A signed negative left shift is undefined in C++17. Proved integer operands which
+ *     may be negative use d2_shift_left: shift their unsigned representation, then copy the
+ *     bits back to the promoted signed type. Overloads preserve integral promotions and
+ *     the exact result type of multiplication by an unsuffixed int literal. Unknown types
+ *     and contexts requiring a constant expression keep the multiply.
  *   - `(x + a) + b` and `x + (a + b)` are the same value modulo 2^32 when both ops are 4-byte
  *     INT_ADDs (or the outer a PTRADD over a 4-byte index): the facts say so per op.
  *   - `a = a + b; x = x + a;` stores `a + b` into `a` as well: only where `a` is a 32-bit
@@ -38,15 +40,29 @@
 import { NodeKind } from '../../../ast/kinds.js';
 import type {
   ASTNode, AssignExpr, BinaryExpr, CallExpr, CompoundStmt, ExprStmt, Expression, FunctionDecl, Identifier, IfStmt,
-  IntegerLiteralExpr, ParenExpr, Statement, TypeNode, UnaryExpr,
+  IntegerLiteralExpr, ParenExpr, Statement, TypeNode, UnaryExpr, VariableDecl,
 } from '../../../ast/nodes.js';
-import { traverseAST, findNodesByKind } from '../../../ast/visitor.js';
+import { traverseAST, findNodesByKind, getChildren } from '../../../ast/visitor.js';
 import { Expr, Stmt } from '../../../ast/factory.js';
 import { emit } from '../../../emit/index.js';
 import type { AnyNode } from '../../../ast/nodes.js';
 import { createTransformer, updateNode, type Transformer } from '../../transformer.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
 import { localTypesOf } from './compare-form.js';
+import { collectLocalStructs, createExprShape, thisClassOf } from './expr-shape.js';
+import { calleeName, shapeOfNode } from './call-arg-cast.js';
+import { builtinTruthSite } from './truth-form-safety.js';
+import type { SelectArgumentOptions } from './select-argument.js';
+
+/** Emitted after d2_bits_as in d2_platform.h. Primitive overloads let C++ do the promotions. */
+export const SHIFT_MULTIPLY_SUPPORT_LINES = [
+  'static inline int d2_shift_left(int value, unsigned int count) { return d2_bits_as<int>((unsigned int)value << count); }',
+  'static inline unsigned int d2_shift_left(unsigned int value, unsigned int count) { return value << count; }',
+  'static inline long d2_shift_left(long value, unsigned int count) { return d2_bits_as<long>((unsigned long)value << count); }',
+  'static inline unsigned long d2_shift_left(unsigned long value, unsigned int count) { return value << count; }',
+  'static inline long long d2_shift_left(long long value, unsigned int count) { return d2_bits_as<long long>((unsigned long long)value << count); }',
+  'static inline unsigned long long d2_shift_left(unsigned long long value, unsigned int count) { return value << count; }',
+];
 
 /** One item of a line, as reconstruct's extract/arith-sites.ts parses it. */
 export type ArithFact =
@@ -57,6 +73,7 @@ export type ArithFact =
 export interface ArithSiteOptions extends PluginOptions {
   /** Parsed-text line -> its items in token order. Absent: nothing changes. */
   arith?: Map<number, ArithFact[]>;
+  integerTypes?: Pick<SelectArgumentOptions, 'globalTypes' | 'enclosingVarTypes' | 'structFields' | 'fieldTypes' | 'functionReturnTypes' | 'typedefTargets'>;
   onSite?: (e: { line: number; rule: string }) => void;
 }
 
@@ -97,19 +114,93 @@ function tie<T>(facts: ArithFact[], kind: ArithFact['kind'], nodes: T[] | undefi
 // shift-multiply
 // ============================================
 
+const INTEGER_BASES = new Set(['bool', 'char', 'signed char', 'unsigned char', 'short', 'unsigned short',
+  'int', 'unsigned int', 'long', 'unsigned long', 'long long', 'unsigned long long', 'wchar_t', 'char16_t', 'char32_t']);
+
+/** The helper is ordinary inline C++03, not constexpr: keep compile-time and unevaluated uses. */
+function runtimeShiftSite(fn: FunctionDecl, node: ASTNode, parents: Map<ASTNode, ASTNode>): boolean {
+  if (fn.specifiers.some(s => s === 'constexpr' || s === 'consteval')) return false;
+  for (let child = node, p = parents.get(child); p; child = p, p = parents.get(p)) {
+    const parent = p as AnyNode;
+    if ([NodeKind.ArrayType, NodeKind.TemplateType, NodeKind.ExprTemplateArg, NodeKind.EnumeratorDecl,
+      NodeKind.StaticAssertDecl, NodeKind.SizeofExpr, NodeKind.AlignofExpr, NodeKind.DecltypeType,
+      NodeKind.TypeidExpr, NodeKind.NoexceptExpr, NodeKind.LambdaExpr, NodeKind.FunctionDecl,
+      NodeKind.ClassDecl, NodeKind.StructDecl, NodeKind.UnionDecl, NodeKind.FieldDecl, NodeKind.ParameterDecl].includes(p.kind)) return false;
+    if (parent.kind === NodeKind.CaseStmt && child === parent.value) return false;
+    if (parent.kind === NodeKind.IfStmt && parent.isConstexpr && child === parent.condition) return false;
+    if (p.kind === NodeKind.VariableDecl) {
+      const v = p as VariableDecl;
+      if (v.specifiers.some(s => ['static', 'extern', 'thread_local', 'constexpr', 'constinit'].includes(s))
+        || /\bconst\b/.test(emit(v.type as AnyNode))) return false;
+    }
+  }
+  return true;
+}
+
 function rewriteMultiplies(fn: FunctionDecl, o: ArithSiteOptions): FunctionDecl | undefined {
   if (!fn.body || !o.arith) return undefined;
   const lines = byLine(fn.body, isBinary('*'), opPos);
-  const take = new Map<string, number>();
+  if (lines.size === 0) return undefined;
+  const types = o.integerTypes ?? {};
+  const resolve = (name: string) => types.typedefTargets?.[name];
+  const locals = localTypesOf(fn);
+  const shapeOf = createExprShape(locals, { ...types, returnTypes: types.functionReturnTypes, resolve,
+    localStructs: collectLocalStructs(fn.body), thisClass: thisClassOf(fn, resolve) });
+  const parents = new Map<ASTNode, ASTNode>();
+  for (const n of traverseAST(fn.body)) for (const child of getChildren(n)) parents.set(child, n);
+  const integerShape = (s: ReturnType<typeof shapeOf>): boolean => !!s && s.stars === 0 && INTEGER_BASES.has(s.base);
+  // builtinTruthSite separately proves bindings and builtin operators; this only narrows
+  // their scalar result to an integer. Never guess a class conversion or a pointer result.
+  const integer = (expr: Expression): boolean => {
+    const e = unparen(expr);
+    switch (e.kind) {
+      case NodeKind.IntegerLiteral: case NodeKind.CharLiteral: case NodeKind.BoolLiteral: return true;
+      case NodeKind.BinaryExpr:
+        if (['<', '<=', '>', '>=', '==', '!=', '&&', '||'].includes(e.operator)) return true;
+        return integer(e.left) && integer(e.right);
+      case NodeKind.ConditionalExpr: return integer(e.thenExpr) && integer(e.elseExpr);
+      case NodeKind.AssignExpr: return integer(e.left);
+      case NodeKind.UnaryExpr:
+        if (e.operator === '!') return true;
+        if (['+', '-', '~', '++', '--'].includes(e.operator)) return integer(e.operand);
+        return e.operator === '*' && integerShape(shapeOf(e));
+      case NodeKind.PostfixExpr: return integer(e.operand);
+      case NodeKind.CallExpr: {
+        // The model's named return type cannot type a local callable hiding that name.
+        const name = calleeName(e.callee);
+        return !!name && !locals.has(name) && integerShape(shapeOf(e));
+      }
+      case NodeKind.CStyleCastExpr: case NodeKind.StaticCastExpr: case NodeKind.ConstCastExpr:
+      case NodeKind.ReinterpretCastExpr: case NodeKind.DynamicCastExpr: case NodeKind.FunctionalCastExpr:
+        return integerShape(shapeOfNode(e.type, 0, resolve));
+      default: return integerShape(shapeOf(e));
+    }
+  };
+  const nonnegative = (expr: Expression): boolean => {
+    const e = unparen(expr);
+    if (e.kind === NodeKind.IntegerLiteral) return e.value >= 0n;
+    if (e.kind === NodeKind.BoolLiteral || (e.kind === NodeKind.UnaryExpr && e.operator === '!')) return true;
+    if (e.kind === NodeKind.BinaryExpr && ['<', '<=', '>', '>=', '==', '!=', '&&', '||'].includes(e.operator)) return true;
+    // Restrict this to atoms: -unsignedShort has promoted type int and may be negative.
+    if (![NodeKind.Identifier, NodeKind.QualifiedId, NodeKind.MemberExpr, NodeKind.SubscriptExpr,
+      NodeKind.CallExpr, NodeKind.CStyleCastExpr].includes(e.kind)) return false;
+    const s = shapeOf(e);
+    return !!s && s.stars === 0 && (s.base === 'bool' || s.base.startsWith('unsigned '));
+  };
+  const take = new Map<string, { count: number; helper: boolean }>();
   for (const [line, facts] of o.arith) {
     for (const [f, b] of tie(facts, 'mul', lines.get(line)) ?? []) {
-      if (f.kind !== 'mul' || f.log2 === undefined || (f.evidence !== 'shift' && f.evidence !== 'highbyte')) continue;
+      if (f.kind !== 'mul' || f.log2 === undefined || !Number.isInteger(f.log2) || f.log2 < 0 || f.log2 > 30
+        || (f.evidence !== 'shift' && f.evidence !== 'highbyte')) continue;
       const k = unparen(b.right);
       if (k.kind !== NodeKind.IntegerLiteral) continue;
       const lit = k as IntegerLiteralExpr;
       // An unsuffixed literal: the multiply's type is then the promoted left operand's.
       if (lit.suffix !== '' || lit.value !== 1n << BigInt(f.log2) || lit.value > 0x7fffffffn) continue;
-      take.set(at(b), f.log2);
+      if (!builtinTruthSite(fn, b, b.left, types) || !integer(b.left)) continue;
+      const helper = !nonnegative(b.left);
+      if (helper && !runtimeShiftSite(fn, b, parents)) continue;
+      take.set(at(b), { count: f.log2, helper });
       o.onSite?.({ line, rule: 'shift-multiply' });
     }
   }
@@ -117,9 +208,11 @@ function rewriteMultiplies(fn: FunctionDecl, o: ArithSiteOptions): FunctionDecl 
   const t = createTransformer({
     visitBinaryExpr(node: BinaryExpr): ASTNode | undefined {
       if (node.operator !== '*' || !node.location) return undefined;
-      const k = take.get(at(node));
-      if (k === undefined) return undefined;
+      const selected = take.get(at(node));
+      if (!selected) return undefined;
+      const k = selected.count;
       const count = Expr.intLiteral(k, k < 10 ? 10 : 16);
+      if (selected.helper) return { ...Expr.call(Expr.qualifiedId(['d2_shift_left'], true), [node.left, count]), location: node.location };
       const shift = { ...Expr.binary(node.left, '<<', count), location: node.location } as BinaryExpr;
       return { ...Expr.paren(shift), location: node.location } as unknown as ASTNode;
     },
@@ -334,7 +427,7 @@ function plugin(id: string, name: string, description: string, run: (fn: Functio
 }
 
 export const shiftMultiplyPlugin = plugin('shift-multiply', 'Shift Multiply',
-  'A multiply by 2^k the original computed with a shift is written as the shift', rewriteMultiplies);
+  'A proved integer multiply the original shifted uses a shift with defined signed-result semantics', rewriteMultiplies);
 export const addNestingPlugin = plugin('add-nesting', 'Add Nesting',
   'A sum the p-code nests to the right is written so, and an in-place add into a variable as its own statement', rewriteAdds);
 export const concatWidenPlugin = plugin('concat-widen', 'Concat Widen',
