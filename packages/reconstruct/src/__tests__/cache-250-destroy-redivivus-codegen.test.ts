@@ -1,11 +1,11 @@
-/** Live Windows Redivivus 00450520 pseudocode and metadata, 2026-11-11.
- * Callee bodies and HASHKEY_NONE are minimal context fixtures, not a full snapshot. */
+/** Windows 00450520 with its v2109 tag and vtable-held Destroy context.
+ * Callee bodies and HASHKEY_NONE are minimal fixtures, not an owning snapshot. */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { generateProject } from '../codegen/index.js';
 import { vc8formBodyHash, vc8FormSpec } from '../codegen/vc8form-spec.js';
-import type { ExtractedDataType, ExtractedFunction, ExtractedNamespace, ProgramInfo, ReconstructOptions } from '../types.js';
+import type { AnalyzedDataSymbol, ExtractedDataType, ExtractedFunction, ExtractedNamespace, ProgramInfo, ReconstructOptions } from '../types.js';
 
 const decompiled = `
 /* WARNING: Enum "eCollisionFlags": Some values do not have unique names */
@@ -35,11 +35,12 @@ TSHashTable<SGAMEDATA,HASHKEY_NONE>::Destroy(TSHashTable<SGAMEDATA,HASHKEY_NONE>
 
 `;
 
-const form = 'cache(&this->tSlotListArray,pArray,TSGrowableArray<TSExplicitList<SGAMEDATA, -572662307>>*,@call)';
-// With the template registry present, dh is the exact live token hash. ev remains
-// fixture-only until a positive native check is attached to a durable evidence row.
-const bodyHash = '211b70bd';
-const probeTag = { type: 'vc8form', data: `${form};ev=0000000000;bh=40-8561c9a1;dh=${bodyHash}` };
+const form = 'cache(&pThis->tSlotListArray,pArray,TSGrowableArray<TSExplicitList<SGAMEDATA, -572662307>>*)';
+// Raw Ghidra text and generator-stage text have different hashes: registered
+// template names are respelled before tags are checked. Values reread at v2109.
+const rawBodyHash = '211b70bd';
+const bodyHash = '2f2508ac';
+const probeTag = { type: 'vc8form', data: `${form};ev=84b29b6c15;bh=40-8561c9a1;dh=${bodyHash}` };
 const base: ExtractedFunction = {
   name: 'Destroy', address: '0x00450520',
   signature: 'void Destroy(TSHashTable<SGAMEDATA,HASHKEY_NONE> * this)', returnType: 'void',
@@ -78,6 +79,13 @@ const namespaces: ExtractedNamespace[] = [
 ];
 const dataTypes: ExtractedDataType[] = [
   { kind: 'STRUCTURE', name: 'HASHKEY_NONE', category: '/', size: 1, fields: [] } as ExtractedDataType,
+  // Its explicit Ghidra spelling registers the negative template argument and
+  // its underscore display variant before the decompile's tag hash is checked.
+  { kind: 'STRUCTURE', name: 'TSExplicitList<SGAMEDATA,-572662307>', category: '/', size: 12,
+    fields: [
+      { name: 'm_linkoffset', dataType: 'int', offset: 0, size: 4 },
+      { name: 'm_terminator', dataType: 'TSLink<SGAMEDATA>', offset: 4, size: 8 },
+    ] } as ExtractedDataType,
 ];
 
 const internalClear: ExtractedFunction = {
@@ -101,15 +109,32 @@ const arrayDestructor: ExtractedFunction = {
   tags: [], calledFunctions: [],
 };
 
+// The real vtable at 006d5e5c holds Destroy in slot 3 (006d5e68).
+// A held plain function pointer keeps this template member's receiver explicit.
+const heldDestroy: AnalyzedDataSymbol = {
+  name: 'vftable', namespace: 'TSHashTable<SGAMEDATA,HASHKEY_NONE>',
+  address: '006d5e5c', dataType: 'pointer[4]', size: 16, isInitialized: true,
+  xrefCount: 1, scope: 'global',
+  initializedData: { kind: 'array', elements: [
+    { kind: 'pointer', value: 'TSHashTable<SGAMEDATA,HASHKEY_NONE>::InternalDelete' },
+    { kind: 'pointer', value: 'TSHashTable<SGAMEDATA,HASHKEY_NONE>::InternalNew' },
+    { kind: 'pointer', value: 'TSHashTable<SGAMEDATA,HASHKEY_NONE>::ScalarDeletingDestructor' },
+    { kind: 'pointer', value: 'TSHashTable<SGAMEDATA,HASHKEY_NONE>::Destroy' },
+  ] },
+};
+
 function emitted(tags: ExtractedFunction['tags']): string {
-  const project = generateProject('cache-250-destroy', structuredClone([{ ...base, tags }, internalClear, arrayDestructor]), [], structuredClone(dataTypes), [], structuredClone(namespaces), options, programInfo);
+  const functions = structuredClone([{ ...base, tags }, internalClear, arrayDestructor]);
+  const project = generateProject('cache-250-destroy', functions, [], structuredClone(dataTypes), structuredClone([heldDestroy]), structuredClone(namespaces), options, programInfo);
+  assert.equal(vc8formBodyHash(functions[0].decompiled!), bodyHash);
   return [...project.files.values()].filter(f => f.type === 'implementation').map(f => f.content).join('\n');
 }
 
 describe('Redivivus issue #250 live Destroy cache with template context', () => {
-  it('uses the exact live body hash', () => {
-    assert.equal(vc8formBodyHash(decompiled), bodyHash);
-    assert.equal(vc8FormSpec({ ...base, tags: [probeTag] })?.forms.length, 1);
+  it('does not mistake the raw hash for the generator-stage tag hash', () => {
+    assert.equal(vc8formBodyHash(decompiled), rawBodyHash);
+    assert.notEqual(rawBodyHash, bodyHash);
+    assert.equal(vc8FormSpec({ ...base, tags: [probeTag] })?.forms.length, 0);
   });
 
   it('emits the address cache and preserves member calls in template context', () => {
@@ -118,10 +143,14 @@ describe('Redivivus issue #250 live Destroy cache with template context', () => 
     const staleTag = { ...probeTag, data: probeTag.data.replace(`dh=${bodyHash}`, 'dh=ffffffff') };
     const stale = emitted([...(base.tags ?? []), staleTag]);
     assert.equal(stale, absent);
+    assert.equal(emitted([...(base.tags ?? []), { ...probeTag,
+      data: probeTag.data.replace(`dh=${bodyHash}`, `dh=${rawBodyHash}`) }]), absent);
+    assert.equal(emitted([...(base.tags ?? []), { ...probeTag,
+      data: probeTag.data.replace(form, form.replace('&pThis->', '&this->').replace(/\)$/, ',@call)')) }]), absent);
     assert.notEqual(tagged, absent);
-    assert.match(tagged, /pArray = &this->tSlotListArray;/);
+    assert.match(tagged, /pArray = &pThis->tSlotListArray;/);
     assert.match(tagged, /pArray->TSGrowableArray<TSExplicitList<SGAMEDATA, -572662307>>::Destructor\(\)/);
     assert.match(tagged, /pArray->m_alloc = 0;\n    pArray->m_count = 0;\n    pArray->m_data = 0;/);
-    assert.match(tagged, /this->InternalClear\(1\)/);
+    assert.match(tagged, /pThis->InternalClear\(1\)/);
   });
 });
