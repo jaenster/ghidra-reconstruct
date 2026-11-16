@@ -1,4 +1,6 @@
 import { builtinTruthSite } from './truth-form-safety.js';
+import { packByAddition } from './pack-add-form.js';
+import { delayParameterStore } from './delay-parameter-store.js';
 /**
  * VC8 source forms recorded per function.
  *
@@ -198,6 +200,14 @@ import { builtinTruthSite } from './truth-form-safety.js';
  *                        `T N = E;` and that life's reads read N (E may read V: it reads
  *                        the old value, and keeps V); refused when V is read again after
  *                        them before a new store, or inside a loop.
+ *   delay(V,C)           the private 32-bit by-value parameter store `V = E;` just
+ *                        before `if (C) return K;` moves after that guard. E is a
+ *                        plain 32-bit integer binding, C a pure integer test that
+ *                        reads no V, and K a constant. Prefix uses must prove the
+ *                        slot cannot escape through implicit or explicit references.
+ *   packadd(X,Y)         the unique `(U32)(U16)Y << 16 | (U32)(U16)X` becomes an
+ *                        addition with the same operands. Cast aliases must prove
+ *                        unsigned 32/16-bit types and X/Y ordinary integer reads.
  *   zerolife(V)          `T V = F(...); if (V) return;` becomes
  *                        `if (F(...)) return; T V = 0;`: the continuing path's later
  *                        lifetime starts at zero. Both T and the declared call result
@@ -478,6 +488,8 @@ export type Vc8Form =
   | { op: 'decl'; name: string; before: string }
   | { op: 'unselect'; cond: string; index: number }
   | { op: 'split'; name: string; type: string; rename: string }
+  | { op: 'delay'; name: string; cond: string }
+  | { op: 'packadd'; low: string; high: string }
   | { op: 'tsel'; cond: string; index: number }
   | { op: 'switch'; expr: string; index: number }
   | { op: 'nestcall'; name: string; index: number }
@@ -554,7 +566,7 @@ export interface Vc8FormOptions {
   selectTables?: Vc8FormTables;
 }
 
-const OPS = new Set(['zerolife', 'nullfault32', 'swdefault', 'seq', 'fold', 'join', 'coalesce', 'recordwalk', 'cache', 'own', 'guards', 'merge-guards', 'retval', 'branchret', 'width', 'boolflag', 'retwiden', 'arms',
+const OPS = new Set(['delay', 'packadd', 'zerolife', 'nullfault32', 'swdefault', 'seq', 'fold', 'join', 'coalesce', 'recordwalk', 'cache', 'own', 'guards', 'merge-guards', 'retval', 'branchret', 'width', 'boolflag', 'retwiden', 'arms',
   'nest', 'merge-tail', 'tailguard', 'tailcopy', 'continue', 'dup', 'tarms', 'zero', 'nonzero', 'bool', 'cmp', 'swap', 'ifsel', 'clamp', 'split', 'select', 'decl', 'unselect', 'tsel', 'hoist',
   'nestcall', 'fill', 'elems', 'copy', 'shift', 'ptrwalk', 'rowptr', 'acc', 'retvar', 'onecall', 'roundup', 'swmerge', 'switch', 'dec', 'opas', 'range', 'castout', 'signbit', 'nullfield', 'zinit', 'znew', 'swclamp', 'retbase', 'postdec']);
 
@@ -743,6 +755,8 @@ export function parseVc8Form(text: string): Vc8Form | undefined {
         ? { op: 'clamp', name: args[0], index: i } : undefined;
     }
     case 'decl': return args.length === 2 && !anchor ? { op: 'decl', name: args[0], before: args[1] } : undefined;
+    case 'delay': return args.length === 2 && !anchor && /^[A-Za-z_]\w*$/.test(args[0]) && args[1] ? { op: 'delay', name: args[0], cond: args[1] } : undefined;
+    case 'packadd': return args.length === 2 && !anchor && args.every(Boolean) ? { op: 'packadd', low: args[0], high: args[1] } : undefined;
     case 'split': return args.length === 3 && !anchor ? { op: 'split', name: args[0], type: args[1], rename: args[2] } : undefined;
     case 'dec': {
       if (args.length !== 2 || anchor || !/^[A-Za-z_]\w*$/.test(args[0]) || !/^[1-9]\d*$/.test(args[1])) return undefined;
@@ -5123,6 +5137,8 @@ const APPLY: { [K in Vc8Form['op']]: (fn: FunctionDecl, f: Extract<Vc8Form, { op
     if ('why' in result) refuse(result.why);
     else fn.body = result.body;
   },
+  delay: (fn, f) => { const why = delayParameterStore(fn, f.name, f.cond, selectTables); if (why) refuse(why); },
+  packadd: (fn, f) => { const why = packByAddition(fn, f.low, f.high, selectTables); if (why) refuse(why); },
 };
 
 /**
@@ -5179,6 +5195,8 @@ export function applyVc8Forms(tu: TranslationUnit, forms: Array<{ form: Vc8Form;
     prefixUsed = new Set();
     try {
       if (!fn) refuse('no function body');
+      if ((form.op === 'delay' || form.op === 'packadd') && (next.declarations.length !== 1 || next.declarations[0] !== fn))
+        refuse('these value forms need one plain function with externally supplied type facts');
       (APPLY[form.op] as (fn: FunctionDecl, f: Vc8Form) => void)(fn!, respellForm(fn!, form));
       cur = next;
       onSite?.({ form, tag, applied: true, ...(prefixUsed.size ? { prefix: [...prefixUsed] } : {}) });
