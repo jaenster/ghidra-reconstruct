@@ -6,8 +6,9 @@
  * their dh no longer matches, so the generator refuses the tag until it is re-measured.
  *
  * Placeholders, replaced in this order (render.ts): __DRY__, __GROUP__, __TAG__, __JSON__. The
- * markers __EXT_HELPERS__, __EXT_ORDER__, __EXT_CHECK__ and __EXT_APPLY__ take the code of the
- * ops the template did not know (vc8form, linkage), and only when the group holds one of them.
+ * markers __EXT_HELPERS__, __EXT_ORDER__, __EXT_CHECK__, __EXT_APPLY__, __EXT_BEGIN__ and
+ * __EXT_COMMITTED__ take the code of the ops the template did not know (ext-ops.ts), and only when
+ * the group holds one of them.
  */
 
 export const PROPOSAL_APPLY_TEMPLATE = String.raw`boolean DRY=__DRY__; String TAG="__TAG__"; String GROUP="__GROUP__";
@@ -86,7 +87,7 @@ int tx = -1;
 try {
 for (com.google.gson.JsonElement pe : props) { com.google.gson.JsonObject P = pe.getAsJsonObject(); int id = P.get("id").getAsInt(); java.util.List<com.google.gson.JsonObject> ops = new java.util.ArrayList<>();
  for (String k : ORDER) for (com.google.gson.JsonElement oe : P.getAsJsonArray("ops")) if (oe.getAsJsonObject().get("op").getAsString().equals(k)) ops.add(oe.getAsJsonObject());
- String why = null; java.util.Set<com.google.gson.JsonObject> done = new java.util.HashSet<>();
+ String why = null; java.util.Set<com.google.gson.JsonObject> done = new java.util.HashSet<>();__EXT_BEGIN__
  // check every expect first
  for (com.google.gson.JsonObject o : ops) { if (why != null) break; String op = o.get("op").getAsString(); com.google.gson.JsonObject ex = o.getAsJsonObject("expect");
   try {
@@ -147,7 +148,7 @@ for (com.google.gson.JsonElement pe : props) { com.google.gson.JsonObject P = pe
    String a = js.apply(o, "function") != null ? js.apply(o, "function") : js.apply(o, "address"); ghidra.program.model.listing.Function tf = a == null ? null : getFunctionAt(toAddr(a)); if (tf != null) tf.addTag(TAG); }
   good = true;
  } catch (Exception x) { err = x.getMessage(); } finally { currentProgram.endTransaction(sub, good); }
- if (good) { println("APPLIED " + id + " " + ops.size() + " ops"); okP++; nOps += ops.size(); } else { println("FAILED " + id + " " + err); skipP++; }
+ if (good) { __EXT_COMMITTED__println("APPLIED " + id + " " + ops.size() + " ops"); okP++; nOps += ops.size(); } else { println("FAILED " + id + " " + err); skipP++; }
 }
 int restored = 0;
 for (java.util.Map.Entry<String, String> pe : plates.entrySet()) { String now = L.getComment(ghidra.program.model.listing.CodeUnit.PLATE_COMMENT, toAddr(pe.getKey())); if (now == null) now = "";
