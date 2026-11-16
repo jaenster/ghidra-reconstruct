@@ -197,7 +197,9 @@ import { builtinTruthSite } from './truth-form-safety.js';
  *   split(V,T,N)         the store `V = E;` that begins a new life of V is written
  *                        `T N = E;` and that life's reads read N (E may read V: it reads
  *                        the old value, and keeps V); refused when V is read again after
- *                        them before a new store, or inside a loop.
+ *                        them before a new store, or inside a loop. An addressed scalar
+ *                        requires one outer-block zero reset, the same ordinary 32-bit
+ *                        type, no earlier identity escape and all address uses afterward.
  *   zerolife(V)          `T V = F(...); if (V) return;` becomes
  *                        `if (F(...)) return; T V = 0;`: the continuing path's later
  *                        lifetime starts at zero. Both T and the declared call result
@@ -3071,9 +3073,82 @@ function doZeroLife(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'zerolife' }>): 
   b.statements.splice(k, 2, guard, statement);
 }
 
+/**
+ * An addressed scalar can start a fresh identity only after its old identity is
+ * proved unescaped. A final outer-block reset dominates every later use; all
+ * those uses, including address operands, belong to the new local until return.
+ */
+function doSplitAddressed(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'split' }>): void {
+  const v = f.name, body = fn.body!;
+  const decls = [...walk(body)].filter(x => x.node.kind === NodeKind.VariableDecl)
+    .map(x => x.node as VariableDecl).filter(d => d.name.name === v);
+  if (decls.length !== 1 || fn.parameters.some(p => p.name?.name === v)) refuse(`${v} needs one local binding`);
+  const decl = decls[0], type = text(decl.type);
+  if (!['int', 'int32_t', 'uint32_t', 'unsigned', 'unsignedint'].includes(type) || norm(f.type) !== type
+    || decl.specifiers.length || decl.attributes.length || decl.directInit || decl.copyListInit)
+    refuse('addressed split needs the same ordinary 32-bit scalar type');
+  const at = body.statements.findIndex(s => declOf(s) === decl);
+  if (at < 0) refuse('addressed split needs an outer-block declaration');
+  if (identifiers(body).has(f.rename)) refuse(`${f.rename} is already named in the function`);
+  let replacement: Statement;
+  try {
+    const parsed = parse(`void __vc8f() { ${f.type} ${f.rename} = 0; }`).declarations[0] as FunctionDecl;
+    replacement = parsed.body!.statements[0];
+    if (declOf(replacement)?.name.name !== f.rename) refuse('the new scalar name is not a declarator');
+  } catch {
+    refuse('the new scalar name is not a declarator');
+  }
+  const parents = parentsOf(fn);
+  for (const { node } of walk(body)) {
+    if ([NodeKind.GotoStmt, NodeKind.LabelStmt, NodeKind.LambdaExpr, NodeKind.AsmDecl, NodeKind.TryStmt,
+      NodeKind.SehTryStmt, NodeKind.WhileStmt, NodeKind.DoWhileStmt, NodeKind.ForStmt, NodeKind.ForRangeStmt,
+      NodeKind.SwitchStmt, NodeKind.PpConditionalStmt, NodeKind.FunctionDecl, NodeKind.ClassDecl,
+      NodeKind.StructDecl, NodeKind.UnionDecl, NodeKind.EnumDecl, NodeKind.TypedefDecl, NodeKind.TypeAliasDecl,
+      NodeKind.UsingDecl, NodeKind.UsingDirective, NodeKind.TemplateDecl, NodeKind.TemplateType,
+      NodeKind.CoAwaitExpr, NodeKind.CoYieldExpr, NodeKind.CoReturnStmt].includes(node.kind))
+      refuse('addressed split does not model this scope, control flow or capture');
+    if (node.kind === NodeKind.CallExpr && /(?:^|::)(?:_+|__builtin_)?(?:setjmp|longjmp)(?:\d+|ex)?$/.test(calleeName((node as CallExpr).callee) ?? ''))
+      refuse('addressed split does not model nonlocal jumps');
+    if (isId(node, v)) {
+      const p = parents.get(node);
+      if (p?.kind === NodeKind.QualifiedId) refuse(`${v} also names a qualified symbol`);
+    }
+  }
+  const sites = body.statements.map((s, k) => ({ k, store: storeOf(s) }))
+    .filter(({ k, store }) => k > at && store?.operator === '=' && isId(unparen(store.left), v)
+      && unparen(store.right).kind === NodeKind.IntegerLiteral && (unparen(store.right) as IntegerLiteralExpr).value === 0n);
+  if (sites.length !== 1) refuse('addressed split needs one outer-block zero reset');
+  const { k, store } = sites[0];
+  const before = body.statements.slice(0, k), after = body.statements.slice(k + 1);
+  if (!after.some(s => addressTaken({ ...fn, body: { ...body, statements: [s] } }, v)))
+    refuse('the new lifetime has no address use');
+  // In the old lifetime allow only plain scalar stores and reads that perform a
+  // proven value conversion. In particular, an unknown call can bind V by
+  // reference even without spelling &V, so it needs a by-value integer contract.
+  for (const s of before) for (const { node } of walk(s)) {
+    if (!isId(node, v) || node === decl.name) continue;
+    let cur: ASTNode = node, p = parents.get(cur);
+    while (p?.kind === NodeKind.ParenExpr) { cur = p; p = parents.get(cur); }
+    if (p?.kind === NodeKind.AssignExpr && (p as AssignExpr).operator === '=' && (p as AssignExpr).left === cur) {
+      let storeNode: ASTNode = p, statement = parents.get(storeNode);
+      while (statement?.kind === NodeKind.ParenExpr) { storeNode = statement; statement = parents.get(storeNode); }
+      if (statement?.kind === NodeKind.ExprStmt && (statement as ExprStmt).expression === storeNode) continue;
+    }
+    if (p?.kind === NodeKind.CallExpr) {
+      const name = calleeName((p as CallExpr).callee);
+      if (!name || localNames(fn).has(name.split('::')[0])) refuse('an earlier call may capture the scalar by reference');
+    }
+    if (readWidth(fn, node, parents) === undefined) refuse(`an earlier use may observe ${v}'s identity`);
+  }
+  const d = declOf(replacement!)!;
+  d.initializer = store!.right;
+  body.statements[k] = replacement!;
+  for (const s of after) for (const { node } of walk(s)) if (isId(node, v)) node.name = f.rename;
+}
+
 function doSplit(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'split' }>): void {
   if (localNames(fn).has(f.rename)) refuse(`${f.rename} exists`);
-  if (addressTaken(fn, f.name)) refuse(`&${f.name} is taken`);
+  if (addressTaken(fn, f.name)) { doSplitAddressed(fn, f); return; }
   const parents = parentsOf(fn);
   const inLoop = (n: ASTNode) => { for (let p = parents.get(n); p; p = parents.get(p)) if ([NodeKind.WhileStmt, NodeKind.DoWhileStmt, NodeKind.ForStmt].includes(p.kind)) return true; return false; };
   const sites: Array<{ b: CompoundStmt; k: number; end: number }> = [];
