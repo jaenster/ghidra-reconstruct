@@ -604,16 +604,25 @@ function sites(c: Ctx, maxAnchors: number): string[] {
     out.add(`roundup(${v})`);
     for (const p of params) out.add(`roundup(${v},${p})`);
   }
-  // clamp: a local an if tests against a bound with a relational operator; alone, and the
-  // i-th such if where there are several (doClamp refuses what is no adjacent clamp).
+  // clamp: a tested local, or a local receiving the tested expression in a
+  // bound-first guard. doClamp checks adjacency, types and bindings.
   const clamped = new Map<string, number>();
   for (const n of all) {
     if (n.kind !== NodeKind.IfStmt || n.elseBranch) continue;
     const c = unparen(n.condition);
     if (c.kind !== NodeKind.BinaryExpr || !['<', '<=', '>', '>='].includes(c.operator)) continue;
-    for (const side of [unparen(c.left), unparen(c.right)]) {
-      if (side.kind === NodeKind.Identifier && locals.has(side.name)) clamped.set(side.name, (clamped.get(side.name) ?? 0) + 1);
+    const names = new Set<string>();
+    for (const side of [unparen(c.left), unparen(c.right)])
+      if (side.kind === NodeKind.Identifier && locals.has(side.name)) names.add(side.name);
+    const arm = n.thenBranch.kind === NodeKind.CompoundStmt
+      ? (n.thenBranch.statements.length === 1 ? n.thenBranch.statements[0] : undefined) : n.thenBranch;
+    const assignment = arm?.kind === NodeKind.ExprStmt ? unparen(arm.expression) : undefined;
+    if (assignment?.kind === NodeKind.AssignExpr && assignment.operator === '=') {
+      const lhs = unparen(assignment.left), rhs = key(pr(unparen(assignment.right)));
+      if (lhs.kind === NodeKind.Identifier && locals.has(lhs.name)
+        && [c.left, c.right].some(side => key(pr(unparen(side))) === rhs)) names.add(lhs.name);
     }
+    for (const name of names) clamped.set(name, (clamped.get(name) ?? 0) + 1);
   }
   for (const [v, n] of clamped) {
     out.add(`clamp(${v})`);

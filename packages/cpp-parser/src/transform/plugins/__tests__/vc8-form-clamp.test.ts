@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import { parse } from '../../../parser/index.js';
 import { emit } from '../../../emit/index.js';
 import type { AnyNode, TranslationUnit } from '../../../ast/nodes.js';
+import { NodeKind } from '../../../ast/kinds.js';
+import { traverseAST } from '../../../ast/visitor.js';
 import { applyVc8Forms, parseVc8Form, type Vc8FormSite, type Vc8FormTables } from '../builtins/vc8-form.js';
 
 const flat = (s: string) => s.replace(/\s+/g, ' ').trim();
@@ -135,4 +137,86 @@ describe('vc8form clamp', () => {
       assert.equal(out, before, source);
     }
   });
+
+  for (const [condition, expected] of [['a >= 1', 'a >= 1'], ['1 <= a', 'a >= 1'],
+    ['a < 1', 'a < 1'], ['1 > a', 'a < 1'], ['0 < a', 'a >= 1'], ['a > 0', 'a >= 1']]) {
+    it(`supports a bound-first literal guard: ${condition}`, () => {
+      const r = run(`int f(int a) { int v = 1; if (${condition}) v = a; return v; }`, 'clamp(v)');
+      assert.equal(r.site.applied, true, r.site.why);
+      assert.ok(r.out.includes(`v = ${expected} ? a : 1;`), r.out);
+    });
+  }
+
+  it('recognizes the symmetric adjacent threshold for an integer upper bound', () => {
+    const r = run('int f(int a) { int v = 10; if (a < 11) v = a; return v; }', 'clamp(v)');
+    assert.equal(r.site.applied, true, r.site.why);
+    assert.match(r.out, /v = a <= 10 \? a : 10;/);
+  });
+
+  it('keeps existing unindexed and indexed tags on their original value-first sites', () => {
+    const source = 'int f(int a) { int v = 1; if (a > 1) v = a; v = a; if (v > 10) v = 10; return v; }';
+    for (const tag of ['clamp(v)', 'clamp(v,1)']) {
+      const r = run(source, tag);
+      assert.equal(r.site.applied, true, r.site.why);
+      assert.match(r.out, /v = a <= 10 \? a : 10;/);
+      assert.match(r.out, /if \(a > 1\)/);
+    }
+    const added = run(source, 'clamp(v,2)');
+    assert.equal(added.site.applied, true, added.site.why);
+    assert.match(added.out, /v = a > 1 \? a : 1;/);
+    assert.match(added.out, /if \(v > 10\)/);
+  });
+
+  it('refuses an earlier reference-capable call even after another pass removes its location', () => {
+    const source = 'int f(int a) { int v; capture(v); v = 1; if (a >= 1) v = a; return v; }';
+    const ast = parse(source);
+    for (const n of traverseAST(ast)) if (n.kind === NodeKind.CallExpr) delete n.location;
+    const form = parseVc8Form('clamp(v)')!, sites: Vc8FormSite[] = [];
+    const after = applyVc8Forms(ast, [{ form }], s => sites.push(s));
+    assert.equal(sites[0].applied, false);
+    assert.equal(flat(emit(after as AnyNode)), flat(emit(parse(source) as AnyNode)));
+  });
+
+  it('uses an exact nonvolatile integer field, including its alias chain', () => {
+    const source = 'int f(Missile *p) { int v; v = 1; if (p->Param1 >= 1) v = p->Param1; return v; }';
+    const r = run(source, 'clamp(v)', { structFields: { Missile: { Param1: 'SignedWord' } }, typedefTargets: { SignedWord: 'int' } });
+    assert.equal(r.site.applied, true, r.site.why);
+    assert.match(r.out, /v = p->Param1 >= 1 \? p->Param1 : 1;/);
+    for (const type of ['volatile int', 'VolatileWord', 'unsigned int', 'long long', 'float', 'int&']) {
+      const refused = run(source, 'clamp(v)', { structFields: { Missile: { Param1: type } }, typedefTargets: { VolatileWord: 'volatile int' } });
+      assert.equal(refused.site.applied, false, type);
+      assert.equal(refused.out, refused.before, type);
+    }
+    const missing = run(source, 'clamp(v)', { fieldTypes: { Param1: 'int' } });
+    assert.equal(missing.site.applied, false, 'an unscoped field-name fallback is not exact');
+    assert.equal(missing.out, missing.before);
+    const volatileObject = run(source.replace('Missile *p', 'volatile Missile *p'), 'clamp(v)', { structFields: { Missile: { Param1: 'int' } } });
+    assert.equal(volatileObject.site.applied, false);
+    assert.equal(volatileObject.out, volatileObject.before);
+  });
+
+  for (const source of [
+    'int f(unsigned a) { int v = 1; if (a >= 1) v = a; return v; }',
+    'int f(long long a) { int v = 1; if (a >= 1) v = a; return v; }',
+    'int f(float a) { int v = 1; if (a >= 1) v = a; return v; }',
+    'int f(int a, int l) { int v = l; if (a >= l) v = a; return v; }',
+    'int f(int a) { int v = 1; if (a >= 1) v = a + 1; return v; }',
+    'int f(int a) { int v = 1; if (a >= 2) v = a; return v; }',
+    'int f(int a) { int v = 1; if (a >= 1) { v = a; side(); } return v; }',
+    'int f(int a) { int v = 1; if (a >= 1) v = a; else v = 0; return v; }',
+    'int f(int a) { int v; int &r = v; v = 1; if (a >= 1) v = a; return v; }',
+    'int f(int a) { int v; capture(v); v = 1; if (a >= 1) v = a; return v; }',
+    'int f(int a) { int v; Ref r(v); v = 1; if (a >= 1) v = a; return v; }',
+    'int f(int a, Ref r) { int v; r = v; v = 1; if (a >= 1) v = a; return v; }',
+    'int f(int a, Ref r) { int v; (v, r); v = 1; if (a >= 1) v = a; return v; }',
+    'int f(int a, Ref r) { int v; r[v]; v = 1; if (a >= 1) v = a; return v; }',
+    'int f(int a) { extern int v; v = 1; if (a >= 1) v = a; return v; }',
+    'int f(int a) { int v; while(a) { v = 1; if (a >= 1) v = a; --a; } return v; }',
+  ]) {
+    it(`refuses an unproved bound-first clamp atomically: ${source}`, () => {
+      const r = run(source, 'clamp(v)');
+      assert.equal(r.site.applied, false);
+      assert.equal(r.out, r.before);
+    });
+  }
 });

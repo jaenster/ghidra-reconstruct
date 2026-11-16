@@ -2952,7 +2952,17 @@ function doClamp(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'clamp' }>): void {
   if (addressTaken(fn, f.name)) refuse(`&${f.name} is taken`);
   const reverse: Record<string, string> = { '<': '>', '<=': '>=', '>': '<', '>=': '<=' };
   const opposite: Record<string, string> = { '<': '>=', '<=': '>', '>': '<=', '>=': '<' };
-  const hits: Array<{ b: CompoundStmt; k: number; value: Expression; bound: Expression; op: string; decl?: VariableDecl; store?: AssignExpr }> = [];
+  const literalBound = (e: Expression): bigint | undefined => {
+    const n = unparen(e);
+    if (n.kind === NodeKind.UnaryExpr && ['+', '-'].includes((n as UnaryExpr).operator)) {
+      const v = literalBound((n as UnaryExpr).operand);
+      return v === undefined ? undefined : ((n as UnaryExpr).operator === '-' ? -v : v);
+    }
+    return n.kind === NodeKind.IntegerLiteral && (n as IntegerLiteralExpr).suffix === ''
+      && (n as IntegerLiteralExpr).value >= 0n && (n as IntegerLiteralExpr).value <= 0x7fffffffn
+      ? (n as IntegerLiteralExpr).value : undefined;
+  };
+  const hits: Array<{ b: CompoundStmt; k: number; value: Expression; bound: Expression; op: string; decl?: VariableDecl; store?: AssignExpr; boundFirst?: boolean; first?: Statement }> = [];
   for (const b of blocks(fn)) {
     for (let k = 0; k + 1 < b.statements.length; k++) {
       const first = b.statements[k];
@@ -2969,25 +2979,50 @@ function doClamp(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'clamp' }>): void {
       const condition = unparen(guard.condition);
       if (condition.kind !== NodeKind.BinaryExpr) continue;
       const compare = condition as BinaryExpr;
-      let op = compare.operator as string;
-      let bound: Expression;
-      if (isId(unparen(compare.left), f.name) && opposite[op]) bound = compare.right;
-      else if (isId(unparen(compare.right), f.name) && reverse[op]) {
-        bound = compare.left;
-        op = reverse[op];
-      } else continue;
       const branch = guard.thenBranch.kind === NodeKind.CompoundStmt
         ? ((guard.thenBranch as CompoundStmt).statements.length === 1 ? (guard.thenBranch as CompoundStmt).statements[0] : undefined)
         : guard.thenBranch;
       const clampStore = branch && storeOf(branch);
-      if (!clampStore || clampStore.operator !== '=' || !isId(unparen(clampStore.left), f.name) || text(clampStore.right) !== text(bound)) continue;
-      hits.push({ b, k, value, bound, op, decl: decl?.name.name === f.name ? decl : undefined, store });
+      if (!clampStore || clampStore.operator !== '=' || !isId(unparen(clampStore.left), f.name)) continue;
+      let op = compare.operator as string;
+      let bound: Expression | undefined;
+      if (isId(unparen(compare.left), f.name) && opposite[op]) bound = compare.right;
+      else if (isId(unparen(compare.right), f.name) && reverse[op]) { bound = compare.left; op = reverse[op]; }
+      const destination = { decl: decl?.name.name === f.name ? decl : undefined, store };
+      if (bound && text(clampStore.right) === text(bound)) {
+        hits.push({ b, k, value, bound, op, ...destination });
+        continue;
+      }
+      // V=L; if (E op L) V=E, with a literal bound. Keep this test's sense;
+      // tarms can choose the inverse-condition spelling of the resulting select.
+      const e = clampStore.right;
+      const limit = literalBound(value);
+      if (limit === undefined || !opposite[compare.operator]) continue;
+      let threshold: bigint | undefined;
+      if (text(unparen(compare.left)) === text(unparen(e))) { op = compare.operator; threshold = literalBound(compare.right); }
+      else if (text(unparen(compare.right)) === text(unparen(e))) { op = reverse[compare.operator]; threshold = literalBound(compare.left); }
+      else continue;
+      if (threshold === undefined) continue;
+      if (threshold !== limit) {
+        // Integer-only proof below: E > L-1 is E >= L, and E < L+1 is E <= L.
+        // This covers Ghidra's `0 < Param1` for the same literal-one lower clamp.
+        if (op === '>' && threshold + 1n === limit) op = '>=';
+        else if (op === '<' && threshold - 1n === limit) op = '<=';
+        else continue;
+      }
+      hits.push({ b, k, value: e, bound: value, op: opposite[op], boundFirst: true, first, ...destination });
     }
   }
-  if (hits.length === 0) refuse(`no adjacent clamp of ${f.name}`);
-  if (f.index === 0 && hits.length !== 1) refuse(`${hits.length} clamps of ${f.name}`);
-  if (f.index > hits.length) refuse(`no clamp #${f.index} of ${f.name}`);
-  const { b, k, value, bound, op, decl, store } = hits[(f.index || 1) - 1];
+  // Existing tags keep their selection: value-first sites retain their old
+  // indices and an unindexed tag still means the unique old site, if present.
+  // Additional bound-first sites follow those sites for explicit indexing.
+  const legacy = hits.filter(h => !h.boundFirst);
+  const ordered = [...legacy, ...hits.filter(h => h.boundFirst)];
+  const eligible = f.index === 0 && legacy.length ? legacy : ordered;
+  if (eligible.length === 0) refuse(`no adjacent clamp of ${f.name}`);
+  if (f.index === 0 && eligible.length !== 1) refuse(`${eligible.length} clamps of ${f.name}`);
+  if (f.index > eligible.length) refuse(`no clamp #${f.index} of ${f.name}`);
+  const { b, k, value, bound, op, decl, store, boundFirst, first } = eligible[(f.index || 1) - 1];
   if (effects(value) || effects(bound)) refuse('clamp expression or bound has effects');
   if (mentions(value, f.name) || mentions(bound, f.name)) refuse(`${f.name} occurs in the clamp expression or bound`);
   const readNames = new Set([...identifiers(value), ...identifiers(bound)]);
@@ -3012,6 +3047,60 @@ function doClamp(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'clamp' }>): void {
   });
   if (!promotesToInt(value, shapeOf)) refuse(`${text(value)} is not known to be an int`);
   if (!integral32(bound, shapeOf)) refuse(`${text(bound)} is not known to be a 32-bit integer`);
+  if (boundFirst) {
+    if (declared.specifiers.length) refuse('bound-first clamp destination is not an automatic local');
+    // Removing the first store must not expose V's previous value through an
+    // alias or a hidden conversion while E is evaluated. Keep this extension
+    // to ordinary integer slots and exact pointer-member reads, with a literal L.
+    const all = [...walk(fn.body!)].map(x => x.node);
+    const opaque = new Set([NodeKind.ReferenceType, NodeKind.RValueReferenceType, NodeKind.LambdaExpr,
+      NodeKind.ClassDecl, NodeKind.StructDecl, NodeKind.UnionDecl, NodeKind.TypedefDecl, NodeKind.TypeAliasDecl, NodeKind.FunctionDecl,
+      NodeKind.GotoStmt, NodeKind.LabelStmt, NodeKind.AsmDecl, NodeKind.TryStmt, NodeKind.SehTryStmt,
+      NodeKind.ForStmt, NodeKind.ForRangeStmt, NodeKind.WhileStmt, NodeKind.DoWhileStmt, NodeKind.PpConditionalStmt,
+      NodeKind.NewExpr, NodeKind.CoAwaitExpr, NodeKind.CoYieldExpr, NodeKind.CoReturnStmt]);
+    if (all.some(n => opaque.has(n.kind))) refuse('bound-first clamp has opaque control, local types or reference bindings');
+    const e = unparen(value), localTypes = localTypesOf(fn);
+    let spelling: string | undefined, objectSpelling: string | undefined;
+    if (e.kind === NodeKind.Identifier) {
+      const t = localTypes.get((e as Identifier).name);
+      if (t) spelling = emit(t as never);
+    } else if (e.kind === NodeKind.MemberExpr) {
+      const m = e as MemberExpr, object = shapeOf(m.object);
+      const base = unparen(m.object);
+      const objectType = base.kind === NodeKind.Identifier ? localTypes.get((base as Identifier).name) : undefined;
+      if (m.isArrow && objectType && object?.stars === 1 && m.member.kind === NodeKind.Identifier) {
+        spelling = tables?.structFields?.[object.base]?.[(m.member as Identifier).name];
+        objectSpelling = emit(objectType as never);
+      }
+    }
+    if (!spelling || !builtinTruthSite(fn, value, value, tables)) refuse('bound-first clamp needs an exact builtin integer slot');
+    const seenTypes = new Set<string>(), pendingTypes = [spelling!, ...(objectSpelling ? [objectSpelling] : [])];
+    while (pendingTypes.length) {
+      const s = pendingTypes.pop()!;
+      if (/\bvolatile\b|&/.test(s)) refuse('bound-first clamp source is volatile or a reference');
+      for (const word of s.match(/[A-Za-z_]\w*/g) ?? []) if (!seenTypes.has(word)) {
+        seenTypes.add(word);
+        const target = tables?.typedefTargets?.[word];
+        if (target) pendingTypes.push(target);
+      }
+    }
+    const offset = first?.location?.start.offset;
+    if (offset === undefined) refuse('bound-first clamp has no source position');
+    for (const n of all) {
+      if ((n.location?.start.offset ?? -Infinity) >= offset! || !mentions(n, f.name)) continue;
+      if (n.kind === NodeKind.CallExpr) refuse(`${f.name} may bind a reference in an earlier call`);
+      if (n.kind === NodeKind.VariableDecl && (n as VariableDecl).name.name !== f.name) {
+        const t = shapeOfNode((n as VariableDecl).type, 0, name => tables?.typedefTargets?.[name]);
+        if (!t || (t.stars === 0 && !promotesToInt({ kind: NodeKind.Identifier, name: (n as VariableDecl).name.name } as Identifier, shapeOf)))
+          refuse(`${f.name} may bind an earlier constructor or reference`);
+      }
+      if ([NodeKind.BinaryExpr, NodeKind.AssignExpr, NodeKind.UnaryExpr, NodeKind.ConditionalExpr, NodeKind.CommaExpr,
+        NodeKind.SubscriptExpr, NodeKind.InitListExpr,
+        NodeKind.CStyleCastExpr, NodeKind.FunctionalCastExpr, NodeKind.StaticCastExpr, NodeKind.ConstCastExpr,
+        NodeKind.ReinterpretCastExpr, NodeKind.DynamicCastExpr].includes(n.kind)
+        && !builtinTruthSite(fn, n, n as Expression, tables)) refuse(`${f.name} has an earlier unproved conversion or operator`);
+    }
+  }
   const select = {
     kind: NodeKind.ConditionalExpr,
     condition: { kind: NodeKind.BinaryExpr, operator: opposite[op], left: cloneNode(value), right: cloneNode(bound) },
