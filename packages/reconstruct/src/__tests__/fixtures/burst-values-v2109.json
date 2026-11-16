@@ -1,0 +1,831 @@
+{
+  "fn": {
+    "name": "Skills_SrvDoFunc_041_ChargeRelease_RandomMissileBurst",
+    "address": "005d5080",
+    "entryPoint": "005d5080",
+    "signature": "BOOL Skills_SrvDoFunc_041_ChargeRelease_RandomMissileBurst(SGAMEDATA * pGame, D2UnitStrc * pUnit, eD2Skills eSkill, int32_t nSkillLvl)",
+    "returnType": "BOOL",
+    "callingConvention": "__fastcall",
+    "size": 411,
+    "isThunk": false,
+    "isExternal": false,
+    "hasVarArgs": false,
+    "namespace": "D2Game::SKILLS::SkillAss",
+    "comment": "@function Skills_SrvDoFunc_041_ChargeRelease_RandomMissileBurst\n@address Game.exe.ram:005d5080\n@date 2026.06.20\n@calling __fastcall\n@description Server do-func 41: the third charge release of Royal Strike (Phoenix Strike). Gets the target/cursor position and the charge-up missile type and count, then spawns that many missiles at seeded +-20 offsets around the target, storing the seed and packed XY in each missile.\nSlot from skills.txt srvdofunc 41.",
+    "sourceFile": null,
+    "sourceLine": null,
+    "sourceInfo": null,
+    "parameters": [
+      {
+        "name": "pGame",
+        "dataType": "SGAMEDATA *",
+        "size": 4,
+        "ordinal": 0,
+        "storage": "ECX:4",
+        "stackOffset": null,
+        "resolvedType": null
+      },
+      {
+        "name": "pUnit",
+        "dataType": "D2UnitStrc *",
+        "size": 4,
+        "ordinal": 1,
+        "storage": "EDX:4",
+        "stackOffset": null,
+        "resolvedType": null
+      },
+      {
+        "name": "eSkill",
+        "dataType": "eD2Skills",
+        "size": 4,
+        "ordinal": 2,
+        "storage": "Stack[0x4]:4",
+        "stackOffset": 4,
+        "resolvedType": null
+      },
+      {
+        "name": "nSkillLvl",
+        "dataType": "int32_t",
+        "size": 4,
+        "ordinal": 3,
+        "storage": "Stack[0x8]:4",
+        "stackOffset": 8,
+        "resolvedType": null
+      }
+    ],
+    "localVariables": [
+      {
+        "name": "lSeedCalc",
+        "dataType": "D2UnitStrc *",
+        "size": 4,
+        "storage": "EAX:4",
+        "stackOffset": null,
+        "resolvedType": "D2UnitStrc *"
+      },
+      {
+        "name": "bHasPos",
+        "dataType": "BOOL",
+        "size": 4,
+        "storage": "EAX:4",
+        "stackOffset": null,
+        "resolvedType": "BOOL"
+      },
+      {
+        "name": "eMissileId",
+        "dataType": "eMissilesId",
+        "size": 4,
+        "storage": "EAX:4",
+        "stackOffset": null,
+        "resolvedType": "eMissilesId"
+      },
+      {
+        "name": "nMissileCount",
+        "dataType": "uint32_t",
+        "size": 4,
+        "storage": "EAX:4",
+        "stackOffset": null,
+        "resolvedType": "uint32_t"
+      },
+      {
+        "name": "uVar5",
+        "dataType": "uint32_t",
+        "size": 4,
+        "storage": "EDI:4",
+        "stackOffset": null,
+        "resolvedType": null
+      },
+      {
+        "name": "pMissile",
+        "dataType": "D2UnitStrc *",
+        "size": 4,
+        "storage": "EAX:4",
+        "stackOffset": null,
+        "resolvedType": "D2UnitStrc *"
+      },
+      {
+        "name": "nSeedLow",
+        "dataType": "uint",
+        "size": 4,
+        "storage": "EAX:4",
+        "stackOffset": null,
+        "resolvedType": "uint"
+      },
+      {
+        "name": "nTargetX",
+        "dataType": "uint",
+        "size": 4,
+        "storage": "Stack[-0x8]:4",
+        "stackOffset": -8,
+        "resolvedType": "uint"
+      },
+      {
+        "name": "nTargetY",
+        "dataType": "uint",
+        "size": 4,
+        "storage": "Stack[-0xc]:4",
+        "stackOffset": -12,
+        "resolvedType": "uint"
+      },
+      {
+        "name": "pGameCopy",
+        "dataType": "SGAMEDATA *",
+        "size": 4,
+        "storage": "Stack[-0x10]:4",
+        "stackOffset": -16,
+        "resolvedType": "SGAMEDATA *"
+      },
+      {
+        "name": "sSeedCopy",
+        "dataType": "D2SeedStrc",
+        "size": 8,
+        "storage": "Stack[-0x18]:8",
+        "stackOffset": -24,
+        "resolvedType": "D2SeedStrc"
+      },
+      {
+        "name": "sSkillArg",
+        "dataType": "D2SkillArgStrc",
+        "size": 92,
+        "storage": "Stack[-0x74]:92",
+        "stackOffset": -116,
+        "resolvedType": null
+      },
+      {
+        "name": "lSeedResult",
+        "dataType": "uint64_t",
+        "size": 8,
+        "storage": "HASH:41fe0a8f1ea:8",
+        "stackOffset": null,
+        "resolvedType": null
+      },
+      {
+        "name": "uSeedRoll",
+        "dataType": "ulonglong",
+        "size": 8,
+        "storage": "HASH:27ff423dd71:8",
+        "stackOffset": null,
+        "resolvedType": "ulonglong"
+      }
+    ],
+    "tags": [
+      {
+        "type": "nishimura-contrib"
+      }
+    ],
+    "decompiled": "\n/* WARNING: Enum \"eCollisionFlags\": Some values do not have unique names */\n/* WARNING: Enum \"eD2TimerType\": Some values do not have unique names */\n/* WARNING: Enum \"eD2TimerTypeDWORD\": Some values do not have unique names */\n/* @function Skills_SrvDoFunc_041_ChargeRelease_RandomMissileBurst\n   @address Game.exe.ram:005d5080\n   @date 2026.06.20\n   @calling __fastcall\n   @description Server do-func 41: the third charge release of Royal Strike (Phoenix Strike). Gets\n   the target/cursor position and the charge-up missile type and count, then spawns that many\n   missiles at seeded +-20 offsets around the target, storing the seed and packed XY in each\n   missile.\n   Slot from skills.txt srvdofunc 41. */\n\nBOOL __fastcall\nD2Game::SKILLS::SkillAss::Skills_SrvDoFunc_041_ChargeRelease_RandomMissileBurst\n          (SGAMEDATA *pGame,D2UnitStrc *pUnit,eD2Skills eSkill,int32_t nSkillLvl)\n\n{\n  D2SeedStrc DVar1;\n  BOOL bHasPos;\n  eMissilesId eMissileId;\n  uint32_t nMissileCount;\n  D2UnitStrc *pMissile;\n  uint nSeedLow;\n  D2SkillArgStrc sSkillArg;\n  D2SeedStrc sSeedCopy;\n  SGAMEDATA *pGameCopy;\n  uint nTargetY;\n  uint nTargetX;\n  ulonglong uSeedRoll;\n  \n  DVar1 = (D2SeedStrc)\n          ((ulonglong)(pUnit->sSeed).nSeedLow * 0x6ac690c5 + (ulonglong)(pUnit->sSeed).nSeedHigh);\n  pUnit->sSeed = DVar1;\n  pGameCopy = pGame;\n  D2Common::Seed::InitSeed_Param_666(&sSeedCopy,DVar1.nSeedLow);\n  if (((((-1 < (int)eSkill) &&\n        ((int)eSkill < D2Common::ITEMS::Items::sgptDataTable->nTxtSkillsCount)) &&\n       (D2Common::ITEMS::Items::sgptDataTable->pTxtSkills + eSkill != (D2SkillsTxt *)0x0)) &&\n      ((bHasPos = D2Game::SKILLS::SkillsServer::SKILLS_GetTargetOrCursorPos\n                            (pGame,pUnit,&nTargetX,&nTargetY), bHasPos != 0 &&\n       (eMissileId = D2Game::SKILLS::SkillAss::SKILLASS_GetChargeUpMissile(pUnit,eSkill),\n       0 < (int)eMissileId)))) &&\n     (nMissileCount =\n           D2Game::SKILLS::SkillAss::SKILLASS_GetChargeUpCalcValue(pUnit,eSkill,nSkillLvl),\n     nMissileCount != 0)) {\n    compiler::memset(&sSkillArg,0,0x5c);\n    sSkillArg.nX = nTargetX;\n    sSkillArg.nFlags = 3;\n    sSkillArg.nY = nTargetY;\n    sSkillArg.eSkillNo = eSkill;\n    sSkillArg.nSkillLevel = nSkillLvl;\n    nSkillLvl = nMissileCount;\n    sSkillArg.pOwner = pUnit;\n    sSkillArg.nMissileTxtNo = eMissileId;\n    if (0 < (int)nMissileCount) {\n      do {\n        uSeedRoll = ((ulonglong)sSeedCopy & 0xffffffff) * 0x6ac690c5 +\n                    ((ulonglong)sSeedCopy >> 0x20);\n        sSkillArg.nUnitX = (int)uSeedRoll + (int)((uSeedRoll & 0xffffffff) / 0x28) * -0x28 + -0x14;\n        sSeedCopy = (D2SeedStrc)((uSeedRoll & 0xffffffff) * 0x6ac690c5 + (uSeedRoll >> 0x20));\n        sSkillArg.nUnitY =\n             sSeedCopy.nSeedLow + (int)(((ulonglong)sSeedCopy & 0xffffffff) / 0x28) * -0x28 + -0x14;\n        if ((sSkillArg.nUnitX == 0) && (sSkillArg.nUnitY == 0)) {\n          sSkillArg.nUnitX = 0x14;\n        }\n        pMissile = D2Game::MISSILES::Missiles::CreatingMissile(pGameCopy,&sSkillArg);\n        if (pMissile != (D2UnitStrc *)0x0) {\n          nSeedLow = D2Common::Seed::GetSeed_nSeedLow(&sSeedCopy);\n          D2Common::Units::Missile::SetTargetX(pMissile,nSeedLow);\n          D2Common::Units::Missile::SetTargetY\n                    (pMissile,CONCAT22((undefined2)sSkillArg.nUnitY,(undefined2)sSkillArg.nUnitX));\n        }\n        nSkillLvl = nSkillLvl + -1;\n      } while (nSkillLvl != 0);\n    }\n    return 1;\n  }\n  return 0;\n}\n\n",
+    "compareSites": "0\t<\tINT_SLESS\t4\t0\tffffffff\tc:ffffffff\tv:eSkill\t005d50b6\t005d50b8\tJL\t005d50b6\tTEST\t4\tr\tz\t0\t1\n1\t<\t-\n2\t!=\t-\n3\t!=\t-\n4\t<\tINT_SLESS\t4\t0\t0\tc:0\te\t005d5106\t005d5106\tJLE\t005d5101\tTEST\t4\tr\tz\t0\t1\n5\t!=\t-\n6\t<\tINT_SLESS\t4\t0\t0\tc:0\te\t005d5152\t005d5152\tJLE\t005d513a\tTEST\t4\tr\tz\t0\t1\n7\t==\t-\n8\t==\t-\n9\t!=\t-\n10\t!=\t-"
+  },
+  "types": [
+    {
+      "name": "D2SkillArgStrc",
+      "kind": "STRUCTURE",
+      "size": 92,
+      "category": "/Diablo2",
+      "fields": [
+        {
+          "name": "nFlags",
+          "dataType": "int",
+          "offset": 0,
+          "size": 4
+        },
+        {
+          "name": "pOwner",
+          "dataType": "D2UnitStrc *",
+          "offset": 4,
+          "size": 4
+        },
+        {
+          "name": "pMissile",
+          "dataType": "D2UnitStrc *",
+          "offset": 8,
+          "size": 4
+        },
+        {
+          "name": "pTarget",
+          "dataType": "D2UnitStrc *",
+          "offset": 12,
+          "size": 4
+        },
+        {
+          "name": "nMissileTxtNo",
+          "dataType": "eMissilesId",
+          "offset": 16,
+          "size": 4
+        },
+        {
+          "name": "nX",
+          "dataType": "int",
+          "offset": 20,
+          "size": 4
+        },
+        {
+          "name": "nY",
+          "dataType": "int",
+          "offset": 24,
+          "size": 4
+        },
+        {
+          "name": "nUnitX",
+          "dataType": "int",
+          "offset": 28,
+          "size": 4
+        },
+        {
+          "name": "nUnitY",
+          "dataType": "int",
+          "offset": 32,
+          "size": 4
+        },
+        {
+          "name": "nParticleParam",
+          "dataType": "undefined4",
+          "offset": 36,
+          "size": 4
+        },
+        {
+          "name": "nVelocityOverride",
+          "dataType": "int",
+          "offset": 40,
+          "size": 4
+        },
+        {
+          "name": "eSkillNo",
+          "dataType": "eD2Skills",
+          "offset": 44,
+          "size": 4
+        },
+        {
+          "name": "nSkillLevel",
+          "dataType": "int32_t",
+          "offset": 48,
+          "size": 4
+        },
+        {
+          "name": "nSubLoopMult",
+          "dataType": "undefined4",
+          "offset": 52,
+          "size": 4
+        },
+        {
+          "name": "nLightOverride",
+          "dataType": "undefined4",
+          "offset": 56,
+          "size": 4
+        },
+        {
+          "name": "field_0x3c",
+          "dataType": "undefined4",
+          "offset": 60,
+          "size": 4
+        },
+        {
+          "name": "nStartFrame",
+          "dataType": "undefined4",
+          "offset": 64,
+          "size": 4
+        },
+        {
+          "name": "nActivateFrame",
+          "dataType": "undefined4",
+          "offset": 68,
+          "size": 4
+        },
+        {
+          "name": "nAttBonus",
+          "dataType": "undefined4",
+          "offset": 72,
+          "size": 4
+        },
+        {
+          "name": "nTotalFrames",
+          "dataType": "undefined4",
+          "offset": 76,
+          "size": 4
+        },
+        {
+          "name": "nLightRadius",
+          "dataType": "undefined4",
+          "offset": 80,
+          "size": 4
+        },
+        {
+          "name": "fpFunction",
+          "dataType": "fpMissileInitFunction *",
+          "offset": 84,
+          "size": 4
+        },
+        {
+          "name": "nFunctionParam",
+          "dataType": "intptr_t",
+          "offset": 88,
+          "size": 4
+        }
+      ]
+    },
+    {
+      "name": "D2SeedStrc",
+      "kind": "STRUCTURE",
+      "size": 8,
+      "category": "/",
+      "fields": [
+        {
+          "name": "nSeedLow",
+          "dataType": "uint",
+          "offset": 0,
+          "size": 4
+        },
+        {
+          "name": "nSeedHigh",
+          "dataType": "uint",
+          "offset": 4,
+          "size": 4
+        }
+      ]
+    },
+    {
+      "name": "D2UnitStrc",
+      "kind": "STRUCTURE",
+      "size": 244,
+      "category": "/",
+      "fields": [
+        {
+          "name": "eUnitType",
+          "dataType": "eD2UnitType",
+          "offset": 0,
+          "size": 4
+        },
+        {
+          "name": "sSeed",
+          "dataType": "D2SeedStrc",
+          "offset": 32,
+          "size": 8
+        },
+        {
+          "name": "pPath",
+          "dataType": "D2PathUnion",
+          "offset": 44,
+          "size": 4
+        }
+      ]
+    },
+    {
+      "name": "SGAMEDATA",
+      "kind": "STRUCTURE",
+      "size": 7668,
+      "category": "/",
+      "fields": []
+    },
+    {
+      "name": "D2SkillsTxt",
+      "kind": "STRUCTURE",
+      "size": 572,
+      "category": "/Diablo2/TXT/TXT Tables",
+      "fields": []
+    },
+    {
+      "name": "D2DataTableTxtStrc",
+      "kind": "STRUCTURE",
+      "size": 3224,
+      "category": "/Diablo2/TXT",
+      "fields": [
+        {
+          "name": "pTxtSkills",
+          "dataType": "D2SkillsTxt *",
+          "offset": 2968,
+          "size": 4
+        },
+        {
+          "name": "nTxtSkillsCount",
+          "dataType": "int",
+          "offset": 2976,
+          "size": 4
+        }
+      ]
+    },
+    {
+      "name": "eD2Skills",
+      "kind": "ENUM",
+      "size": 4,
+      "category": "/",
+      "values": [
+        {
+          "name": "SKILL_Attack",
+          "value": 0
+        },
+        {
+          "name": "SKILL_ImpFireMissileEx",
+          "value": 356
+        }
+      ]
+    },
+    {
+      "name": "eMissilesId",
+      "kind": "ENUM",
+      "size": 4,
+      "category": "/eMissilesId.h",
+      "values": [
+        {
+          "name": "MISSILE_Arrow",
+          "value": 0
+        },
+        {
+          "name": "MISSILE_Strafebolt",
+          "value": 683
+        }
+      ]
+    },
+    {
+      "name": "uint32_t",
+      "kind": "TYPEDEF",
+      "size": 4,
+      "category": "/stdint.h",
+      "underlyingType": "uint"
+    },
+    {
+      "name": "uint16_t",
+      "kind": "TYPEDEF",
+      "size": 2,
+      "category": "/stdint.h",
+      "underlyingType": "ushort"
+    },
+    {
+      "name": "int32_t",
+      "kind": "TYPEDEF",
+      "size": 4,
+      "category": "/stdint.h",
+      "underlyingType": "int"
+    }
+  ],
+  "callees": [
+    {
+      "name": "InitSeed_Param_666",
+      "namespace": "D2Common::Seed",
+      "address": "00650e40",
+      "returnType": "void",
+      "callingConvention": "__fastcall",
+      "parameters": [
+        {
+          "name": "pSeed",
+          "dataType": "D2SeedStrc *",
+          "size": 4,
+          "ordinal": 0,
+          "storage": "ECX:4",
+          "stackOffset": null,
+          "resolvedType": null
+        },
+        {
+          "name": "nInitSeed",
+          "dataType": "int32_t",
+          "size": 4,
+          "ordinal": 1,
+          "storage": "EDX:4",
+          "stackOffset": null,
+          "resolvedType": null
+        }
+      ],
+      "localVariables": [],
+      "size": 10,
+      "isThunk": false,
+      "isExternal": false,
+      "hasVarArgs": false
+    },
+    {
+      "name": "SKILLS_GetTargetOrCursorPos",
+      "namespace": "D2Game::SKILLS::SkillsServer",
+      "address": "0056d2c0",
+      "returnType": "BOOL",
+      "callingConvention": "__fastcall",
+      "parameters": [
+        {
+          "name": "pGame",
+          "dataType": "SGAMEDATA *",
+          "size": 4,
+          "ordinal": 0,
+          "storage": "ECX:4",
+          "stackOffset": null,
+          "resolvedType": null
+        },
+        {
+          "name": "pUnit",
+          "dataType": "D2UnitStrc *",
+          "size": 4,
+          "ordinal": 1,
+          "storage": "EDX:4",
+          "stackOffset": null,
+          "resolvedType": null
+        },
+        {
+          "name": "pnOutX",
+          "dataType": "uint *",
+          "size": 4,
+          "ordinal": 2,
+          "storage": "Stack[0x4]:4",
+          "stackOffset": 4,
+          "resolvedType": null
+        },
+        {
+          "name": "pnOutY",
+          "dataType": "uint *",
+          "size": 4,
+          "ordinal": 3,
+          "storage": "Stack[0x8]:4",
+          "stackOffset": 8,
+          "resolvedType": null
+        }
+      ],
+      "localVariables": [],
+      "size": 162,
+      "isThunk": false,
+      "isExternal": false,
+      "hasVarArgs": false,
+      "decompiled": "\n/* WARNING: Enum \"eCollisionFlags\": Some values do not have unique names */\n/* WARNING: Enum \"eD2TimerType\": Some values do not have unique names */\n/* WARNING: Enum \"eD2TimerTypeDWORD\": Some values do not have unique names */\n/* @function SKILLS_GetTargetOrCursorPos\n   @address Game.exe.ram:0056d2c0\n   @date 2026.06.20\n   @calling __fastcall\n   @description Resolves the skill aim position into tile coordinates written to *pnOutX/*pnOutY. If\n   the unit has a locked target, reads its static or dynamic path position. If no target, falls back\n   to the unit's own SP1 (cursor/destination) position. Returns 1 if both coordinates are nonzero, 0\n   otherwise. */\n\nBOOL __fastcall\nD2Game::SKILLS::SkillsServer::SKILLS_GetTargetOrCursorPos\n          (SGAMEDATA *pGame,D2UnitStrc *pUnit,uint *pnOutX,uint *pnOutY)\n\n{\n  D2UnitStrc *pTargetUnit;\n  uint nPosX;\n  uint32_t nPosY;\n  eD2UnitType eTargetUnitType;\n  D2DynamicPathStrc *pDynamicPath;\n  \n  pTargetUnit = D2Game::UNIT::SUnit::GetTargetEx(pGame,pUnit);\n  if (pTargetUnit == (D2UnitStrc *)0x0) {\n    pDynamicPath = (pUnit->pPath).pDynamicPath;\n    nPosY = D2Common::PATH::DynamicPath::GetXSP1(pDynamicPath);\n    *pnOutX = nPosY;\n    nPosY = D2Common::PATH::DynamicPath::GetYSP1(pDynamicPath);\n  }\n  else {\n    eTargetUnitType = pTargetUnit->eUnitType;\n    if ((eTargetUnitType == UNIT_OBJECT) ||\n       ((3 < (int)eTargetUnitType && ((int)eTargetUnitType < 6)))) {\n      nPosX = ((pTargetUnit->pPath).pStaticPath)->nPosX;\n    }\n    else if ((pTargetUnit->pPath).pDynamicPath == (D2DynamicPathStrc *)0x0) {\n      nPosX = 0;\n    }\n    else {\n      nPosX = D2Common::PATH::DynamicPath::GetXPos((pTargetUnit->pPath).pDynamicPath);\n    }\n    *pnOutX = nPosX;\n    eTargetUnitType = pTargetUnit->eUnitType;\n    if ((eTargetUnitType == UNIT_OBJECT) ||\n       ((3 < (int)eTargetUnitType && ((int)eTargetUnitType < 6)))) {\n      nPosY = ((pTargetUnit->pPath).pStaticPath)->nPosY;\n    }\n    else if ((pTargetUnit->pPath).pDynamicPath == (D2DynamicPathStrc *)0x0) {\n      nPosY = 0;\n    }\n    else {\n      nPosY = D2Common::PATH::DynamicPath::GetYPos((pTargetUnit->pPath).pDynamicPath);\n    }\n  }\n  *pnOutY = nPosY;\n  if ((*pnOutX != 0) && (nPosY != 0)) {\n    return 1;\n  }\n  return 0;\n}\n\n"
+    },
+    {
+      "name": "SKILLASS_GetChargeUpMissile",
+      "namespace": "D2Game::SKILLS::SkillAss",
+      "address": "005d3cf0",
+      "returnType": "int32_t",
+      "callingConvention": "__fastcall",
+      "parameters": [
+        {
+          "name": "pUnit",
+          "dataType": "D2UnitStrc *",
+          "size": 4,
+          "ordinal": 0,
+          "storage": "ECX:4",
+          "stackOffset": null,
+          "resolvedType": null
+        },
+        {
+          "name": "nSkillId",
+          "dataType": "int32_t",
+          "size": 4,
+          "ordinal": 1,
+          "storage": "EDX:4",
+          "stackOffset": null,
+          "resolvedType": null
+        }
+      ],
+      "localVariables": [],
+      "size": 162,
+      "isThunk": false,
+      "isExternal": false,
+      "hasVarArgs": false
+    },
+    {
+      "name": "SKILLASS_GetChargeUpCalcValue",
+      "namespace": "D2Game::SKILLS::SkillAss",
+      "address": "005d3da0",
+      "returnType": "uint32_t",
+      "callingConvention": "__fastcall",
+      "parameters": [
+        {
+          "name": "pUnit",
+          "dataType": "D2UnitStrc *",
+          "size": 4,
+          "ordinal": 0,
+          "storage": "ECX:4",
+          "stackOffset": null,
+          "resolvedType": null
+        },
+        {
+          "name": "eSkill",
+          "dataType": "eD2Skills",
+          "size": 4,
+          "ordinal": 1,
+          "storage": "EDX:4",
+          "stackOffset": null,
+          "resolvedType": null
+        },
+        {
+          "name": "nSkillLvl",
+          "dataType": "int32_t",
+          "size": 4,
+          "ordinal": 2,
+          "storage": "Stack[0x4]:4",
+          "stackOffset": 4,
+          "resolvedType": null
+        }
+      ],
+      "localVariables": [],
+      "size": 219,
+      "isThunk": false,
+      "isExternal": false,
+      "hasVarArgs": false
+    },
+    {
+      "name": "memset",
+      "namespace": "compiler",
+      "address": "00681ef0",
+      "returnType": "void *",
+      "callingConvention": "__cdecl",
+      "parameters": [
+        {
+          "name": "_Dst",
+          "dataType": "void *",
+          "size": 4,
+          "ordinal": 0,
+          "storage": "Stack[0x4]:4",
+          "stackOffset": 4,
+          "resolvedType": null
+        },
+        {
+          "name": "_Val",
+          "dataType": "int",
+          "size": 4,
+          "ordinal": 1,
+          "storage": "Stack[0x8]:4",
+          "stackOffset": 8,
+          "resolvedType": null
+        },
+        {
+          "name": "_Size",
+          "dataType": "size_t",
+          "size": 4,
+          "ordinal": 2,
+          "storage": "Stack[0xc]:4",
+          "stackOffset": 12,
+          "resolvedType": null
+        }
+      ],
+      "localVariables": [],
+      "size": 122,
+      "isThunk": false,
+      "isExternal": false,
+      "hasVarArgs": false
+    },
+    {
+      "name": "CreatingMissile",
+      "namespace": "D2Game::MISSILES::Missiles",
+      "address": "0059fa30",
+      "returnType": "D2UnitStrc *",
+      "callingConvention": "__fastcall",
+      "parameters": [
+        {
+          "name": "pGame",
+          "dataType": "SGAMEDATA *",
+          "size": 4,
+          "ordinal": 0,
+          "storage": "ECX:4",
+          "stackOffset": null,
+          "resolvedType": null
+        },
+        {
+          "name": "pArgs",
+          "dataType": "D2SkillArgStrc *",
+          "size": 4,
+          "ordinal": 1,
+          "storage": "EDX:4",
+          "stackOffset": null,
+          "resolvedType": null
+        }
+      ],
+      "localVariables": [],
+      "size": 1185,
+      "isThunk": false,
+      "isExternal": false,
+      "hasVarArgs": false
+    },
+    {
+      "name": "GetSeed_nSeedLow",
+      "namespace": "D2Common::Seed",
+      "address": "00650e50",
+      "returnType": "uint",
+      "callingConvention": "__fastcall",
+      "parameters": [
+        {
+          "name": "pSeed",
+          "dataType": "D2SeedStrc *",
+          "size": 4,
+          "ordinal": 0,
+          "storage": "ECX:4",
+          "stackOffset": null,
+          "resolvedType": null
+        }
+      ],
+      "localVariables": [],
+      "size": 3,
+      "isThunk": false,
+      "isExternal": false,
+      "hasVarArgs": false
+    },
+    {
+      "name": "SetTargetX",
+      "namespace": "D2Common::Units::Missile",
+      "address": "0064a710",
+      "returnType": "void",
+      "callingConvention": "__stdcall",
+      "parameters": [
+        {
+          "name": "pUnit",
+          "dataType": "D2UnitStrc *",
+          "size": 4,
+          "ordinal": 0,
+          "storage": "Stack[0x4]:4",
+          "stackOffset": 4,
+          "resolvedType": null
+        },
+        {
+          "name": "nTargetX",
+          "dataType": "int32_t",
+          "size": 4,
+          "ordinal": 1,
+          "storage": "Stack[0x8]:4",
+          "stackOffset": 8,
+          "resolvedType": null
+        }
+      ],
+      "localVariables": [],
+      "size": 32,
+      "isThunk": false,
+      "isExternal": false,
+      "hasVarArgs": false
+    },
+    {
+      "name": "SetTargetY",
+      "namespace": "D2Common::Units::Missile",
+      "address": "0064a760",
+      "returnType": "void",
+      "callingConvention": "__stdcall",
+      "parameters": [
+        {
+          "name": "pUnit",
+          "dataType": "D2UnitStrc *",
+          "size": 4,
+          "ordinal": 0,
+          "storage": "Stack[0x4]:4",
+          "stackOffset": 4,
+          "resolvedType": null
+        },
+        {
+          "name": "nTargetY",
+          "dataType": "int32_t",
+          "size": 4,
+          "ordinal": 1,
+          "storage": "Stack[0x8]:4",
+          "stackOffset": 8,
+          "resolvedType": null
+        }
+      ],
+      "localVariables": [],
+      "size": 32,
+      "isThunk": false,
+      "isExternal": false,
+      "hasVarArgs": false
+    }
+  ],
+  "globals": [
+    {
+      "name": "sgptDataTable",
+      "namespace": "D2Common::ITEMS::Items",
+      "address": "00744304",
+      "dataType": "D2DataTableTxtStrc *",
+      "size": 4,
+      "isInitialized": true,
+      "scope": "global"
+    }
+  ],
+  "forms": [
+    "seq(sSkillArg.nX,sSkillArg.nFlags,sSkillArg.nY,sSkillArg.pOwner,sSkillArg.nMissileTxtNo,sSkillArg.eSkillNo,sSkillArg.nSkillLevel,nSkillLvl)",
+    "delay(nSkillLvl,(int)nMissileCount <= 0)",
+    "packadd(sSkillArg.nUnitX,sSkillArg.nUnitY)"
+  ],
+  "diagnosticTags": [
+    {
+      "type": "vc8form",
+      "data": "seq(sSkillArg.nX,sSkillArg.nFlags,sSkillArg.nY,sSkillArg.pOwner,sSkillArg.nMissileTxtNo,sSkillArg.eSkillNo,sSkillArg.nSkillLevel,nSkillLvl);ev=0000000000;bh=411-00000000;dh=ed70190a;ord=1"
+    },
+    {
+      "type": "vc8form",
+      "data": "delay(nSkillLvl,(int)nMissileCount <= 0);ev=0000000000;bh=411-00000000;dh=ed70190a;ord=2"
+    },
+    {
+      "type": "vc8form",
+      "data": "packadd(sSkillArg.nUnitX,sSkillArg.nUnitY);ev=0000000000;bh=411-00000000;dh=ed70190a;ord=3"
+    }
+  ],
+  "options": {
+    "outputDir": "./out",
+    "format": "cpp",
+    "organization": "namespace",
+    "generateCMake": false,
+    "generateSourceMaps": false,
+    "transformPreset": "full",
+    "includeAddressComments": false,
+    "promoteStaticGlobals": false
+  },
+  "input": "BOOL __fastcall Skills_SrvDoFunc_041_ChargeRelease_RandomMissileBurst(::SGAMEDATA * pGame, D2UnitStrc * pUnit, eD2Skills eSkill, int32_t nSkillLvl) {\n    uint32_t nSeedLow;\n    D2SkillArgStrc sSkillArg;\n    D2SeedStrc sSeedCopy;\n    uint32_t nTargetY;\n    uint32_t nTargetX;\n    uint64_t uSeedRoll;\n    uint32_t DVar1 = D2_SeedRoll(&pUnit->sSeed);\n    ::SGAMEDATA* pGameCopy = pGame;\n    D2Common::Seed::InitSeed_Param_666(&sSeedCopy, DVar1);\n    D2SkillsTxt* pSkillsTxt = (int)eSkill >= 0 && (int)eSkill < D2Common::ITEMS::Items::sgptDataTable->nTxtSkillsCount ? D2Common::ITEMS::Items::sgptDataTable->pTxtSkills + eSkill : nullptr;\n    if (!pSkillsTxt) {\n      return 0;\n    }\n\n    BOOL bHasPos = SkillsServer::SKILLS_GetTargetOrCursorPos(pGame, pUnit, &nTargetX, &nTargetY);\n    if (!bHasPos) {\n      return 0;\n    }\n\n    eMissilesId eMissileId = SKILLASS_GetChargeUpMissile(pUnit, eSkill);\n    if ((int)eMissileId <= 0) {\n      return 0;\n    }\n\n    uint32_t nMissileCount = SKILLASS_GetChargeUpCalcValue(pUnit, eSkill, nSkillLvl);\n    if (!nMissileCount) {\n      return 0;\n    }\n\n    memset(&sSkillArg, 0, 0x5c);\n    sSkillArg.nX = nTargetX;\n    sSkillArg.nFlags = 3;\n    sSkillArg.nY = nTargetY;\n    sSkillArg.eSkillNo = eSkill;\n    sSkillArg.nSkillLevel = nSkillLvl;\n    nSkillLvl = nMissileCount;\n    sSkillArg.pOwner = pUnit;\n    sSkillArg.nMissileTxtNo = eMissileId;\n    if ((int)nMissileCount <= 0) {\n      return 1;\n    }\n\n    do {\n      D2UnitStrc* pMissile;\n      uSeedRoll = (uint64_t)sSeedCopy.nSeedLow * 0x6ac690c5 + ((uint64_t)d2_bits_of(sSeedCopy) >> 0x20);\n      sSkillArg.nUnitX = (int)((uint32_t)uSeedRoll % 0x28) - 0x14;\n      sSeedCopy = D2_SEED_NEXT_VAL(uSeedRoll);\n      sSkillArg.nUnitY = sSeedCopy.nSeedLow % 0x28 - 0x14;\n      if (!sSkillArg.nUnitX && !sSkillArg.nUnitY) {\n        sSkillArg.nUnitX = 0x14;\n      }\n\n      pMissile = MISSILES::Missiles::CreatingMissile(pGameCopy, &sSkillArg);\n      if (pMissile) {\n        nSeedLow = D2Common::Seed::GetSeed_nSeedLow(&sSeedCopy);\n        D2Common::Units::Missile::SetTargetX(pMissile, nSeedLow);\n        D2Common::Units::Missile::SetTargetY(pMissile, (uint32_t)((uint32_t)(uint16_t)sSkillArg.nUnitY << 16 | (uint32_t)(uint16_t)sSkillArg.nUnitX));\n      }\n\n      nSkillLvl--;\n    } while (nSkillLvl);\n\n    return 1;\n}",
+  "baseline": "BOOL __fastcall Skills_SrvDoFunc_041_ChargeRelease_RandomMissileBurst(::SGAMEDATA* pGame, D2UnitStrc* pUnit, eD2Skills eSkill, int32_t nSkillLvl) {\n  uint32_t nSeedLow;\n  D2SkillArgStrc sSkillArg;\n  D2SeedStrc sSeedCopy;\n  uint32_t nTargetY;\n  uint32_t nTargetX;\n  uint64_t uSeedRoll;\n  uint32_t DVar1 = D2_SeedRoll(&pUnit->sSeed);\n  ::SGAMEDATA* pGameCopy = pGame;\n  D2Common::Seed::InitSeed_Param_666(&sSeedCopy, DVar1);\n  D2SkillsTxt* pSkillsTxt = (int)eSkill >= 0 && (int)eSkill < D2Common::ITEMS::Items::sgptDataTable->nTxtSkillsCount ? D2Common::ITEMS::Items::sgptDataTable->pTxtSkills + eSkill : nullptr;\n  if (!pSkillsTxt) {\n    return 0;\n  }\n  BOOL bHasPos = SkillsServer::SKILLS_GetTargetOrCursorPos(pGame, pUnit, &nTargetX, &nTargetY);\n  if (!bHasPos) {\n    return 0;\n  }\n  eMissilesId eMissileId = SKILLASS_GetChargeUpMissile(pUnit, eSkill);\n  if ((int)eMissileId <= 0) {\n    return 0;\n  }\n  uint32_t nMissileCount = SKILLASS_GetChargeUpCalcValue(pUnit, eSkill, nSkillLvl);\n  if (!nMissileCount) {\n    return 0;\n  }\n  memset(&sSkillArg, 0, 0x5c);\n  sSkillArg.nX = nTargetX;\n  sSkillArg.nFlags = 3;\n  sSkillArg.nY = nTargetY;\n  sSkillArg.eSkillNo = eSkill;\n  sSkillArg.nSkillLevel = nSkillLvl;\n  nSkillLvl = nMissileCount;\n  sSkillArg.pOwner = pUnit;\n  sSkillArg.nMissileTxtNo = eMissileId;\n  if ((int)nMissileCount <= 0) {\n    return 1;\n  }\n  do {\n    D2UnitStrc* pMissile;\n    uSeedRoll = (uint64_t)sSeedCopy.nSeedLow * 0x6ac690c5 + ((uint64_t)d2_bits_of(sSeedCopy) >> 0x20);\n    sSkillArg.nUnitX = (int)((uint32_t)uSeedRoll % 0x28) - 0x14;\n    sSeedCopy = D2_SEED_NEXT_VAL(uSeedRoll);\n    sSkillArg.nUnitY = sSeedCopy.nSeedLow % 0x28 - 0x14;\n    if (!sSkillArg.nUnitX && !sSkillArg.nUnitY) {\n      sSkillArg.nUnitX = 0x14;\n    }\n    pMissile = MISSILES::Missiles::CreatingMissile(pGameCopy, &sSkillArg);\n    if (pMissile) {\n      nSeedLow = D2Common::Seed::GetSeed_nSeedLow(&sSeedCopy);\n      D2Common::Units::Missile::SetTargetX(pMissile, nSeedLow);\n      D2Common::Units::Missile::SetTargetY(pMissile, (uint32_t)((uint32_t)(uint16_t)sSkillArg.nUnitY << 16 | (uint32_t)(uint16_t)sSkillArg.nUnitX));\n    }\n    nSkillLvl--;\n  } while (nSkillLvl);\n  return 1;\n}\n",
+  "candidate": "BOOL __fastcall Skills_SrvDoFunc_041_ChargeRelease_RandomMissileBurst(::SGAMEDATA* pGame, D2UnitStrc* pUnit, eD2Skills eSkill, int32_t nSkillLvl) {\n  uint32_t nSeedLow;\n  D2SkillArgStrc sSkillArg;\n  D2SeedStrc sSeedCopy;\n  uint32_t nTargetY;\n  uint32_t nTargetX;\n  uint64_t uSeedRoll;\n  uint32_t DVar1 = D2_SeedRoll(&pUnit->sSeed);\n  ::SGAMEDATA* pGameCopy = pGame;\n  D2Common::Seed::InitSeed_Param_666(&sSeedCopy, DVar1);\n  D2SkillsTxt* pSkillsTxt = (int)eSkill >= 0 && (int)eSkill < D2Common::ITEMS::Items::sgptDataTable->nTxtSkillsCount ? D2Common::ITEMS::Items::sgptDataTable->pTxtSkills + eSkill : nullptr;\n  if (!pSkillsTxt) {\n    return 0;\n  }\n  BOOL bHasPos = SkillsServer::SKILLS_GetTargetOrCursorPos(pGame, pUnit, &nTargetX, &nTargetY);\n  if (!bHasPos) {\n    return 0;\n  }\n  eMissilesId eMissileId = SKILLASS_GetChargeUpMissile(pUnit, eSkill);\n  if ((int)eMissileId <= 0) {\n    return 0;\n  }\n  uint32_t nMissileCount = SKILLASS_GetChargeUpCalcValue(pUnit, eSkill, nSkillLvl);\n  if (!nMissileCount) {\n    return 0;\n  }\n  memset(&sSkillArg, 0, 0x5c);\n  sSkillArg.nX = nTargetX;\n  sSkillArg.nFlags = 3;\n  sSkillArg.nY = nTargetY;\n  sSkillArg.pOwner = pUnit;\n  sSkillArg.nMissileTxtNo = eMissileId;\n  sSkillArg.eSkillNo = eSkill;\n  sSkillArg.nSkillLevel = nSkillLvl;\n  if ((int)nMissileCount <= 0) {\n    return 1;\n  }\n  nSkillLvl = nMissileCount;\n  do {\n    D2UnitStrc* pMissile;\n    uSeedRoll = (uint64_t)sSeedCopy.nSeedLow * 0x6ac690c5 + ((uint64_t)d2_bits_of(sSeedCopy) >> 0x20);\n    sSkillArg.nUnitX = (int)((uint32_t)uSeedRoll % 0x28) - 0x14;\n    sSeedCopy = D2_SEED_NEXT_VAL(uSeedRoll);\n    sSkillArg.nUnitY = sSeedCopy.nSeedLow % 0x28 - 0x14;\n    if (!sSkillArg.nUnitX && !sSkillArg.nUnitY) {\n      sSkillArg.nUnitX = 0x14;\n    }\n    pMissile = MISSILES::Missiles::CreatingMissile(pGameCopy, &sSkillArg);\n    if (pMissile) {\n      nSeedLow = D2Common::Seed::GetSeed_nSeedLow(&sSeedCopy);\n      D2Common::Units::Missile::SetTargetX(pMissile, nSeedLow);\n      D2Common::Units::Missile::SetTargetY(pMissile, (uint32_t)(((uint32_t)(uint16_t)sSkillArg.nUnitY << 16) + (uint32_t)(uint16_t)sSkillArg.nUnitX));\n    }\n    nSkillLvl--;\n  } while (nSkillLvl);\n  return 1;\n}\n",
+  "rawBaseline": "// Server do-func 41: the third charge release of Royal Strike (Phoenix Strike). Gets the target/cursor position and the charge-up missile type and count, then spawns that many missiles at seeded +-20 offsets around the target, storing the seed and packed XY in each missile.\n// Slot from skills.txt srvdofunc 41.\n// 1.14d: 005d5080\nBOOL __fastcall Skills_SrvDoFunc_041_ChargeRelease_RandomMissileBurst(SGAMEDATA * pGame, D2UnitStrc * pUnit, eD2Skills eSkill, int32_t nSkillLvl) {\n    uint32_t nSeedLow;\n    D2SkillArgStrc sSkillArg;\n    D2SeedStrc sSeedCopy;\n    uint32_t nTargetY;\n    uint32_t nTargetX;\n    uint64_t uSeedRoll;\n    uint32_t DVar1 = D2_SeedRoll(&pUnit->sSeed);\n    SGAMEDATA* pGameCopy = pGame;\n    D2Common::Seed::InitSeed_Param_666(&sSeedCopy, DVar1);\n    D2SkillsTxt* pSkillsTxt = (int)eSkill >= 0 && (int)eSkill < D2Common::ITEMS::Items::sgptDataTable->nTxtSkillsCount ? D2Common::ITEMS::Items::sgptDataTable->pTxtSkills + eSkill : nullptr;\n    if (!pSkillsTxt) {\n      return 0;\n    }\n\n    BOOL bHasPos = D2Game::SKILLS::SkillsServer::SKILLS_GetTargetOrCursorPos(pGame, pUnit, &nTargetX, &nTargetY);\n    if (!bHasPos) {\n      return 0;\n    }\n\n    eMissilesId eMissileId = D2Game::SKILLS::SkillAss::SKILLASS_GetChargeUpMissile(pUnit, eSkill);\n    if ((int)eMissileId <= 0) {\n      return 0;\n    }\n\n    uint32_t nMissileCount = D2Game::SKILLS::SkillAss::SKILLASS_GetChargeUpCalcValue(pUnit, eSkill, nSkillLvl);\n    if (!nMissileCount) {\n      return 0;\n    }\n\n    memset(&sSkillArg, 0, 0x5c);\n    sSkillArg.nX = nTargetX;\n    sSkillArg.nFlags = 3;\n    sSkillArg.nY = nTargetY;\n    sSkillArg.eSkillNo = eSkill;\n    sSkillArg.nSkillLevel = nSkillLvl;\n    nSkillLvl = nMissileCount;\n    sSkillArg.pOwner = pUnit;\n    sSkillArg.nMissileTxtNo = eMissileId;\n    if ((int)nMissileCount <= 0) {\n      return 1;\n    }\n\n    do {\n      D2UnitStrc* pMissile;\n      uSeedRoll = (uint64_t)sSeedCopy.nSeedLow * 0x6ac690c5 + ((uint64_t)d2_bits_of(sSeedCopy) >> 0x20);\n      sSkillArg.nUnitX = (int)((uint32_t)uSeedRoll % 0x28) - 0x14;\n      sSeedCopy = D2_SEED_NEXT_VAL(uSeedRoll);\n      sSkillArg.nUnitY = sSeedCopy.nSeedLow % 0x28 - 0x14;\n      if (!sSkillArg.nUnitX && !sSkillArg.nUnitY) {\n        sSkillArg.nUnitX = 0x14;\n      }\n\n      pMissile = D2Game::MISSILES::Missiles::CreatingMissile(pGameCopy, &sSkillArg);\n      if (pMissile) {\n        nSeedLow = D2Common::Seed::GetSeed_nSeedLow(&sSeedCopy);\n        D2Common::Units::Missile::SetTargetX(pMissile, nSeedLow);\n        D2Common::Units::Missile::SetTargetY(pMissile, (uint32_t)((uint32_t)(uint16_t)sSkillArg.nUnitY << 16 | (uint32_t)(uint16_t)sSkillArg.nUnitX));\n      }\n\n      nSkillLvl--;\n    } while (nSkillLvl);\n\n    return 1;\n}",
+  "rawCandidate": "// Server do-func 41: the third charge release of Royal Strike (Phoenix Strike). Gets the target/cursor position and the charge-up missile type and count, then spawns that many missiles at seeded +-20 offsets around the target, storing the seed and packed XY in each missile.\n// Slot from skills.txt srvdofunc 41.\n// 1.14d: 005d5080\nBOOL __fastcall Skills_SrvDoFunc_041_ChargeRelease_RandomMissileBurst(SGAMEDATA * pGame, D2UnitStrc * pUnit, eD2Skills eSkill, int32_t nSkillLvl) {\n    uint32_t nSeedLow;\n    D2SkillArgStrc sSkillArg;\n    D2SeedStrc sSeedCopy;\n    uint32_t nTargetY;\n    uint32_t nTargetX;\n    uint64_t uSeedRoll;\n    uint32_t DVar1 = D2_SeedRoll(&pUnit->sSeed);\n    SGAMEDATA* pGameCopy = pGame;\n    D2Common::Seed::InitSeed_Param_666(&sSeedCopy, DVar1);\n    D2SkillsTxt* pSkillsTxt = (int)eSkill >= 0 && (int)eSkill < D2Common::ITEMS::Items::sgptDataTable->nTxtSkillsCount ? D2Common::ITEMS::Items::sgptDataTable->pTxtSkills + eSkill : nullptr;\n    if (!pSkillsTxt) {\n      return 0;\n    }\n\n    BOOL bHasPos = D2Game::SKILLS::SkillsServer::SKILLS_GetTargetOrCursorPos(pGame, pUnit, &nTargetX, &nTargetY);\n    if (!bHasPos) {\n      return 0;\n    }\n\n    eMissilesId eMissileId = D2Game::SKILLS::SkillAss::SKILLASS_GetChargeUpMissile(pUnit, eSkill);\n    if ((int)eMissileId <= 0) {\n      return 0;\n    }\n\n    uint32_t nMissileCount = D2Game::SKILLS::SkillAss::SKILLASS_GetChargeUpCalcValue(pUnit, eSkill, nSkillLvl);\n    if (!nMissileCount) {\n      return 0;\n    }\n\n    memset(&sSkillArg, 0, 0x5c);\n    sSkillArg.nX = nTargetX;\n    sSkillArg.nFlags = 3;\n    sSkillArg.nY = nTargetY;\n    sSkillArg.pOwner = pUnit;\n    sSkillArg.nMissileTxtNo = eMissileId;\n    sSkillArg.eSkillNo = eSkill;\n    sSkillArg.nSkillLevel = nSkillLvl;\n    if ((int)nMissileCount <= 0) {\n      return 1;\n    }\n\n    nSkillLvl = nMissileCount;\n    do {\n      D2UnitStrc* pMissile;\n      uSeedRoll = (uint64_t)sSeedCopy.nSeedLow * 0x6ac690c5 + ((uint64_t)d2_bits_of(sSeedCopy) >> 0x20);\n      sSkillArg.nUnitX = (int)((uint32_t)uSeedRoll % 0x28) - 0x14;\n      sSeedCopy = D2_SEED_NEXT_VAL(uSeedRoll);\n      sSkillArg.nUnitY = sSeedCopy.nSeedLow % 0x28 - 0x14;\n      if (!sSkillArg.nUnitX && !sSkillArg.nUnitY) {\n        sSkillArg.nUnitX = 0x14;\n      }\n\n      pMissile = D2Game::MISSILES::Missiles::CreatingMissile(pGameCopy, &sSkillArg);\n      if (pMissile) {\n        nSeedLow = D2Common::Seed::GetSeed_nSeedLow(&sSeedCopy);\n        D2Common::Units::Missile::SetTargetX(pMissile, nSeedLow);\n        D2Common::Units::Missile::SetTargetY(pMissile, (uint32_t)(((uint32_t)(uint16_t)sSkillArg.nUnitY << 16) + (uint32_t)(uint16_t)sSkillArg.nUnitX));\n      }\n\n      nSkillLvl--;\n    } while (nSkillLvl);\n\n    return 1;\n}",
+  "provenance": {
+    "source": "dd289669c82a03e993a928b2b0f2c724a1cc731d",
+    "generatorBase": "ad73d788be4614e8a294587afa868afeb5391eba",
+    "issue": "https://github.com/jaenster/redivivus/issues/538",
+    "nativeBytes": 411,
+    "nativeInstructions": 153,
+    "rows": 62,
+    "scope": "Bounded regression fixture: actual used members, complete skill-argument/seed members, real enum bounds, original type sizes/offsets, nine signatures and actual coordinate getter body. Emission equals the full metadata replay byte for byte. Three comparison facts manually verified against fresh high pcode/native TEST/Jcc pairs. Not an owning snapshot export."
+  }
+}
