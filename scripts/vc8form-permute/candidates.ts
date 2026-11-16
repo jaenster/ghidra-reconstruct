@@ -365,6 +365,16 @@ function sites(c: Ctx, maxAnchors: number): string[] {
     for (const d of decls) if (!d.initializer) for (const w of decls) if (w !== d) out.add(`decl(${d.name.name},${w.name.name})`);
   }
 
+  // The applier proves the adjacent buffer clear and primitive zero initializer.
+  for (const b of blocks) for (let i = 2; i < b.statements.length; i++) {
+    const first = b.statements[i - 2], last = b.statements[i];
+    const array = first.kind === NodeKind.DeclStmt && first.declarations.length === 1 ? first.declarations[0] : undefined;
+    const scalar = last.kind === NodeKind.DeclStmt && last.declarations.length === 1 ? last.declarations[0] : undefined;
+    if (array?.kind === NodeKind.VariableDecl && array.type?.kind === NodeKind.ArrayType
+        && scalar?.kind === NodeKind.VariableDecl && scalar.initializer)
+      out.add(`initbefore(${scalar.name.name},${array.name.name})`);
+  }
+
   // cache: member chains and globals read in the body, typed from the model.
   const cacheable = new Map<string, N>();
   for (const n of all) {
