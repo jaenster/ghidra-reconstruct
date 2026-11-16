@@ -870,7 +870,7 @@ export { importAddressForwarderPlugin, IMPORT_ADDRESS_FORWARDERS } from './built
 export { unsignedRangeComparePlugin } from './builtins/unsigned-range-compare.js';
 export { rangeTestFormPlugin } from './builtins/range-test-form.js';
 export { zextSitePlugin, createZextSiteTransformer, type ZextOperatorSite, type ZextSiteOptions } from './builtins/zext-site.js';
-export { shiftMultiplyPlugin, addNestingPlugin, concatWidenPlugin, type ArithFact, type ArithSiteOptions } from './builtins/arith-sites.js';
+export { shiftMultiplyPlugin, addNestingPlugin, concatWidenPlugin, SHIFT_MULTIPLY_SUPPORT_LINES, type ArithFact, type ArithSiteOptions } from './builtins/arith-sites.js';
 export { signedDivideSitePlugin, createSignedDivideSiteTransformer, type SignedDivideOperatorSite, type SignedDivideSiteOptions } from './builtins/signed-divide-site.js';
 export { truncatingRoundSitePlugin, createTruncatingRoundSiteTransformer, type TruncatingRoundSiteOptions } from './builtins/truncating-round-site.js';
 export { zeroExtendSitePlugin, zeroExtendCastPlugin, createZeroExtendSiteTransformer, createZeroExtendCastTransformer, type ZeroExtendMaskSite, type ZeroExtendSiteOptions, type ZeroExtendCastOptions } from './builtins/zero-extend-cast.js';
@@ -1266,7 +1266,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   shiftCountMaskPlugin,       // Matching: x << (n & 0x1f) -> x << n where n is proven to lie in [0, 31] (priority 621)
   zeroExtendSitePlugin,       // Matching: tag each byte/word mask a MOVZX computed (priority 3)
   zextSitePlugin,             // Correctness: tag each operation whose result the decompiler zero-extended (priority 3)
-  shiftMultiplyPlugin,        // Fidelity: a * 2^k the original shifted -> (a << k) (priority 3)
+  shiftMultiplyPlugin,        // Fidelity: proved integer a * 2^k -> defined shift (priority 3)
   addNestingPlugin,           // Fidelity: x + a + b the p-code nests as x + (a + b); an in-place add as its own statement (priority 3)
   concatWidenPlugin,          // Fidelity: tag a CONCAT the p-code only widens; pseudo-op-lower drops its truncation (priority 3)
   signedDivideSitePlugin,     // Matching: tag each division of a cast dividend the original computes with IDIV (priority 3)

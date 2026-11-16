@@ -3,13 +3,13 @@ import assert from 'node:assert';
 import { parse } from '../../../parser/index.js';
 import { emit } from '../../../emit/index.js';
 import type { AnyNode } from '../../../ast/nodes.js';
-import { shiftMultiplyPlugin, addNestingPlugin, concatWidenPlugin, type ArithFact } from '../builtins/arith-sites.js';
+import { shiftMultiplyPlugin, addNestingPlugin, concatWidenPlugin, type ArithFact, type ArithSiteOptions } from '../builtins/arith-sites.js';
 import { pseudoOpLowerPlugin } from '../builtins/pseudo-op-lower.js';
 
 type Plugin = typeof shiftMultiplyPlugin;
 
 /** One statement per line; `[...]@@` opens a line with its facts as JSON items. */
-function run(plugins: Plugin[], lines: string[]): string {
+function run(plugins: Plugin[], lines: string[], options: ArithSiteOptions = {}): string {
   const arith = new Map<number, ArithFact[]>();
   const text = lines.map((l, i) => {
     const m = l.match(/^\s*(\[.*?\])@@\s?(.*)$/);
@@ -18,7 +18,7 @@ function run(plugins: Plugin[], lines: string[]): string {
     return m[2];
   });
   let ast = parse(text.join('\n')) as unknown as AnyNode;
-  for (const p of plugins) ast = p.createTransformer({ arith })(ast as never) as unknown as AnyNode;
+  for (const p of plugins) ast = p.createTransformer({ ...options, arith })(ast as never) as unknown as AnyNode;
   return emit(ast).replace(/\s+/g, ' ');
 }
 
@@ -36,7 +36,7 @@ describe('shiftMultiplyPlugin', () => {
 
   it('keeps the precedence of a shift under an addition', () => {
     const out = run([shiftMultiplyPlugin], ['int f(int a, int b) {', `[${shl(4)}]@@ return a + b * 0x10;`, '}']);
-    assert.match(out, /return a \+ \(b << 4\);/);
+    assert.match(out, /return a \+ ::d2_shift_left\(b, 4\);/);
   });
 
   it('leaves a multiply the original computed otherwise, and a suffixed literal', () => {
@@ -49,6 +49,92 @@ describe('shiftMultiplyPlugin', () => {
     const out = run([shiftMultiplyPlugin], ['int f(int a, int b) {', `[${shl(8)}]@@ return a * 0x100 + b * 0x100;`, '}']);
     assert.match(out, /a \* 0x100 \+ b \* 0x100/);
   });
+
+  for (const type of ['int', 'signed char', 'short', 'long', 'long long', 'int32_t', 'int64_t']) {
+    it(`uses a promoted signed result for ${type}`, () => {
+      const out = run([shiftMultiplyPlugin], [`${type} f(${type} a) {`, `[${shl(4)}]@@ return a * 16;`, '}']);
+      assert.match(out, /return ::d2_shift_left\(a, 4\);/);
+    });
+  }
+
+  for (const type of ['bool', 'unsigned char', 'unsigned short', 'unsigned int', 'unsigned long', 'unsigned long long']) {
+    it(`keeps a direct shift for a nonnegative ${type}`, () => {
+      const out = run([shiftMultiplyPlugin], [`int f(${type} a) {`, `[${shl(4)}]@@ return a * 16;`, '}']);
+      assert.match(out, /return a << 4;/);
+      assert.doesNotMatch(out, /d2_shift_left/);
+    });
+  }
+
+  for (const expr of ['-a', '~a', 'a + b', 'a - b', 'b ? a : b', 'a++', '++a']) {
+    it(`preserves promotions and evaluates the operand once: ${expr}`, () => {
+      const out = run([shiftMultiplyPlugin], ['int f(unsigned short a, int b) {', `[${shl(4)}]@@ return (${expr}) * 16;`, '}']);
+      assert.match(out, /return ::d2_shift_left\(/);
+      assert.equal((out.match(/d2_shift_left/g) ?? []).length, 1);
+    });
+  }
+
+  it('uses the program type tables for fields, calls, aliases and globals', () => {
+    const options: ArithSiteOptions = { integerTypes: { typedefTargets: { SignedWord: 'long' },
+      globalTypes: { gValue: 'SignedWord' }, structFields: { Record: { value: 'int32_t' } },
+      functionReturnTypes: { next: 'int' } } };
+    const out = run([shiftMultiplyPlugin], ['int f(Record *p) {',
+      `[${shl(8)},${shl(8)},${shl(8)}]@@ return p->value * 256 + next() * 256 + gValue * 256;`, '}'], options);
+    assert.equal((out.match(/::d2_shift_left/g) ?? []).length, 3);
+  });
+
+  for (const [signature, expr] of [['int f(float a)', 'a'], ['int f(Number a)', 'a'],
+    ['int f(int a)', 'unknown()'], ['int f(int a)', 'unknown'], ['int f(int *a)', 'a']]) {
+    it(`leaves unproved integer or overloaded operands: ${signature} ${expr}`, () => {
+      const out = run([shiftMultiplyPlugin], [`${signature} {`, `[${shl(4)}]@@ return ${expr} * 16;`, '}']);
+      assert.match(out, /\* 16;/);
+      assert.doesNotMatch(out, /d2_shift_left|<< 4/);
+    });
+  }
+
+  it('does not use a named return type for a shadowing local callable', () => {
+    const out = run([shiftMultiplyPlugin], ['int f(float (*next)()) {', `[${shl(4)}]@@ return next() * 16;`, '}'],
+      { integerTypes: { functionReturnTypes: { next: 'int' } } });
+    assert.match(out, /next\(\) \* 16;/);
+  });
+
+  it('refuses ambiguous bindings and local aliases hiding a platform integer', () => {
+    const duplicate = run([shiftMultiplyPlugin], ['int f(int a) {', '{ int a = 2;', `[${shl(4)}]@@ return a * 16;`, '}}']);
+    assert.match(duplicate, /a \* 16;/);
+    const alias = run([shiftMultiplyPlugin], ['int f() {', 'typedef Number int32_t;', 'int32_t a;', `[${shl(4)}]@@ return a * 16;`, '}']);
+    assert.match(alias, /a \* 16;/);
+  });
+
+  for (const [prefix, line, suffix] of [
+    ['constexpr int f(int a) {', 'return a * 16;', '}'],
+    ['int f(int a) {', 'const int b = a * 16;', 'return b; }'],
+    ['int f(int a) {', 'static int b = a * 16;', 'return b; }'],
+    ['int f(int a) {', 'int b[ a * 16 ];', 'return 0; }'],
+    ['int f(int a) { switch (a) {', 'case -1 * 16: return 0;', '} return 1; }'],
+    ['int f(int a) {', 'return sizeof(a * 16);', '}'],
+    ['int f(int a) {', 'static_assert(-1 * 16 == -16, "constant");', 'return 0; }'],
+    ['int f(int a) {', 'enum { n = -1 * 16 };', 'return n; }'],
+    ['int f(int a) {', 'if constexpr (-1 * 16 == -16) return a;', 'return 0; }'],
+  ]) {
+    it(`keeps the multiply in a constant or unevaluated context: ${line}`, () => {
+      const out = run([shiftMultiplyPlugin], [prefix, `[${shl(4)}]@@ ${line}`, suffix]);
+      assert.match(out, /\* 16/);
+      assert.doesNotMatch(out, /d2_shift_left/);
+    });
+  }
+
+  it('allows the helper in a case arm, and preserves constexpr unsigned shifts', () => {
+    const arm = run([shiftMultiplyPlugin], ['int f(int a) { switch (a) {', `[${shl(4)}]@@ case 0: return a * 16;`, '} return 0; }']);
+    assert.match(arm, /return ::d2_shift_left\(a, 4\);/);
+    const constant = run([shiftMultiplyPlugin], ['constexpr unsigned f(unsigned a) {', `[${shl(4)}]@@ return a * 16;`, '}']);
+    assert.match(constant, /return a << 4;/);
+  });
+
+  for (const log2 of [-1, 0.5, 31, 64]) {
+    it(`refuses invalid or non-int multipliers: log2=${log2}`, () => {
+      const out = run([shiftMultiplyPlugin], ['int f(int a) {', `[${shl(log2)}]@@ return a * 16;`, '}']);
+      assert.match(out, /a \* 16;/);
+    });
+  }
 });
 
 const add = (o: object) => JSON.stringify({ kind: 'add', width: 'int', ...o });
