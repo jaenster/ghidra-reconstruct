@@ -2446,7 +2446,7 @@ function doMergeTail(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'merge-tail' }>
   b.statements.splice(k + 1, between.length);
 }
 
-/** Put a shared, two-call void tail on the path that skips one invitation-style arm. */
+/** Put a shared, two-call void tail on the path that skips one guarded arm. */
 function doTailguard(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'tailguard' }>): void {
   if (text(fn.returnType) !== 'void') refuse('the function does not return void');
   const { b, k, s } = nthIf(fn, f.cond, f.index);
