@@ -314,6 +314,17 @@ import { builtinTruthSite } from './truth-form-safety.js';
  *                        calls nothing, stores nothing and reads only such locals and
  *                        constants; refused under `&&`, `||` or `?:` arms, which would make
  *                        the call conditional, and in a loop condition.
+ *                        The call may cross stores `L = K;` between it and that statement
+ *                        when L is a local other than V whose address is not taken and
+ *                        that the call does not name, and K is such a value or a known
+ *                        enumerator: neither can see the other. V may stay named past a
+ *                        label or case when its next mention stores it on every path and
+ *                        no jump out lies between. A sibling argument may itself be a call when both
+ *                        calls are direct calls of functions whose write effects reach
+ *                        nothing outside their own frame, with arguments of such values:
+ *                        the two then return the same in either order (MakeMissileAtXY's
+ *                        GetXPosFromDynamicPathUnit and GetYPosFromDynamicPathUnit in
+ *                        MONUNIQUE_SpawnSuicideExplosion 004adbc0, after `dup`).
  *   fill(A[,i])          `memset(A[ + K], 0, N * sizeof(A[0]));` (or a byte count, A a
  *                        local array of a scalar whose size divides it), and the pointer
  *                        loop the string instruction decompiles to, `P = A; for (N = K; N;
@@ -544,6 +555,7 @@ import { shapeOfNode, shapeOfSpelling, sameShape } from './call-arg-cast.js';
 import { isPure } from './pseudo-op-lower.js';
 import { localTypesOf } from './compare-form.js';
 import { calleeName, scopedLookup } from './call-arg-cast.js';
+import type { WriteEffect } from './write-effects.js';
 import { coalesceLocal } from './copy-coalesce.js';
 import { initializerIsDead } from './store-liveness.js';
 import { recordWalk, type RecordWalkTables } from './record-walk.js';
@@ -1347,6 +1359,12 @@ function parentsOf(fn: FunctionDecl): Map<ASTNode, ASTNode> {
 }
 
 const LIFE_JUMPS = new Set<string>([NodeKind.GotoStmt, NodeKind.LabelStmt, NodeKind.BreakStmt, NodeKind.ContinueStmt, NodeKind.CaseStmt, NodeKind.DefaultStmt]);
+/**
+ * The LIFE_JUMPS other paths come in by. A path from a store passes one the way it passes
+ * any statement: what reaches it from elsewhere carries another value, so for whether that
+ * store's value is read, only the jumps out count.
+ */
+const ENTRIES = new Set<string>([NodeKind.LabelStmt, NodeKind.CaseStmt, NodeKind.DefaultStmt]);
 
 /**
  * What a statement does to v first on its way through: `store` when every path through it
@@ -1385,7 +1403,7 @@ function readFirst(s: Statement, v: string): 'read' | 'store' | 'none' {
  * before the path to the store (in b, those before `from`); without it, any mention in the
  * loop counts.
  */
-function blockReadsAfter(fn: FunctionDecl, b: CompoundStmt, v: string, from?: number, storeEnds = false): boolean {
+function blockReadsAfter(fn: FunctionDecl, b: CompoundStmt, v: string, from?: number, storeEnds = false, labelsEnter = false): boolean {
   const parents = parentsOf(fn);
   let cur: ASTNode = b;
   // The statements before the path, from b outwards to the innermost loop.
@@ -1399,9 +1417,10 @@ function blockReadsAfter(fn: FunctionDecl, b: CompoundStmt, v: string, from?: nu
       // A jump between this block and a store may skip the store: after one, any mention
       // reads, as before.
       let jumped = !storeEnds;
+      const leaves = (n: ASTNode) => LIFE_JUMPS.has(n.kind) && !(labelsEnter && ENTRIES.has(n.kind));
       for (const s of st.slice(k + 1)) {
         if (!mentions(s, v)) {
-          if (!jumped) for (const { node } of walk(s)) if (LIFE_JUMPS.has(node.kind)) { jumped = true; break; }
+          if (!jumped) for (const { node } of walk(s)) if (leaves(node)) { jumped = true; break; }
           continue;
         }
         if (jumped) return true;
@@ -1410,7 +1429,7 @@ function blockReadsAfter(fn: FunctionDecl, b: CompoundStmt, v: string, from?: nu
         // Stored on every path before any read: the value of this life ends here, here
         // and in every enclosing block and loop.
         if (r === 'store') return false;
-        for (const { node } of walk(s)) if (LIFE_JUMPS.has(node.kind)) { jumped = true; break; }
+        for (const { node } of walk(s)) if (leaves(node)) { jumped = true; break; }
       }
       before.push(...st.slice(0, k));
     }
@@ -3987,6 +4006,26 @@ function callProof(fn: FunctionDecl, e: Expression, locals: Set<string>): boolea
   return false;
 }
 
+/** A write effect that reaches nothing but the callee's own frame. */
+function writesNothing(w: WriteEffect | undefined): boolean {
+  return !!w && !w.unknown && !w.memory && !w.globals?.length && !w.params?.length;
+}
+
+/**
+ * A direct call whose callee writes nothing outside its own frame (write-effects.ts) and
+ * whose arguments are callProof values: evaluated before or after another such call, each
+ * returns the same, as neither changes anything the other or its arguments read.
+ */
+function quietCall(fn: FunctionDecl, e: Expression, locals: Set<string>): boolean {
+  e = unparen(e);
+  if (e.kind !== NodeKind.CallExpr) return false;
+  const call = e as CallExpr, name = calleeName(call.callee);
+  const table = selectTables?.writeEffects;
+  if (!name || !table || !namedCallee(call.callee)) return false;
+  if (!writesNothing(scopedLookup(table, name, selectTables?.enclosingSegments ?? []))) return false;
+  return call.arguments.every(a => callProof(fn, a, locals));
+}
+
 /** A callee that names a function: evaluating it reads nothing a call could change. */
 const namedCallee = (e: Expression) => { e = unparen(e); return e.kind === NodeKind.Identifier || e.kind === NodeKind.QualifiedId; };
 
@@ -4004,18 +4043,22 @@ function loopFirst(s: Statement, v: string): 'read' | 'store' | 'none' | undefin
   return readFirst(l.body, v) === 'store' ? 'none' : undefined;
 }
 
-/** Whether V is dead after statement k+1 of b: its next mention stores it first, or there is none and nothing after b reads it. */
-function deadAfter(fn: FunctionDecl, b: CompoundStmt, k: number, last: number, v: string): boolean {
+/**
+ * Whether V is dead after statement k+1 of b: its next mention stores it first, or there is
+ * none and nothing after b reads it. With labelsEnter, a label or case on the way is passed
+ * (ENTRIES); a jump out still ends the proof.
+ */
+function deadAfter(fn: FunctionDecl, b: CompoundStmt, k: number, last: number, v: string, labelsEnter = false): boolean {
   for (const s of b.statements.slice(last + 1)) {
     if (!mentions(s, v)) {
-      for (const { node } of walk(s)) if (LIFE_JUMPS.has(node.kind)) return false;
+      for (const { node } of walk(s)) if (LIFE_JUMPS.has(node.kind) && !(labelsEnter && ENTRIES.has(node.kind))) return false;
       continue;
     }
     const r = loopFirst(s, v) ?? readFirst(s, v);
     if (r !== 'none') return r === 'store';
     // Stored on some paths only: what follows may still read the old value.
   }
-  return !blockReadsAfter(fn, b, v, k, true);
+  return !blockReadsAfter(fn, b, v, k, true, labelsEnter);
 }
 
 function doNestcall(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'nestcall' }>): void {
@@ -4031,7 +4074,16 @@ function doNestcall(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'nestcall' }>): 
   if (addressTaken(fn, v)) refuse(`&${v} is taken`);
   if (!keepsValue(declaredType(fn, v))) refuse(`${v}'s type may convert the stored value`);
   if (mentions(hit.value, v)) refuse(`${v} is stored from itself`);
-  const next = b.statements[k + 1] ?? refuse('nothing follows the store');
+  // Stores `L = K;` the call may cross: L a private local it does not name, K a value it cannot change.
+  const locals = localNames(fn);
+  const enumerator = (e: Expression) => { const x = unparen(e); return !(isId(x) && locals.has(x.name)) && constValue(x) !== undefined; };
+  let nextIndex = k + 1;
+  for (; nextIndex < b.statements.length; nextIndex++) {
+    const st = storeOf(b.statements[nextIndex]), l = st && unparen(st.left);
+    if (!st || st.operator !== '=' || !l || !isId(l) || !locals.has(l.name) || l.name === v || addressTaken(fn, l.name)
+      || mentions(hit.value, l.name) || mentions(st.right, v) || !(callProof(fn, st.right, locals) || enumerator(st.right))) break;
+  }
+  const next = b.statements[nextIndex] ?? refuse('nothing follows the store');
   // The expression the call moves into: the statement's own, never a loop's.
   let root: Expression | undefined;
   if (next.kind === NodeKind.ExprStmt) root = (next as ExprStmt).expression;
@@ -4058,7 +4110,6 @@ function doNestcall(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'nestcall' }>): 
       if (Object.values(o).includes(slot.parent)) { parents.set(node, owner); break; }
     }
   }
-  const locals = localNames(fn);
   const CASTS = new Set<string>([NodeKind.ParenExpr, NodeKind.CStyleCastExpr, NodeKind.StaticCastExpr, NodeKind.ReinterpretCastExpr, NodeKind.ConstCastExpr]);
   let c: ASTNode = uses[0].node;
   while (parents.has(c) && CASTS.has(parents.get(c)!.kind)) c = parents.get(c)!;
@@ -4086,7 +4137,11 @@ function doNestcall(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'nestcall' }>): 
         const call = p as CallExpr;
         if (call.callee === c) break;
         if (!namedCallee(call.callee) && !proof(call.callee)) refuse('the callee is computed');
-        for (const a of call.arguments) if (a !== c && !proof(a)) refuse(`the argument ${text(a)} calls, stores or reads memory`);
+        for (const a of call.arguments) {
+          if (a === c || proof(a)) continue;
+          if (quietCall(fn, a, locals) && quietCall(fn, hit.value, locals)) continue;
+          refuse(`the argument ${text(a)} calls, stores or reads memory`);
+        }
         break;
       }
       case NodeKind.BinaryExpr: {
@@ -4112,7 +4167,7 @@ function doNestcall(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'nestcall' }>): 
       default: refuse(`the call cannot go under ${p.kind}`);
     }
   }
-  if (!deadAfter(fn, b, k, k + 1, v)) refuse(`${v} is read after the next statement`);
+  if (!deadAfter(fn, b, k, nextIndex, v, true)) refuse(`${v} is read after the next statement`);
   put(uses[0].slot!, cloneNode(hit.value));
   if (hit.decl && mentionsOutsideDecl(fn, v)) hit.decl.initializer = null;
   else b.statements.splice(k, 1);
