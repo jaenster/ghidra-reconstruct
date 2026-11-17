@@ -12,6 +12,7 @@ import { matchParams, paramIds, type ParamMatch } from './params.js';
 import { migrateBinding, migrateStored, renameTypeSpelling, type PreviousTree } from './previous.js';
 import { bindSites, bodyFormSites, bindingKey, scanSites, siteSpellings, type Binding, type SiteScan } from './refs.js';
 import { rewriteBody } from './rewrite.js';
+import { carryStaticLocals } from './static-locals.js';
 import { bodyHash, type RatchetRecord, type RecordKind, type StoredBody } from './store.js';
 import type { SymbolIndex } from './symbol-index.js';
 import { TokenKind } from '@ghidra-mcp/cpp-parser';
@@ -317,8 +318,10 @@ export function applyRecords(index: SymbolIndex, records: RatchetRecord[], opts:
       }
       if (retyped.length > 0) { errors.push({ m, errors: retyped }); continue; }
       const r = rewriteBody(m.stored.text, m.scan!, m.bindings!, { index, scope: fresh.scope, params, paramMap: pm.map, preferred });
-      if (r.text === undefined) errors.push({ m, errors: r.errors });
-      else out.push({ m, text: relabel(r.text, m.stored.name, now?.qname), renames: r.renames });
+      if (r.text === undefined) { errors.push({ m, errors: r.errors }); continue; }
+      const carried = carryStaticLocals(r.text, fresh.definition, fresh.extent.bodyStart - fresh.extent.start);
+      if (carried.text === undefined) { errors.push({ m, errors: [carried.error!] }); continue; }
+      out.push({ m, text: relabel(carried.text, m.stored.name, now?.qname), renames: r.renames });
     }
     if (errors.length > 0) {
       // Loud, per function, and the old body kept beside the new one for whoever fixes it.

@@ -2,6 +2,7 @@ boolean DRY=false; String TAG="community-proposal"; String GROUP="mac * part 2";
 String J = """
 [{"id":1387,"ops":[{"op":"retype_local","program":"mac","function":"0x002b661f","storage":"Stack[-0x118]","expect":{"type":"undefined"},"type":"char[260]"},{"op":"rename_local","program":"mac","function":"0x002b661f","storage":"Stack[-0x118]","expect":{"name":"local_118"},"name":"szFileName"}]},{"id":1399,"ops":[{"op":"rename_global","program":"mac","address":"0x003d0704","expect":{"name":"PTR_s_Filename_003d0704"},"name":"gaSoundsFields"},{"op":"set_global_type","program":"mac","address":"0x003d0704","expect":{"type":"pointer","size":4},"type":"D2BinFieldInputStrc[24]"},{"op":"rename_global","program":"mac","address":"0x003d08e4","expect":{"name":"PTR_s_Song_003d08e4"},"name":"gaSoundEnvironFields"},{"op":"set_global_type","program":"mac","address":"0x003d08e4","expect":{"type":"pointer","size":4},"type":"D2BinFieldInputStrc[23]"},{"op":"retype_local","program":"mac","function":"0x00094e23","storage":"Stack[-0x2fc]","expect":{"type":"undefined"},"type":"D2BinFieldInputStrc[24]"},{"op":"rename_local","program":"mac","function":"0x00094e23","storage":"Stack[-0x2fc]","expect":{"name":"local_2fc"},"name":"aSoundsFields"},{"op":"retype_local","program":"mac","function":"0x00094e23","storage":"Stack[-0x4cc]","expect":{"type":"undefined"},"type":"D2BinFieldInputStrc[23]"},{"op":"rename_local","program":"mac","function":"0x00094e23","storage":"Stack[-0x4cc]","expect":{"name":"local_4cc"},"name":"aSoundEnvironFields"}]}]
 """;
+java.util.Map<String, String> TP = new java.util.HashMap<>(); for (java.util.Map.Entry<String, com.google.gson.JsonElement> e : com.google.gson.JsonParser.parseString("{}").getAsJsonObject().entrySet()) TP.put(e.getKey(), e.getValue().getAsString());
 com.google.gson.JsonArray props = com.google.gson.JsonParser.parseString(J).getAsJsonArray();
 ghidra.program.model.data.DataTypeManager dtm = currentProgram.getDataTypeManager();
 ghidra.program.model.listing.Listing L = currentProgram.getListing();
@@ -17,6 +18,8 @@ java.util.function.Function<String, ghidra.program.model.data.DataType> base = n
  ghidra.program.model.data.DataType d = dtm.getDataType(new ghidra.program.model.data.CategoryPath("/"), n); if (d != null) return d;
  d = BI.getDataType(new ghidra.program.model.data.CategoryPath("/"), n); if (d != null) return d;
  java.util.List<ghidra.program.model.data.DataType> l = new java.util.ArrayList<>(); dtm.findDataTypes(n, l); if (l.size() == 1) return l.get(0);
+ // a name several categories hold, resolved by the category the run names for it (--types)
+ if (l.size() > 1 && TP.containsKey(n)) { for (ghidra.program.model.data.DataType x : l) if (x.getPathName().equals(TP.get(n))) return x; throw new RuntimeException("no " + n + " at " + TP.get(n)); }
  // copies of one typedef in several header categories (the Mac program has uint32_t and size_t more than once): same-size typedefs, the shallowest category wins
  if (l.size() > 1) { boolean same = true; for (ghidra.program.model.data.DataType x : l) same &= x instanceof ghidra.program.model.data.TypeDef && x.getLength() == l.get(0).getLength();
   if (same) { l.sort(java.util.Comparator.comparingInt(x -> x.getCategoryPath().getPath().length())); return l.get(0); } }
@@ -37,6 +40,12 @@ java.util.function.Function<String, String> nsig = s -> s.trim().replaceAll("\\*
 java.util.function.Function<String, String> nconv = s -> s == null ? "" : s.trim().toLowerCase().replaceFirst("^_+", "");
 java.util.function.BiFunction<com.google.gson.JsonObject, String, String> js = (o, k) -> (o.has(k) && !o.get(k).isJsonNull()) ? o.get(k).getAsString() : null;
 java.util.function.Function<String, ghidra.program.model.listing.Function> fnAt = a -> { ghidra.program.model.listing.Function f = getFunctionAt(toAddr(a)); if (f == null) throw new RuntimeException("no function at " + a); return f; };
+// custom storage for a parameter whose type changes size: the register's part of that size at its low end (EAX -> AL), the same stack slot
+java.util.function.BiFunction<ghidra.program.model.listing.VariableStorage, Integer, ghidra.program.model.listing.VariableStorage> resize = (vs, n) -> { if (vs.size() == n) return vs;
+ try { if (vs.isRegisterStorage()) { ghidra.program.model.lang.Register r = currentProgram.getLanguage().getRegister(vs.getRegister().getAddress(), n); if (r != null) return new ghidra.program.model.listing.VariableStorage(currentProgram, r); }
+  else if (vs.isStackStorage()) return new ghidra.program.model.listing.VariableStorage(currentProgram, vs.getStackOffset(), n); }
+ catch (ghidra.util.exception.InvalidInputException x) { throw new RuntimeException(x.getMessage()); }
+ throw new RuntimeException("custom storage " + vs + " has no part of " + n + " bytes"); };
 // Like the checker: of the variables at a storage, the one whose name, or type, the proposer saw; an undefinedN of the same size stands for what the decompiler resolves it to.
 java.util.function.Function<Object[], ghidra.program.model.listing.Variable> varAt = q -> { ghidra.program.model.listing.Function f = (ghidra.program.model.listing.Function) q[0]; String st = (String) q[1]; String en = (String) q[2], et = (String) q[3];
  java.util.List<ghidra.program.model.listing.Variable> at = new java.util.ArrayList<>(); for (ghidra.program.model.listing.Variable v : f.getAllVariables()) if (norm.apply(v.getVariableStorage().toString()).equals(st)) at.add(v);
@@ -81,7 +90,7 @@ for (com.google.gson.JsonElement pe : props) { com.google.gson.JsonObject P = pe
    if (op.equals("rename_function")) { ghidra.program.model.listing.Function f = fnAt.apply(js.apply(o, "address")); if (!f.getName().equals(js.apply(ex, "name"))) why = op + " name is " + f.getName(); }
    else if (op.equals("rename_global")) { ghidra.program.model.symbol.Symbol s = getSymbolAt(toAddr(js.apply(o, "address"))); if (s == null || !s.getName().equals(js.apply(ex, "name"))) why = op + " name is " + (s == null ? "none" : s.getName()); }
    else if (op.equals("delete_label")) { ghidra.program.model.symbol.Symbol s = getSymbolAt(toAddr(js.apply(o, "address"))); if (s == null || !s.getName().equals(js.apply(ex, "name"))) why = op + " name is " + (s == null ? "none" : s.getName()); }
-   else if (op.equals("set_global_type")) { ghidra.program.model.listing.Data d = getDataAt(toAddr(js.apply(o, "address"))); String t = d == null ? "none" : d.getDataType().getDisplayName(); if (!nsig.apply(t).equals(nsig.apply(js.apply(ex, "type")))) why = op + " type is " + t; type.apply(js.apply(o, "type")); }
+   else if (op.equals("set_global_type")) { ghidra.program.model.listing.Data d = getDataAt(toAddr(js.apply(o, "address"))); String t = d == null ? (getDataContaining(toAddr(js.apply(o, "address"))) == null && getInstructionContaining(toAddr(js.apply(o, "address"))) == null ? "undefined" : "none") : d.getDataType().getDisplayName(); if (!nsig.apply(t).equals(nsig.apply(js.apply(ex, "type")))) why = op + " type is " + t; type.apply(js.apply(o, "type")); }
    else if (op.equals("struct_field")) { ghidra.program.model.data.DataType sd = base.apply(js.apply(o, "typePath")); if (!(sd instanceof ghidra.program.model.data.Structure)) throw new RuntimeException("not a structure"); ghidra.program.model.data.DataTypeComponent c = ((ghidra.program.model.data.Structure) sd).getComponentAt(o.get("offset").getAsInt());
     if (c == null || c.getOffset() != o.get("offset").getAsInt()) why = op + " no field at offset"; else { if (ex.has("name") && !String.valueOf(c.getFieldName()).equals(js.apply(ex, "name"))) why = op + " field is " + c.getFieldName(); if (ex.has("type") && !nsig.apply(c.getDataType().getDisplayName()).equals(nsig.apply(js.apply(ex, "type")))) why = op + " field type is " + c.getDataType().getDisplayName(); if (o.has("type") && type.apply(js.apply(o, "type")).getLength() > c.getLength() && c.getLength() > 0) { /* growth checked at write */ } } }
    else if (op.equals("set_prototype")) { ghidra.program.model.listing.Function f = fnAt.apply(js.apply(o, "address")); String cur = f.getSignature().getPrototypeString();
@@ -102,7 +111,7 @@ for (com.google.gson.JsonElement pe : props) { com.google.gson.JsonObject P = pe
    if (op.equals("rename_function")) fnAt.apply(js.apply(o, "address")).setName(js.apply(o, "name"), U);
    else if (op.equals("rename_global")) getSymbolAt(toAddr(js.apply(o, "address"))).setName(js.apply(o, "name"), U);
    else if (op.equals("delete_label")) { ghidra.program.model.symbol.Symbol s = getSymbolAt(toAddr(js.apply(o, "address"))); if (!s.delete()) throw new RuntimeException("label not deleted"); }
-   else if (op.equals("set_global_type")) { ghidra.program.model.address.Address a = toAddr(js.apply(o, "address")); ghidra.program.model.data.DataType dt = type.apply(js.apply(o, "type")); L.clearCodeUnits(a, a.add(Math.max(dt.getLength(), getDataAt(a).getLength()) - 1), false); L.createData(a, dt); }
+   else if (op.equals("set_global_type")) { ghidra.program.model.address.Address a = toAddr(js.apply(o, "address")); ghidra.program.model.data.DataType dt = type.apply(js.apply(o, "type")); L.clearCodeUnits(a, a.add(Math.max(dt.getLength(), getDataAt(a) == null ? 1 : getDataAt(a).getLength()) - 1), false); L.createData(a, dt); }
    else if (op.equals("struct_field")) { ghidra.program.model.data.Structure sd = (ghidra.program.model.data.Structure) base.apply(js.apply(o, "typePath")); int off = o.get("offset").getAsInt(); ghidra.program.model.data.DataTypeComponent c = sd.getComponentAt(off);
     ghidra.program.model.data.DataType dt = o.has("type") ? type.apply(js.apply(o, "type")) : c.getDataType(); String nm = o.has("name") ? js.apply(o, "name") : c.getFieldName();
     // a larger type takes the undefined bytes after the field, and replaceAtOffset refuses when a defined field is in the way
@@ -117,20 +126,23 @@ for (com.google.gson.JsonElement pe : props) { com.google.gson.JsonObject P = pe
     sd.replaceAtOffset(off, dt, dt.getLength(), nm, c.getComment()); }
    else if (op.equals("set_prototype")) { ghidra.program.model.listing.Function f = fnAt.apply(js.apply(o, "address")); java.util.List<String[]> s = psig.apply(js.apply(o, "signature")); ghidra.program.model.data.DataType rdt = type.apply(s.get(0)[0]);
     boolean custom = f.hasCustomVariableStorage(); java.util.List<ghidra.program.model.listing.Parameter> ps = new java.util.ArrayList<>();
-    if (custom && f.getParameterCount() != s.size() - 1) throw new RuntimeException("custom storage and the parameter count changes");
+    // custom storage and a parameter count that changes: the convention's own storage, when it puts every parameter that stays where the custom storage had it
+    java.util.Map<String, String> was = new java.util.HashMap<>(); boolean recount = custom && f.getParameterCount() != s.size() - 1;
+    if (recount) { for (ghidra.program.model.listing.Parameter op0 : f.getParameters()) was.put(op0.getName(), op0.getVariableStorage().toString()); custom = false; }
     // custom storage follows the parameter's name when the new names are the old ones reordered, else its position
     java.util.Map<String, ghidra.program.model.listing.VariableStorage> byName = new java.util.HashMap<>(); if (custom) for (ghidra.program.model.listing.Parameter op0 : f.getParameters()) byName.put(op0.getName(), op0.getVariableStorage());
     boolean perm = custom && byName.size() == s.size() - 1; if (perm) for (int i = 1; i < s.size(); i++) perm &= byName.containsKey(s.get(i)[1]);
     for (int i = 1; i < s.size(); i++) { ghidra.program.model.data.DataType pdt = type.apply(s.get(i)[0]); ghidra.program.model.listing.VariableStorage vs = ghidra.program.model.listing.VariableStorage.UNASSIGNED_STORAGE;
-     if (custom) { vs = perm ? byName.get(s.get(i)[1]) : f.getParameter(i - 1).getVariableStorage(); if (vs.size() != pdt.getLength()) throw new RuntimeException("custom storage size change on parameter " + i); }
+     if (custom) vs = resize.apply(perm ? byName.get(s.get(i)[1]) : f.getParameter(i - 1).getVariableStorage(), pdt.getLength());
      ps.add(new ghidra.program.model.listing.ParameterImpl(s.get(i)[1], pdt, vs, currentProgram, U)); }
     ghidra.program.model.listing.ReturnParameterImpl ret;
     if (custom && !(rdt instanceof ghidra.program.model.data.VoidDataType) && rdt.getLength() > 0) { String rn = rdt.getLength() == 1 ? "AL" : rdt.getLength() == 2 ? "AX" : "EAX"; ret = new ghidra.program.model.listing.ReturnParameterImpl(rdt, new ghidra.program.model.listing.VariableStorage(currentProgram, currentProgram.getRegister(rn)), currentProgram); }
     else ret = new ghidra.program.model.listing.ReturnParameterImpl(rdt, currentProgram);
     String conv = js.apply(o, "callingConvention"); if (conv == null || nconv.apply(conv).equals("unknown") || custom) conv = f.getCallingConventionName();
-    f.updateFunction(conv, ret, ps, custom ? ghidra.program.model.listing.Function.FunctionUpdateType.CUSTOM_STORAGE : ghidra.program.model.listing.Function.FunctionUpdateType.DYNAMIC_STORAGE_ALL_PARAMS, true, U); if (js.apply(o, "signature").contains("...")) f.setVarArgs(true); }
+    f.updateFunction(conv, ret, ps, custom ? ghidra.program.model.listing.Function.FunctionUpdateType.CUSTOM_STORAGE : ghidra.program.model.listing.Function.FunctionUpdateType.DYNAMIC_STORAGE_ALL_PARAMS, true, U); if (js.apply(o, "signature").contains("...")) f.setVarArgs(true);
+    if (recount) for (ghidra.program.model.listing.Parameter np : f.getParameters()) if (was.containsKey(np.getName()) && !was.get(np.getName()).equals(np.getVariableStorage().toString())) throw new RuntimeException("custom storage: " + conv + " puts " + np.getName() + " at " + np.getVariableStorage() + ", it was at " + was.get(np.getName())); }
    else { ghidra.program.model.listing.Function f = fnAt.apply(js.apply(o, "function")); com.google.gson.JsonObject ex = o.getAsJsonObject("expect"); ghidra.program.model.listing.Variable v = varAt.apply(new Object[]{f, norm.apply(js.apply(o, "storage")), js.apply(ex, "name"), js.apply(ex, "type")});
-    if (op.equals("retype_local")) { ghidra.program.model.data.DataType dt = type.apply(js.apply(o, "type")); if (dt.getLength() != v.getLength() && f.hasCustomVariableStorage() && v instanceof ghidra.program.model.listing.Parameter) throw new RuntimeException("size change on custom storage parameter"); v.setDataType(dt, true, true, U); }
+    if (op.equals("retype_local")) { ghidra.program.model.data.DataType dt = type.apply(js.apply(o, "type")); if (dt.getLength() != v.getLength() && f.hasCustomVariableStorage() && v instanceof ghidra.program.model.listing.Parameter) ((ghidra.program.model.listing.Parameter) v).setDataType(dt, resize.apply(v.getVariableStorage(), dt.getLength()), true, U); else v.setDataType(dt, true, true, U); }
     else v.setName(js.apply(o, "name"), U); }
    String a = js.apply(o, "function") != null ? js.apply(o, "function") : js.apply(o, "address"); ghidra.program.model.listing.Function tf = a == null ? null : getFunctionAt(toAddr(a)); if (tf != null) tf.addTag(TAG); }
   good = true;

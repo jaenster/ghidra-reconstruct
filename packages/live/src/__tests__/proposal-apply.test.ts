@@ -5,7 +5,9 @@
  * docs/tools/ghidra-apply/proposal_render.py, before it was retired) from proposals.json: one
  * real proposal of every op kind it knew, plus one with non-ASCII, quotes, a backslash, a DEL and
  * an astral character. The port gave the same bytes; since then set_prototype keeps custom storage
- * by name on a pure reorder, the one place the goldens differ from the Python script's.
+ * by name on a pure reorder, custom storage follows a parameter's size, a type several categories
+ * hold resolves through the run's --types map, and undefined bytes read as an undefined global:
+ * the places the goldens differ from the Python script's.
  */
 
 import { describe, it } from 'node:test';
@@ -63,6 +65,20 @@ describe('proposal-render: the Python script\'s output, byte for byte', () => {
   });
 });
 
+describe('proposal-render: what the Mac program needs', () => {
+  it('names the category of a type several hold, only when the run says so', () => {
+    const t = renderProposalScript(rows, { program: 'mac', author: '*', dry: true, types: { eD2Quests: '/Diablo2/SERVER/QUEST/eD2Quests' } }).text;
+    assert.ok(t.includes('com.google.gson.JsonParser.parseString("{\\"eD2Quests\\":\\"/Diablo2/SERVER/QUEST/eD2Quests\\"}")'), 'the map is a Java string of JSON');
+    assert.ok(renderProposalScript(rows, { program: 'mac', author: '*', dry: true }).text.includes('com.google.gson.JsonParser.parseString("{}")'));
+    assert.ok(t.includes('if (l.size() > 1 && TP.containsKey(n))'));
+  });
+
+  it('reads undefined bytes as an undefined global and clears them', () => {
+    assert.ok(PROPOSAL_APPLY_TEMPLATE.includes('getDataContaining(toAddr(js.apply(o, "address"))) == null && getInstructionContaining(toAddr(js.apply(o, "address"))) == null ? "undefined" : "none"'));
+    assert.ok(PROPOSAL_APPLY_TEMPLATE.includes('getDataAt(a) == null ? 1 : getDataAt(a).getLength()'));
+  });
+});
+
 describe('proposal-render: vc8form and linkage', () => {
   const ext = [
     { id: 7, author: 'ann', ops: [
@@ -116,10 +132,11 @@ function runSetPrototype(signature: string, current: string[]): string[] {
     const h = readFileSync(join(dir, 'Harness.java'), 'utf8')
       .replace('/*NCONV*/', stmt('java.util.function.Function<String, String> nconv =', ';\n'))
       .replace('/*PSIG*/', stmt('java.util.function.Function<String, java.util.List<String[]>> psig =', 'return r; };\n'))
+      .replace('/*RESIZE*/', stmt('java.util.function.BiFunction<ghidra.program.model.listing.VariableStorage, Integer, ghidra.program.model.listing.VariableStorage> resize =', 'bytes"); };\n'))
       .replace('/*SET_PROTOTYPE*/', block.trimStart());
     writeFileSync(join(dir, 'Harness.java'), h);
-    const files = ['Harness.java', ...['lang/Register', 'symbol/SourceType', 'data/DataType', 'data/VoidDataType', 'listing/Program', 'listing/VariableStorage', 'listing/Parameter', 'listing/ParameterImpl', 'listing/ReturnParameterImpl', 'listing/Function'].map((f) => `ghidra/program/model/${f}.java`)];
-    execFileSync('javac', ['-nowarn', '-d', dir, ...files.map((f) => join(dir, f))], { cwd: dir, stdio: 'pipe' });
+    const files = ['Harness.java', ...['lang/Register', 'lang/Language', 'address/Address', 'symbol/SourceType', 'data/DataType', 'data/VoidDataType', 'listing/Program', 'listing/VariableStorage', 'listing/Parameter', 'listing/ParameterImpl', 'listing/ReturnParameterImpl', 'listing/Function'].map((f) => `ghidra/program/model/${f}.java`)];
+    execFileSync('javac', ['-nowarn', '-d', dir, ...files.map((f) => join(dir, f)), join(dir, 'ghidra/util/exception/InvalidInputException.java')], { cwd: dir, stdio: 'pipe' });
     return execFileSync('java', ['-cp', dir, 'Harness', signature, ...current], { encoding: 'utf8' }).trim().split(/\r?\n/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -137,6 +154,26 @@ describe('proposal-render: set_prototype on custom storage, run against stub Ghi
       'param int nSkill@EDX',
       'param Unit * pUnit@ECX',
     ]);
+  });
+
+  it('a narrower type takes the low part of its register', () => {
+    assert.deepStrictEqual(runSetPrototype('int SKILLS_Use(Unit * pUnit, char nSkill)', fn), [
+      'update __fastcall CUSTOM_STORAGE ret int@EAX',
+      'param Unit * pUnit@ECX',
+      'param char nSkill@DL',
+    ]);
+  });
+
+  it('a narrower type keeps its stack slot at the new size', () => {
+    assert.deepStrictEqual(runSetPrototype('int F(Unit * pUnit, short nY)', ['Unit *:pUnit@ECX', 'int:nY@Stack0x8']), [
+      'update __fastcall CUSTOM_STORAGE ret int@EAX',
+      'param Unit * pUnit@ECX',
+      'param short nY@Stack[0x8]:2',
+    ]);
+  });
+
+  it('refuses a register with no part of that size', () => {
+    assert.throws(() => runSetPrototype('int F(Unit * pUnit, char nX)', ['Unit *:pUnit@ECX', 'int:nX@ESI']), /has no part of 1 bytes/u);
   });
 
   it('a rename keeps storage by position', () => {
