@@ -443,6 +443,11 @@ export {
 } from './builtins/tail-walk-reread.js';
 
 export {
+  copybackDropPlugin,
+  type CopybackDropOptions,
+} from './builtins/copyback-drop.js';
+
+export {
   twinStepCoalescePlugin,
   type TwinStepCoalesceOptions,
 } from './builtins/twin-step-coalesce.js';
@@ -1026,6 +1031,7 @@ import { loopCompareDifferencePlugin } from './builtins/loop-compare-difference.
 import { tailWalkRereadPlugin } from './builtins/tail-walk-reread.js';
 import { dyingAccumulatorPlugin } from './builtins/dying-accumulator.js';
 import { twinStepCoalescePlugin } from './builtins/twin-step-coalesce.js';
+import { copybackDropPlugin } from './builtins/copyback-drop.js';
 import { rotatedStepWhilePlugin } from './builtins/rotated-step-while.js';
 import { copiedTestWhilePlugin } from './builtins/copied-test-while.js';
 import { decidedBoolReturnPlugin } from './builtins/decided-bool-return.js';
@@ -1297,6 +1303,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   crtIntrinsicCallPlugin,     // Matching: a _CI* x87 math helper call is written as its <math.h> function (priority 59.66)
   callResultDividePlugin,     // Matching: a call result the original divides at once is divided in its assignment (priority 59.66)
   storeOrderPlugin,           // Matching: independent stores in the original's instruction order (priority 59.7)
+  copybackDropPlugin,         // Matching: `B = A;` right after `A = B;` stores what B holds already and goes (priority 59.95)
   arrayFillCollapsePlugin,    // Cleanup: collapse arr[i]=0 runs into memset (priority 50)
   aggregateZeroInitPlugin,    // Matching: zero member stores that write a whole local become `T s = {0};` (priority 955)
   nativeConstantStorePlugin,
