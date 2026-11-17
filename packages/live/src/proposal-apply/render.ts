@@ -35,6 +35,12 @@ export interface RenderOptions {
   tag?: string;
   /** [chunk, size]: the chunk-th run of size proposals; size 0 for all. */
   chunk?: [number, number];
+  /**
+   * A type name several categories hold, by the path to use for it (`{"eD2Quests":
+   * "/Diablo2/SERVER/QUEST/eD2Quests"}`): the Mac program carries copies from more than one
+   * archive. A name not listed that several categories hold stays an error.
+   */
+  types?: Record<string, string>;
 }
 
 export interface Rendered {
@@ -110,6 +116,7 @@ export function renderProposalScript(all: ProposalRow[], opts: RenderOptions): R
   t = replaceAll(t, '__GROUP__', `${opts.program} ${opts.author}${size ? ` part ${chunk + 1}` : ''}`);
   t = replaceAll(t, '__TAG__', opts.tag ?? 'community-proposal');
   t = replaceAll(t, '__JSON__', replaceAll(json, '\\', '\\\\'));
+  t = replaceAll(t, '__TYPES__', replaceAll(replaceAll(pyJsonDumps(opts.types ?? {}), '\\', '\\\\'), '"', '\\"'));
   return { text: t, proposals: rows.length, ops: rows.reduce((n, r) => n + r.ops.length, 0) };
 }
 
@@ -121,9 +128,15 @@ export function readProposals(path: string): ProposalRow[] {
   return list;
 }
 
-const USAGE = 'usage: proposal-render <proposals.json> <win|mac> <author|*> <true|false> <out.java> [tag] [chunk/size]';
+const USAGE = 'usage: proposal-render [--types <name-to-path.json>] <proposals.json> <win|mac> <author|*> <true|false> <out.java> [tag] [chunk/size]';
 
 export function main(argv: string[]): number {
+  let types: Record<string, string> | undefined;
+  const ti = argv.indexOf('--types');
+  if (ti >= 0) {
+    types = JSON.parse(readFileSync(argv[ti + 1] ?? '', 'utf8'));
+    argv = [...argv.slice(0, ti), ...argv.slice(ti + 2)];
+  }
   if (argv.length < 5) { process.stderr.write(`${USAGE}\n`); return 2; }
   const [src, program, author, dry, out, tag, part] = argv;
   if (dry !== 'true' && dry !== 'false') { process.stderr.write(`dry is true or false\n${USAGE}\n`); return 2; }
@@ -133,7 +146,7 @@ export function main(argv: string[]): number {
     if (!m) { process.stderr.write(`chunk/size is two numbers, like 0/40\n${USAGE}\n`); return 2; }
     chunk = [Number(m[1]), Number(m[2])];
   }
-  const r = renderProposalScript(readProposals(src), { program, author, dry: dry === 'true', tag, chunk });
+  const r = renderProposalScript(readProposals(src), { program, author, dry: dry === 'true', tag, chunk, types });
   writeFileSync(out, r.text);
   process.stdout.write(`${out} ${[...r.text].length} proposals ${r.proposals} ops ${r.ops}\n`);
   return 0;
