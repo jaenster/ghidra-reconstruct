@@ -73,6 +73,12 @@ describe('proposal-render: what the Mac program needs', () => {
     assert.ok(t.includes('if (l.size() > 1 && TP.containsKey(n))'));
   });
 
+  it('refuses a size change on a decompiler (HASH) local before writing anything', () => {
+    const i = PROPOSAL_APPLY_TEMPLATE.indexOf('// check every expect first');
+    const j = PROPOSAL_APPLY_TEMPLATE.indexOf('if (st.startsWith("HASH:") && nl != cv.getLength())');
+    assert.ok(i > 0 && j > i && j < PROPOSAL_APPLY_TEMPLATE.indexOf('int sub = currentProgram.startTransaction'), 'the check sits in the expect loop');
+  });
+
   it('reads undefined bytes as an undefined global and clears them', () => {
     assert.ok(PROPOSAL_APPLY_TEMPLATE.includes('getDataContaining(toAddr(js.apply(o, "address"))) == null && getInstructionContaining(toAddr(js.apply(o, "address"))) == null ? "undefined" : "none"'));
     assert.ok(PROPOSAL_APPLY_TEMPLATE.includes('getDataAt(a) == null ? 1 : getDataAt(a).getLength()'));
