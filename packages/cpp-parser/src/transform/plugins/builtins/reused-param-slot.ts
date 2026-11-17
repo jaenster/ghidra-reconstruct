@@ -88,6 +88,11 @@ export interface ReusedParamSlotOptions extends PluginOptions {
   enumConstants?: readonly string[];
   /** Unambiguous enum constant -> value. */
   enumValues?: Record<string, number>;
+  /**
+   * Aggregate -> its members' offset, size and Ghidra type: where an array member's
+   * address lands when the second value is an integer (`P->arr + X` is `N + off + s*X`).
+   */
+  structLayouts?: Record<string, ReadonlyArray<{ name: string; offset: number; size: number; type: string; bitSize?: number }>>;
 }
 
 /** Anonymous call-site override funcdefs: never the source's type. */
@@ -291,6 +296,339 @@ export function splitReusedParameterSlots(fn: FunctionDecl, o: ReusedParamSlotOp
 //    integer reused as another integer is the same variable as far as C is concerned.
 // The rewrite keeps every bit: the store keeps x (cast to T only where x is not
 // evidently one), a `(T)P` read becomes the local, a bare read `(PT)local`.
+//
+// Two refinements, both from MSVC keeping an integer in a pointer parameter's slot:
+//  - A bare read that only forms an array member's address, `P->arr + X` (a decayed
+//    array: no load), and lands in an integer, is integer arithmetic on the local:
+//    `N + off + s*X` with the member's offset and element size from the layout.
+//    MONSTERAI_WalkPartialTowardTarget @005de6f0 prints the target X kept in pTarget's
+//    slot as `(int)(pTarget->unk0x19 + nUnitX + -0x19)` (byte array at 0x19): it is
+//    `nTarget + nUnitX`.
+//  - The slot's address may be taken inside the second range: SKILLDESC_DrawSkillDmgElemental
+//    @004e9d20 keeps the max damage in pSkillsTxt's slot and passes `(int *)&pSkillsTxt`
+//    to AdjustDamageByType (LEA EDI,[EBP+8] at 004e9dd3). Allowed when every `&P` is a
+//    call argument reached by the second range's stores alone; the call's `(T *)` says
+//    the slot holds a T, and `&P` becomes `&local`.
+
+/** A spelling of an integer narrower than a word: promoted to int in arithmetic. */
+const NARROW_INTEGERS = new Set([
+  'char', 'uchar', 'unsigned char', 'signed char', 'byte', 'BYTE', 'undefined1', 'int8_t', 'uint8_t', 'bool',
+  'short', 'ushort', 'unsigned short', 'word', 'WORD', 'undefined2', 'int16_t', 'uint16_t',
+]);
+
+/** The pointee spellings whose pointer steps one byte. */
+const BYTE_POINTEES = new Set(['char', 'uchar', 'unsigned char', 'signed char', 'byte', 'BYTE', 'undefined1', 'undefined', 'int8_t', 'uint8_t']);
+
+type IntClass = 's' | 'u' | 'lit';
+
+/** Signed/unsigned word class of an integer type spelling (narrow types promote to int), else null. */
+function intClassOfSpelling(t: string): 's' | 'u' | null {
+  if (WORD_INTEGERS[t]) return WORD_INTEGERS[t];
+  return NARROW_INTEGERS.has(t) ? 's' : null;
+}
+
+/** Usual arithmetic conversion of two 32-bit classes. */
+function convClass(a: IntClass, b: IntClass): IntClass {
+  if (a === 'lit') return b;
+  if (b === 'lit') return a;
+  return a === 'u' || b === 'u' ? 'u' : 's';
+}
+
+/** A literal's value, `-lit` included; null otherwise. */
+function literalOf(e: Expression): bigint | null {
+  const x = unwrapParens(e);
+  if (x.kind === NodeKind.IntegerLiteral) return (x as unknown as { value: bigint }).value;
+  if (x.kind === NodeKind.UnaryExpr && (x as UnaryExpr).operator === '-') {
+    const v = literalOf((x as UnaryExpr).operand);
+    return v === null ? null : -v;
+  }
+  return null;
+}
+
+function mentions(e: unknown, name: string): boolean {
+  if (Array.isArray(e)) return e.some(i => mentions(i, name));
+  if (!e || typeof e !== 'object') return false;
+  const n = e as ASTNode;
+  if (n.kind === NodeKind.Identifier && (n as Identifier).name === name) return true;
+  for (const [k, v] of Object.entries(n)) {
+    if (k === 'location' || k === 'leadingTrivia' || k === 'trailingTrivia' || k === 'type') continue;
+    if (v && typeof v === 'object' && mentions(v, name)) return true;
+  }
+  return false;
+}
+
+/**
+ * The 32-bit integer class an expression evidently has: a literal, a typed local, an
+ * integer cast, a call's return type, or arithmetic on those. Null when not proven an integer.
+ */
+function intClassOf(e: Expression, o: ReusedParamSlotOptions, localTypes: ReadonlyMap<string, TypeNode>): IntClass | null {
+  const x = unwrapParens(e);
+  if (literalOf(x) !== null) return 'lit';
+  switch (x.kind) {
+    case NodeKind.Identifier: {
+      const t = localTypes.get((x as Identifier).name);
+      return t ? intClassOfSpelling(spellingOf(t)) : null;
+    }
+    case NodeKind.CStyleCastExpr:
+      return intClassOfSpelling(spellingOf((x as CStyleCastExpr).type));
+    case NodeKind.CallExpr: {
+      const name = calleeName((x as CallExpr).callee);
+      const rt = name ? lookup(o.functionReturnTypes, name) : undefined;
+      return rt ? intClassOfSpelling(rt.replace(/\s+/g, ' ').trim()) : null;
+    }
+    case NodeKind.UnaryExpr: {
+      const u = x as UnaryExpr;
+      if (u.operator !== '-' && u.operator !== '~' && u.operator !== '+') return null;
+      const c = intClassOf(u.operand, o, localTypes);
+      return c === 'lit' ? 's' : c;
+    }
+    case NodeKind.BinaryExpr: {
+      const b = x as unknown as { operator: string; left: Expression; right: Expression };
+      const l = intClassOf(b.left, o, localTypes), r = intClassOf(b.right, o, localTypes);
+      if (l === null || r === null) return null;
+      if (b.operator === '<<' || b.operator === '>>') return l === 'lit' ? 's' : l;
+      if (!['+', '-', '*', '/', '%', '&', '|', '^'].includes(b.operator)) return null;
+      return convClass(l, r);
+    }
+    default:
+      return null;
+  }
+}
+
+/**
+ * The array member `P->arr` the read `id` is the base of: its offset and element size,
+ * from the layout. Null for anything that loads (a scalar member), a bit field, a
+ * volatile member, or a layout that does not say.
+ */
+function arrayMemberOf(
+  member: ASTNode, paramType: string, o: ReusedParamSlotOptions,
+): { offset: number; elem: number } | null {
+  if (member.kind !== NodeKind.MemberExpr) return null;
+  const m = member as unknown as { member: ASTNode; isArrow: boolean };
+  if (!m.isArrow || m.member.kind !== NodeKind.Identifier) return null;
+  const agg = paramType.replace(/^(?:const|struct|union)\s+/, '').replace(/\s*\*\s*$/, '').trim().replace(/^.*::/, '');
+  const fields = o.structLayouts?.[agg]?.filter(f => f.name === (m.member as Identifier).name) ?? [];
+  if (fields.length !== 1) return null;
+  const f = fields[0];
+  if (f.bitSize !== undefined || /\bvolatile\b/.test(f.type)) return null;
+  const dim = /^[^[]+\[\s*(\d+)\s*\]/.exec(f.type);
+  if (!dim) return null;
+  const n = Number(dim[1]);
+  if (n <= 0 || f.size % n !== 0) return null;
+  return { offset: f.offset, elem: f.size / n };
+}
+
+function mentionsNode(e: unknown, target: object): boolean {
+  if (e === target) return true;
+  if (Array.isArray(e)) return e.some(i => mentionsNode(i, target));
+  if (!e || typeof e !== 'object') return false;
+  for (const [k, v] of Object.entries(e)) {
+    if (k === 'location' || k === 'leadingTrivia' || k === 'trailingTrivia' || k === 'type') continue;
+    if (v && typeof v === 'object' && mentionsNode(v, target)) return true;
+  }
+  return false;
+}
+
+function parentMap(statements: Statement[]): WeakMap<object, ASTNode> {
+  const parents = new WeakMap<object, ASTNode>();
+  const walk = (x: unknown, parent: ASTNode | null): void => {
+    if (Array.isArray(x)) { for (const i of x) walk(i, parent); return; }
+    if (!x || typeof x !== 'object') return;
+    const n = x as ASTNode;
+    if (parent) parents.set(n, parent);
+    for (const [k, v] of Object.entries(n)) {
+      if (k === 'location' || k === 'leadingTrivia' || k === 'trailingTrivia' || k === 'type') continue;
+      if (v && typeof v === 'object') walk(v, n);
+    }
+  };
+  walk(statements, null);
+  return parents;
+}
+
+/** A folded member address: the node it replaces, and its integer form's parts. */
+interface AddressFold {
+  top: Expression;
+  /** In source order; `before` ones stood left of the address (`a + (int)P->arr`). */
+  terms: { sign: 1 | -1; expr: Expression; scale: number; before: boolean }[];
+  literal: bigint;
+  /** The integer cast the replacement must keep to keep the expression's type, else null. */
+  keepCast: TypeNode | null;
+  /** Its value is of the local's type with no cast. */
+  exact: boolean;
+}
+
+/**
+ * Walk up from `P->arr` (the bare read's parent) through `+`/`-` of integers, byte-pointer
+ * casts and integer casts, to where the value stops being address arithmetic. Null unless
+ * that value is an integer (or the whole stored value) and every step is proven.
+ */
+function foldMemberAddress(
+  member: Expression, parents: WeakMap<object, ASTNode>, field: { offset: number; elem: number },
+  p: string, targetType: string, storeValues: ReadonlySet<object>,
+  o: ReusedParamSlotOptions, localTypes: ReadonlyMap<string, TypeNode>,
+): AddressFold | null {
+  const localClass = WORD_INTEGERS[targetType];
+  if (!localClass) return null;
+  let cur: ASTNode = member;
+  // The outermost node consumed: never a parenthesis, so a stored value matches it.
+  let top: ASTNode = member;
+  let pointer = true;
+  let scale = field.elem;
+  let literal = BigInt(field.offset);
+  const terms: AddressFold['terms'] = [];
+  let lastCast: CStyleCastExpr | null = null;
+  // The class of the integer value as C types it: from the integer cast on, with the
+  // terms added after it.
+  let origClass: IntClass | null = null;
+  for (;;) {
+    let parent = parents.get(cur);
+    while (parent && parent.kind === NodeKind.ParenExpr) { cur = parent; parent = parents.get(cur); }
+    if (!parent) break;
+    if (parent.kind === NodeKind.BinaryExpr) {
+      const b = parent as unknown as { operator: string; left: Expression; right: Expression };
+      if (b.operator !== '+' && b.operator !== '-') break;
+      const onLeft = b.left === cur;
+      // `X - P->arr` and a side that is not a proven integer (or reads P again) end the
+      // arithmetic here: an integer if the walk is past its integer cast, else no fold.
+      if (!onLeft && b.operator === '-') break;
+      const other = onLeft ? b.right : b.left;
+      if (mentions(other, p)) break;
+      const c = intClassOf(other, o, localTypes);
+      if (c === null) break;
+      const sign: 1 | -1 = b.operator === '-' ? -1 : 1;
+      const v = literalOf(other);
+      if (v !== null) literal += BigInt(sign) * BigInt(scale) * v;
+      else terms.push({ sign, expr: other, scale, before: !onLeft });
+      if (!pointer) origClass = convClass(origClass!, c);
+      cur = top = parent;
+      continue;
+    }
+    if (parent.kind === NodeKind.CStyleCastExpr) {
+      const t = spellingOf((parent as CStyleCastExpr).type);
+      if (t.endsWith('*')) {
+        if (!pointer || !BYTE_POINTEES.has(t.slice(0, -1).trim())) break;
+        scale = 1;
+      } else {
+        const c = WORD_INTEGERS[t];
+        if (!c) break;
+        pointer = false;
+        scale = 1;
+        origClass = c;
+        lastCast = parent as CStyleCastExpr;
+      }
+      cur = top = parent;
+      continue;
+    }
+    break;
+  }
+  if (literal < -0x80000000n || literal > 0xffffffffn) return null;
+  const asStored = storeValues.has(top);
+  if (pointer && !asStored) return null;
+  let newClass: IntClass = localClass;
+  for (const t of terms) newClass = convClass(newClass, intClassOf(t.expr, o, localTypes)!);
+  if (pointer) return { top: top as Expression, terms, literal, keepCast: null, exact: newClass === localClass };
+  const exact = newClass === origClass && origClass === localClass;
+  if (exact) return { top: top as Expression, terms, literal, keepCast: null, exact };
+  // The types differ: a cast at the top keeps the expression's type; elsewhere the
+  // arithmetic would change type, unless it is the stored value (assignment converts).
+  if (top === lastCast && lastCast) return { top: top as Expression, terms, literal, keepCast: lastCast.type, exact: false };
+  if (asStored) return { top: top as Expression, terms, literal, keepCast: null, exact: false };
+  return null;
+}
+
+/** `local + terms + literal`, terms rebuilt by `rebuild`. */
+function foldedExpression(local: string, f: AddressFold, rebuild: (x: unknown) => unknown): Expression {
+  const term = (t: AddressFold['terms'][number]): Expression => {
+    const e = unwrapParens(rebuild(t.expr) as Expression);
+    return t.scale !== 1 ? Expr.mul(e, Expr.intLiteral(t.scale)) : e;
+  };
+  // A term left of the address is always added (`X - P->arr` is refused): the outermost first.
+  let acc: Expression | null = null;
+  for (const t of [...f.terms].filter(t => t.before).reverse()) acc = acc ? Expr.add(acc, term(t)) : term(t);
+  acc = acc ? Expr.add(acc, Expr.identifier(local)) : Expr.identifier(local);
+  for (const t of f.terms.filter(t => !t.before)) acc = t.sign === 1 ? Expr.add(acc, term(t)) : Expr.sub(acc, term(t));
+  if (f.literal > 0n) acc = Expr.add(acc, Expr.intLiteral(f.literal));
+  else if (f.literal < 0n) acc = Expr.sub(acc, Expr.intLiteral(-f.literal));
+  return f.keepCast ? Expr.cast(f.keepCast, Expr.paren(acc)) : acc;
+}
+
+/**
+ * Every `&P` in the body, when each is a call argument (through casts and parens):
+ * the statements with each such argument replaced by a placeholder identifier (so the
+ * dataflow no longer sees P escape), and the sites. Null when P's address is taken any
+ * other way (`&P` stored, `&P[i]`, `&P.x`).
+ */
+function maskSlotAddresses(statements: Statement[], p: string, placeholder: string):
+  { statements: Statement[]; sites: { node: Identifier; pointee: TypeNode | null }[] } | null {
+  const sites: { node: Identifier; pointee: TypeNode | null }[] = [];
+  let bad = false;
+  const rootIs = (e: Expression): boolean => {
+    let x = e;
+    for (;;) {
+      x = unwrapParens(x);
+      if (x.kind === NodeKind.Identifier) return (x as Identifier).name === p;
+      if (x.kind === NodeKind.MemberExpr && !(x as unknown as { isArrow: boolean }).isArrow) { x = (x as unknown as { object: Expression }).object; continue; }
+      if (x.kind === NodeKind.SubscriptExpr) { x = (x as unknown as { array: Expression }).array; continue; }
+      return false;
+    }
+  };
+  /** `&P` under casts/parens: the innermost cast's pointee, or undefined when it is not one. */
+  const slotAddress = (e: Expression): { pointee: TypeNode | null } | undefined => {
+    let x = e;
+    let pointee: TypeNode | null = null;
+    for (;;) {
+      if (x.kind === NodeKind.ParenExpr) { x = (x as unknown as { expression: Expression }).expression; continue; }
+      if (x.kind === NodeKind.CStyleCastExpr) {
+        const t = (x as CStyleCastExpr).type;
+        pointee = t.kind === NodeKind.PointerType ? (t as unknown as { pointee: TypeNode }).pointee : null;
+        x = (x as CStyleCastExpr).expression;
+        continue;
+      }
+      break;
+    }
+    if (x.kind !== NodeKind.UnaryExpr || (x as UnaryExpr).operator !== '&') return undefined;
+    const op = unwrapParens((x as UnaryExpr).operand);
+    return op.kind === NodeKind.Identifier && (op as Identifier).name === p ? { pointee } : undefined;
+  };
+  const rewrite = (x: unknown): unknown => {
+    if (bad) return x;
+    if (Array.isArray(x)) {
+      let ch = false;
+      const out = x.map(i => { const r = rewrite(i); if (r !== i) ch = true; return r; });
+      return ch ? out : x;
+    }
+    if (!x || typeof x !== 'object') return x;
+    const node = x as ASTNode;
+    if (node.kind === NodeKind.CallExpr) {
+      const c = node as CallExpr;
+      let ch = false;
+      const args = c.arguments.map(a => {
+        const s = slotAddress(a);
+        if (!s) return a;
+        const id = Expr.identifier(placeholder);
+        sites.push({ node: id, pointee: s.pointee });
+        ch = true;
+        return id as Expression;
+      });
+      const callee = rewrite(c.callee) as Expression;
+      const args2 = rewrite(args) as Expression[];
+      return ch || callee !== c.callee || args2 !== c.arguments ? { ...c, callee, arguments: args2 } : x;
+    }
+    if (node.kind === NodeKind.UnaryExpr && (node as UnaryExpr).operator === '&' && rootIs((node as UnaryExpr).operand)) {
+      bad = true;
+      return x;
+    }
+    let copy: Record<string, unknown> | null = null;
+    for (const [k, v] of Object.entries(node)) {
+      if (k === 'location' || k === 'leadingTrivia' || k === 'trailingTrivia' || k === 'type' || !v || typeof v !== 'object') continue;
+      const r = rewrite(v);
+      if (r !== v) { copy = copy ?? { ...(node as object) } as Record<string, unknown>; copy[k] = r; }
+    }
+    return copy ?? x;
+  };
+  const out = rewrite(statements) as Statement[];
+  return bad || sites.length === 0 ? null : { statements: out, sites };
+}
 
 /** Spellings of a 32-bit integer, Ghidra's and the tree's, by signedness. */
 const WORD_INTEGERS: Readonly<Record<string, 'u' | 's'>> = {
@@ -402,8 +740,19 @@ export function splitReusedValueSlots(fn: FunctionDecl, o: ReusedParamSlotOption
     const paramType = spellingOf(param.type);
     const paramClass = wordClass(paramType);
     if (!paramClass) continue;
-    const flow = buildFunctionFlow(statements, declared);
-    if (flow.isEscaped(p)) continue;
+    // `work` is the body this parameter is analysed and rewritten on: the statements, or
+    // (P's address taken) a copy with each `&P` call argument a placeholder.
+    let work = statements;
+    let flow = buildFunctionFlow(work, declared);
+    let addressSites: { node: Identifier; pointee: TypeNode | null }[] = [];
+    if (flow.isEscaped(p)) {
+      const masked = maskSlotAddresses(work, p, `__address_of_${p}`);
+      if (!masked) continue;
+      work = masked.statements;
+      addressSites = masked.sites;
+      flow = buildFunctionFlow(work, declared);
+      if (flow.isEscaped(p)) continue;
+    }
 
     // The writes, each a statement `P = e`.
     const stores = new Map<number, { stmt: ExprStmt; value: Expression }>();
@@ -432,6 +781,22 @@ export function splitReusedValueSlots(fn: FunctionDecl, o: ReusedParamSlotOption
     }
     if (mixed) { o.onRefused?.(fnName, `${p}: a read is reached by the parameter and by a later store`); continue; }
     if (second.size === 0) continue;
+
+    // Each `&P` is taken inside the second range: reached by the stores alone, so the
+    // callee sees (and may write) the second value, never the parameter.
+    if (addressSites.length > 0) {
+      const nodeOfSite = new Map<object, number>();
+      for (const n of flow.cfg.nodes) {
+        for (const s of addressSites) if (!nodeOfSite.has(s.node) && mentionsNode(flow.ownExprs(n.id), s.node)) nodeOfSite.set(s.node, n.id);
+      }
+      const inside = addressSites.every(s => {
+        const n = nodeOfSite.get(s.node);
+        if (n === undefined || stores.has(n)) return false;
+        const reach = [...flow.reaching(n, p)];
+        return reach.length > 0 && reach.every(r => stores.has(r));
+      });
+      if (!inside) { o.onRefused?.(fnName, `${p}: its address is taken where the parameter's own value may be live`); continue; }
+    }
 
     // Every occurrence of P the second range reads, with the cast around it (if any).
     // The store statements' own left-hand sides are writes, not reads.
@@ -465,8 +830,13 @@ export function splitReusedValueSlots(fn: FunctionDecl, o: ReusedParamSlotOption
     // T: from the reads when they all say it, else from the stores.
     let target: TypeNode | null = null;
     const readCasts = occurrences.map(oc => oc.cast ? spellingOf(oc.cast.type) : null);
+    const addressTypes = addressSites.map(s => s.pointee ? spellingOf(s.pointee) : null);
     if (readCasts.every(c => c !== null) && new Set(readCasts).size === 1) {
       target = occurrences[0].cast!.type;
+    } else if (addressTypes.length > 0 && addressTypes.every(t => t !== null && !sameType(t, paramType))
+        && new Set(addressTypes.map(t => canonicalWord(t!))).size === 1) {
+      // The callee is handed the slot as a `T *`: it holds a T.
+      target = addressSites[0].pointee;
     } else {
       // A literal store (`p = (T *)0x0`) holds a value of whichever type the others say;
       // the second range's type is what every other store agrees on.
@@ -498,6 +868,27 @@ export function splitReusedValueSlots(fn: FunctionDecl, o: ReusedParamSlotOption
       if (oc.cast && sameType(spellingOf(oc.cast.type), targetType)) castReads.set(oc.cast, Expr.identifier(local));
       else bareReads.add(oc.id);
     }
+    // A bare read that is the base of an array member's address, ending in an integer:
+    // integer arithmetic on the local.
+    const folds = new Map<object, AddressFold>();
+    if (targetClass === 'int' && o.structLayouts && bareReads.size > 0) {
+      const parents = parentMap(work);
+      const storeValues = new Set<object>([...stores.values()].map(s => storedValue(s.value, paramType)));
+      for (const oc of occurrences) {
+        if (!bareReads.has(oc.id)) continue;
+        let member = parents.get(oc.id);
+        while (member && member.kind === NodeKind.ParenExpr) member = parents.get(member);
+        if (!member || (member as unknown as { object: Expression }).object === undefined
+            || unwrapParens((member as unknown as { object: Expression }).object) !== oc.id) continue;
+        const field = arrayMemberOf(member, paramType, o);
+        if (!field) continue;
+        const f = foldMemberAddress(member as Expression, parents, field, p, targetType, storeValues, o, localTypes);
+        if (!f || folds.has(f.top)) continue;
+        folds.set(f.top, f);
+        bareReads.delete(oc.id);
+      }
+    }
+    const sitesByNode = new Map<object, TypeNode | null>(addressSites.map(s => [s.node, s.pointee]));
     const storeStmts = new Map<object, Expression>();
     // An integer the slot's new type takes without a cast: a literal, or arithmetic on
     // a read of the slot itself (`(int)p - 1` once that read is the local).
@@ -527,7 +918,8 @@ export function splitReusedValueSlots(fn: FunctionDecl, o: ReusedParamSlotOption
       const t = evidentType(x, o, localTypes);
       const fits = (t && sameType(spellingOf(t), targetType))
         || (targetClass === 'int' && plainInteger(x))
-        || isOwnRead(x);
+        || isOwnRead(x)
+        || (folds.get(unwrapParens(x))?.exact ?? false);
       storeStmts.set(s.stmt, fits ? x : Expr.cast(target, Expr.paren(x)));
     }
     const rebuild = (x: unknown): unknown => {
@@ -547,6 +939,13 @@ export function splitReusedValueSlots(fn: FunctionDecl, o: ReusedParamSlotOption
       const asLocal = castReads.get(node);
       if (asLocal) return asLocal;
       if (bareReads.has(node)) return Expr.paren(Expr.cast(param.type, Expr.identifier(local)));
+      const fold = folds.get(node);
+      if (fold) { applied++; return foldedExpression(local, fold, rebuild); }
+      if (sitesByNode.has(node)) {
+        const pointee = sitesByNode.get(node);
+        const addr = Expr.addressOf(Expr.identifier(local));
+        return pointee && !sameType(spellingOf(pointee), targetType) ? Expr.cast(Type.pointer(pointee) as TypeNode, addr) : addr;
+      }
       let copy: Record<string, unknown> | null = null;
       for (const [k, v] of Object.entries(node)) {
         if (k === 'location' || k === 'type' || !v || typeof v !== 'object') continue;
@@ -555,7 +954,11 @@ export function splitReusedValueSlots(fn: FunctionDecl, o: ReusedParamSlotOption
       }
       return copy ?? x;
     };
-    const rewritten = rebuild(statements) as Statement[];
+    let applied = 0;
+    const rewritten = rebuild(work) as Statement[];
+    // Each fold took its read out of the bare reads: one the rebuild never reached
+    // would leave P read in the second range.
+    if (applied !== folds.size) { o.onRefused?.(fnName, `${p}: a folded member address was not rewritten`); continue; }
     const decl = Stmt.declStmt([Decl.variable(local, target)]) as unknown as DeclStmt;
     let at = 0;
     while (at < rewritten.length && rewritten[at].kind === NodeKind.DeclStmt) at++;

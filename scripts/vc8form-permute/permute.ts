@@ -156,11 +156,13 @@ async function main() {
   // -- the targets
   const poolPath = args.pool ?? join(args.checkout, 'asm_matching', 'msvc8', 'evidence', 'audit.tsv');
   const pool: Array<[number, string, string, string, number]> = [];
+  let oversized = 0;
   for (const line of readFileSync(poolPath, 'utf8').split('\n').slice(1)) {
     const p = line.split('\t');
     // --addrs names its targets whatever their status (MATCH aside); the pool is the near misses.
     if (p.length < 10 || p[4].startsWith('lib') || p[3].startsWith('libcmt') || (args.addrs ? p[9] === 'MATCH' : !NEAR.test(p[9]))) continue;
-    if (parseInt(p[5], 10) >= args.max_insns) continue;
+    // --max-insns K keeps functions of at most K original instructions; a target named by --addrs is kept whatever its size.
+    if (!args.addrs && parseInt(p[5], 10) > args.max_insns) { oversized++; continue; }
     pool.push([parseInt(p[0], 16), p[2], p[3], p[9], parseInt(p[5], 10)]);
   }
   let full: Array<[number, string, string, string, number]>;
@@ -172,7 +174,12 @@ async function main() {
   }
   if (args.resume) full.sort((x, y) => x[4] - y[4] || x[0] - y[0]);   // smallest first
   const targets: Target[] = full.map(t => [t[0], t[1], t[2], t[3]]);
-  log(`pool ${pool.length}, targets ${targets.length}`);
+  log(`pool ${pool.length}, targets ${targets.length}${oversized ? `, ${oversized} near misses over --max-insns ${args.max_insns} left out` : ''}`);
+  if (args.addrs) {
+    const got = new Set(targets.map(t => t[0]));
+    const missing = args.addrs.split(',').map(x => parseInt(x, 16)).filter(a => !got.has(a));
+    if (missing.length) log(`not targets (MATCH, a library row or not in ${poolPath}): ${missing.map(hex8).join(',')}`);
+  }
 
   if (args.resume) args.snapshot = await smallSnapshot(args.snapshot, join(args.out, 'snap-small'), targets, orc);
   const snapCalls = new Map<number, string[]>();

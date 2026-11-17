@@ -433,6 +433,22 @@ function sites(c: Ctx, maxAnchors: number): string[] {
     for (const op of ['nest', 'merge-tail', 'continue', 'select']) out.add(withIdx(op, t, i, true));
     out.add(withIdx('tailguard', t, i, true));
     out.add(withIdx('tailcopy', t, i, true));
+    out.add(withIdx('andguard', t, i, true));
+  }
+  // swtail: a switch followed by the rest of its block.
+  for (const { t, i } of indexed(all.filter(n => n.kind === NodeKind.SwitchStmt && !n.init).map(s => pr(s.condition)))) out.add(withIdx('swtail', t, i, true));
+  // sel: an if/else storing one local in both arms, the i-th where several do.
+  const oneStore = (s: N | null | undefined): string | undefined => {
+    const st = !s ? [] : s.kind === NodeKind.CompoundStmt ? s.statements as N[] : [s];
+    const e = st.length === 1 && st[0].kind === NodeKind.ExprStmt ? unparen(st[0].expression) : undefined;
+    return e && e.kind === NodeKind.AssignExpr && e.operator === '=' && unparen(e.left).kind === NodeKind.Identifier ? unparen(e.left).name : undefined;
+  };
+  const pairs = ifs.filter(s => s.elseBranch && s.elseBranch.kind !== NodeKind.IfStmt).map(s => { const v = oneStore(s.thenBranch); return v && v === oneStore(s.elseBranch) ? v : undefined; })
+    .filter((v): v is string => !!v);
+  for (const v of new Set(pairs)) {
+    const n = pairs.filter(x => x === v).length;
+    if (n === 1) out.add(`sel(${v})`);
+    else for (let i = 1; i <= n; i++) out.add(`sel(${v},${i})`);
   }
   // arms: the i-th if/else on its condition where several share it.
   const elseConds = ifs.filter(s => s.elseBranch).map(s => pr(s.condition));
