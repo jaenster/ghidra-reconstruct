@@ -106,6 +106,13 @@ export function rewriteBody(text: string, scan: SiteScan, bindings: Array<Bindin
         }
         spelled = ctx.params[ctx.paramMap ? ctx.paramMap[b.i] : b.i];
         if (!spelled) { errors.push(`parameter ${b.i} has no name now`); return; }
+        // A parameter renamed to a name the stored body declares for a local of its own
+        // would print two declarations of one name (Unreferenced_0055db80: param_1 renamed
+        // pUnit, the stored local holding the owner was pUnit too).
+        if (spelled !== old && scan.locals.has(spelled)) {
+          errors.push(`parameter ${old} is ${spelled} now, a name the stored body declares for a local`);
+          return;
+        }
         break;
       }
       case 'fd': {
