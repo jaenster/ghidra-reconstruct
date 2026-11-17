@@ -148,6 +148,10 @@ import { builtinTruthSite } from './truth-form-safety.js';
  *   dup(S)               the expression statement S after an if/else (an else-if chain
  *                        with a final else) is written at the end of every arm instead;
  *                        refused when an arm can leave.
+ *                        An initialized, nonvolatile 32-bit integer declaration may also
+ *                        name S: its bare declaration stays before the if and its value
+ *                        is assigned in each arm. That case requires declaration-free
+ *                        arms, no shadowing, jumps, labels or exception handlers.
  *   hoist(S[,i])         the plain store S that begins the arm of an if with no else is
  *                        written just before the if (the decompiler sinks a store into the
  *                        only branch that reads it; the source as often wrote it above
@@ -430,7 +434,7 @@ import { builtinTruthSite } from './truth-form-safety.js';
  *                        avoiding narrowing case labels under integral promotions.
  */
 
-import { NodeKind, isExpression, isType } from '../../../ast/kinds.js';
+import { NodeKind, isDeclaration, isExpression, isType } from '../../../ast/kinds.js';
 import type {
   ASTNode, AssignExpr, BinaryExpr, CallExpr, CompoundStmt, ConditionalExpr, CStyleCastExpr, DeclStmt, Expression, SwitchStmt,
   ExprStmt, ForStmt, FunctionDecl, Identifier, IfStmt, IntegerLiteralExpr, MemberExpr, ParenExpr, PostfixExpr, ReturnStmt, Statement, SubscriptExpr, TranslationUnit,
@@ -2716,7 +2720,9 @@ function doDup(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'dup' }>): void {
   for (const b of blocks(fn)) {
     for (let k = 1; k < b.statements.length; k++) {
       const s = b.statements[k];
-      if (s.kind === NodeKind.ExprStmt && text((s as ExprStmt).expression) === w && b.statements[k - 1].kind === NodeKind.IfStmt) hits.push({ b, k });
+      if (b.statements[k - 1].kind !== NodeKind.IfStmt) continue;
+      if ((s.kind === NodeKind.ExprStmt && text((s as ExprStmt).expression) === w)
+        || (s.kind === NodeKind.DeclStmt && norm(emit(s as never)).replace(/;$/, '') === w)) hits.push({ b, k });
     }
   }
   if (hits.length !== 1) refuse(`${hits.length} statements ${f.stmt} after an if`);
@@ -2732,6 +2738,40 @@ function doDup(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'dup' }>): void {
     break;
   }
   const s = b.statements[k];
+  let tail = s;
+  let bare: Statement | undefined;
+  if (s.kind === NodeKind.DeclStmt) {
+    const d = declOf(s);
+    const spelling = d && emit(d.type as never);
+    const type = spelling?.replace(/\s+/g, '').replace(/^::/, '');
+    // Only the fixed integer spellings already known to this target, without
+    // resolving user typedefs or erasing a namespace that could name a class.
+    if (!d || !type || /\b(?:const|volatile)\b/.test(spelling!) || !RANGE[type]
+      || intType(type, false)?.w !== 4 || d.specifiers.length || d.attributes.length
+      || d.directInit || !d.initializer || d.initializer.kind === NodeKind.InitListExpr)
+      refuse('dup declaration needs one plain initialized 32-bit integer');
+    const name = d!.name.name;
+    const names = (n: ASTNode) => new RegExp(`(^|[^A-Za-z0-9_])${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}([^A-Za-z0-9_]|$)`).test(emit(n as never));
+    if (names(b.statements[k - 1]) || names(d!.initializer!)) refuse(`${name} would be captured or read before initialization`);
+    for (const { node } of walk(fn.body!)) {
+      if (node.kind === NodeKind.GotoStmt || node.kind === NodeKind.LabelStmt)
+        refuse('dup declaration does not cross control entries');
+      if (isDeclaration(node.kind) && node.kind !== NodeKind.VariableDecl
+        && node.kind !== NodeKind.ParameterDecl)
+        refuse('dup declaration does not model local type or callable declarations');
+    }
+    for (const { node } of walk(b.statements[k - 1])) {
+      if (isDeclaration(node.kind) || JUMPS.has(node.kind) || node.kind === NodeKind.CaseStmt
+        || node.kind === NodeKind.DefaultStmt || node.kind === NodeKind.TryStmt
+        || node.kind === NodeKind.SehTryStmt || node.kind === NodeKind.ThrowExpr
+        || node.kind === NodeKind.LambdaExpr || node.kind === NodeKind.PpConditionalStmt)
+        refuse('dup declaration needs arms without declarations, exits or handlers');
+    }
+    bare = cloneNode(s);
+    (declOf(bare)!).initializer = null;
+    tail = parseStmts(`${name} = 0;`)[0];
+    ((tail as ExprStmt).expression as AssignExpr).right = cloneNode(d!.initializer! as Expression);
+  }
   // S lands at the end of each arm: an arm that ends in a jump would never reach it, and a
   // name the arm declares would capture one S reads.
   for (const a of arms) {
@@ -2747,10 +2787,11 @@ function doDup(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'dup' }>): void {
   }
   for (const a of arms) {
     const blk = asBlock(a.holder[a.key]!);
-    blk.statements.push(cloneNode(s));
+    blk.statements.push(cloneNode(tail));
     a.holder[a.key] = blk;
   }
   b.statements.splice(k, 1);
+  if (bare) b.statements.splice(k - 1, 0, bare);
 }
 
 /**
