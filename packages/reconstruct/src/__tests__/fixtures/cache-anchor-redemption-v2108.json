@@ -1,0 +1,294 @@
+{
+  "source": "b897d5e99bce59148d08b050e54f3c2b02da100e",
+  "generatorMain": "130fbe61f58bceb1331368e9fb5eb90f61b7ed2f",
+  "ghidraVersion": 2108,
+  "function": {
+    "name": "SKILLPAL_ApplyRedemptionEffect",
+    "address": "005d0c40",
+    "entryPoint": "005d0c40",
+    "signature": "BOOL SKILLPAL_ApplyRedemptionEffect(SGAMEDATA * pGame, D2UnitStrc * pUnit, D2UnitStrc * pCorpse, eD2Skills eSkill, int32_t nSkillLvl, int32_t bSkipChanceRoll)",
+    "returnType": "BOOL",
+    "callingConvention": "__fastcall",
+    "size": 298,
+    "isThunk": false,
+    "isExternal": false,
+    "hasVarArgs": false,
+    "namespace": "D2Game::SKILLS::SkillPal",
+    "comment": "@function SKILLPAL_ApplyRedemptionEffect\n@address Game.exe.ram:005d0c40\n@date 2026.10.29\n@calling __fastcall\n@description Redemption skill server callback (misnamed Blizzard). Checks pCorpse is a selectable corpse, optionally rolls a chance check against calc[0], then heals pUnit by calc[1] life and calc[2] mana (both capped to txt max), sets STATE_redeemed on the corpse, and clears its CANBEATTACKED/TARGETABLE flags. Returns 1 if redemption was applied.",
+    "sourceFile": null,
+    "sourceLine": null,
+    "sourceInfo": null,
+    "parameters": [
+      {
+        "name": "pGame",
+        "dataType": "SGAMEDATA *",
+        "size": 4,
+        "ordinal": 0,
+        "storage": "ECX:4",
+        "stackOffset": null,
+        "resolvedType": null
+      },
+      {
+        "name": "pUnit",
+        "dataType": "D2UnitStrc *",
+        "size": 4,
+        "ordinal": 1,
+        "storage": "EDX:4",
+        "stackOffset": null,
+        "resolvedType": null
+      },
+      {
+        "name": "pCorpse",
+        "dataType": "D2UnitStrc *",
+        "size": 4,
+        "ordinal": 2,
+        "storage": "Stack[0x4]:4",
+        "stackOffset": 4,
+        "resolvedType": null
+      },
+      {
+        "name": "eSkill",
+        "dataType": "eD2Skills",
+        "size": 4,
+        "ordinal": 3,
+        "storage": "Stack[0x8]:4",
+        "stackOffset": 8,
+        "resolvedType": null
+      },
+      {
+        "name": "nSkillLvl",
+        "dataType": "int32_t",
+        "size": 4,
+        "ordinal": 4,
+        "storage": "Stack[0xc]:4",
+        "stackOffset": 12,
+        "resolvedType": null
+      },
+      {
+        "name": "bSkipChanceRoll",
+        "dataType": "int32_t",
+        "size": 4,
+        "ordinal": 5,
+        "storage": "Stack[0x10]:4",
+        "stackOffset": 16,
+        "resolvedType": null
+      }
+    ],
+    "localVariables": [
+      {
+        "name": "pSkillRecord",
+        "dataType": "D2SkillsTxt *",
+        "size": 4,
+        "storage": "EDI:4",
+        "stackOffset": null,
+        "resolvedType": "D2SkillsTxt *"
+      },
+      {
+        "name": "nStatVal",
+        "dataType": "int",
+        "size": 4,
+        "storage": "EAX:4",
+        "stackOffset": null,
+        "resolvedType": "int"
+      },
+      {
+        "name": "uRandPct",
+        "dataType": "uint32_t",
+        "size": 4,
+        "storage": "EAX:4",
+        "stackOffset": null,
+        "resolvedType": "uint32_t"
+      },
+      {
+        "name": "nCalcVal",
+        "dataType": "int32_t",
+        "size": 4,
+        "storage": "EAX:4",
+        "stackOffset": null,
+        "resolvedType": "int32_t"
+      },
+      {
+        "name": "nMaxVal",
+        "dataType": "int32_t",
+        "size": 4,
+        "storage": "EAX:4",
+        "stackOffset": null,
+        "resolvedType": "int32_t"
+      }
+    ],
+    "tags": [
+      {
+        "type": "llm-named"
+      },
+      {
+        "type": "callee-signature-changed"
+      },
+      {
+        "type": "community-proposal"
+      },
+      {
+        "type": "llm-type-fix"
+      },
+      {
+        "type": "asm-prototype"
+      }
+    ],
+    "decompiled": "\n/* WARNING: Enum \"eCollisionFlags\": Some values do not have unique names */\n/* WARNING: Enum \"eD2TimerType\": Some values do not have unique names */\n/* WARNING: Enum \"eD2TimerTypeDWORD\": Some values do not have unique names */\n/* @function SKILLPAL_ApplyRedemptionEffect\n   @address Game.exe.ram:005d0c40\n   @date 2026.10.29\n   @calling __fastcall\n   @description Redemption skill server callback (misnamed Blizzard). Checks pCorpse is a selectable\n   corpse, optionally rolls a chance check against calc[0], then heals pUnit by calc[1] life and\n   calc[2] mana (both capped to txt max), sets STATE_redeemed on the corpse, and clears its\n   CANBEATTACKED/TARGETABLE flags. Returns 1 if redemption was applied. */\n\nBOOL __fastcall\nD2Game::SKILLS::SkillPal::SKILLPAL_ApplyRedemptionEffect\n          (SGAMEDATA *pGame,D2UnitStrc *pUnit,D2UnitStrc *pCorpse,eD2Skills eSkill,int32_t nSkillLvl\n          ,int32_t bSkipChanceRoll)\n\n{\n  int nStatVal;\n  uint32_t uRandPct;\n  int32_t nCalcVal;\n  int32_t nMaxVal;\n  D2SkillsTxt *pSkillRecord;\n  \n  if ((((-1 < (int)eSkill) && ((int)eSkill < D2Common::ITEMS::Items::sgptDataTable->nTxtSkillsCount)\n       ) && (pSkillRecord = D2Common::ITEMS::Items::sgptDataTable->pTxtSkills + eSkill,\n            pSkillRecord != (D2SkillsTxt *)0x0)) &&\n     ((pCorpse != (D2UnitStrc *)0x0 &&\n      (nStatVal = D2Common::Skills::Skills::SKILLS_IsSelectableCorpse3(pCorpse), nStatVal != 0)))) {\n    if (bSkipChanceRoll == 0) {\n      nCalcVal = D2Common::Skills::Skills::D2GetSkillCalc\n                           (pUnit,pSkillRecord->calc[0],eSkill,nSkillLvl);\n      uRandPct = D2Common::Seed::UNIT_GetModuloFromSeed(&pUnit->sSeed,100);\n      if (nCalcVal <= (int)uRandPct) {\n        return 0;\n      }\n    }\n    nCalcVal = D2Common::Skills::Skills::D2GetSkillCalc\n                         (pUnit,pSkillRecord->calc[1],eSkill,nSkillLvl);\n    nMaxVal = D2Common::Stats::StatsEx::STATLIST_GetMaxLifeFromUnit(pUnit);\n    nStatVal = D2Common::Stats::StatsEx::STATSEX_GetCurrentStat(pUnit,UNITSTAT_hitpoints,0);\n    nStatVal = nStatVal + nCalcVal * 0x100;\n    if (nMaxVal < nStatVal) {\n      nStatVal = nMaxVal;\n    }\n    D2Common::Stats::StatsEx::STATLIST_SetUnitStat(pUnit,UNITSTAT_hitpoints,nStatVal,0);\n    nCalcVal = D2Common::Skills::Skills::D2GetSkillCalc\n                         (pUnit,pSkillRecord->calc[2],eSkill,nSkillLvl);\n    nMaxVal = D2Common::Stats::StatsEx::STATLIST_GetMaxManaFromUnit(pUnit);\n    nStatVal = D2Common::Stats::StatsEx::STATSEX_GetCurrentStat(pUnit,UNITSTAT_mana,0);\n    nStatVal = nStatVal + nCalcVal * 0x100;\n    if (nMaxVal < nStatVal) {\n      nStatVal = nMaxVal;\n    }\n    D2Common::Stats::StatsEx::STATLIST_SetUnitStat(pUnit,UNITSTAT_mana,nStatVal,0);\n    D2Common::DATATBLS::ItemStats::SetState(pCorpse,STATE_redeemed,1);\n    pCorpse->eUnitFlags = pCorpse->eUnitFlags & ~(UNITFLAG_CANBEATTACKED|UNITFLAG_TARGETABLE);\n    return 1;\n  }\n  return 0;\n}\n\n"
+  },
+  "tables": {
+    "paramFuncdefs": {},
+    "funcdefSignatures": {},
+    "functionSignatures": {
+      "SKILLS_IsSelectableCorpse3": "int(D2UnitStrc *)",
+      "D2Common::Skills::Skills::SKILLS_IsSelectableCorpse3": "int(D2UnitStrc *)",
+      "D2Common::Skills::SKILLS_IsSelectableCorpse3": "int(D2UnitStrc *)",
+      "D2GetSkillCalc": "int32_t(D2UnitStrc *,int32_t,eD2Skills,int32_t)",
+      "D2Common::Skills::Skills::D2GetSkillCalc": "int32_t(D2UnitStrc *,int32_t,eD2Skills,int32_t)",
+      "D2Common::Skills::D2GetSkillCalc": "int32_t(D2UnitStrc *,int32_t,eD2Skills,int32_t)",
+      "UNIT_GetModuloFromSeed": "uint32_t(D2SeedStrc *,uint32_t)",
+      "D2Common::Seed::UNIT_GetModuloFromSeed": "uint32_t(D2SeedStrc *,uint32_t)",
+      "STATLIST_GetMaxLifeFromUnit": "int32_t(D2UnitStrc *)",
+      "D2Common::Stats::StatsEx::STATLIST_GetMaxLifeFromUnit": "int32_t(D2UnitStrc *)",
+      "STATSEX_GetCurrentStat": "int(D2UnitStrc *,eD2UnitStat,uint16_t)",
+      "D2Common::Stats::StatsEx::STATSEX_GetCurrentStat": "int(D2UnitStrc *,eD2UnitStat,uint16_t)",
+      "STATLIST_SetUnitStat": "void(D2UnitStrc *,eD2UnitStat,int32_t,uint16_t)",
+      "D2Common::Stats::StatsEx::STATLIST_SetUnitStat": "void(D2UnitStrc *,eD2UnitStat,int32_t,uint16_t)",
+      "STATLIST_GetMaxManaFromUnit": "int32_t(D2UnitStrc *)",
+      "D2Common::Stats::StatsEx::STATLIST_GetMaxManaFromUnit": "int32_t(D2UnitStrc *)",
+      "SetState": "void(D2UnitStrc *,eD2States,int32_t)",
+      "D2Common::DATATBLS::ItemStats::SetState": "void(D2UnitStrc *,eD2States,int32_t)"
+    },
+    "functionReturnTypes": {
+      "SKILLS_IsSelectableCorpse3": "int",
+      "D2Common::Skills::Skills::SKILLS_IsSelectableCorpse3": "int",
+      "D2Common::Skills::SKILLS_IsSelectableCorpse3": "int",
+      "D2GetSkillCalc": "int32_t",
+      "D2Common::Skills::Skills::D2GetSkillCalc": "int32_t",
+      "D2Common::Skills::D2GetSkillCalc": "int32_t",
+      "UNIT_GetModuloFromSeed": "uint32_t",
+      "D2Common::Seed::UNIT_GetModuloFromSeed": "uint32_t",
+      "STATLIST_GetMaxLifeFromUnit": "int32_t",
+      "D2Common::Stats::StatsEx::STATLIST_GetMaxLifeFromUnit": "int32_t",
+      "STATSEX_GetCurrentStat": "int",
+      "D2Common::Stats::StatsEx::STATSEX_GetCurrentStat": "int",
+      "STATLIST_SetUnitStat": "void",
+      "D2Common::Stats::StatsEx::STATLIST_SetUnitStat": "void",
+      "STATLIST_GetMaxManaFromUnit": "int32_t",
+      "D2Common::Stats::StatsEx::STATLIST_GetMaxManaFromUnit": "int32_t",
+      "SetState": "void",
+      "D2Common::DATATBLS::ItemStats::SetState": "void"
+    },
+    "functionParamTypes": {
+      "SKILLS_IsSelectableCorpse3": [
+        "D2UnitStrc *"
+      ],
+      "D2Common::Skills::Skills::SKILLS_IsSelectableCorpse3": [
+        "D2UnitStrc *"
+      ],
+      "D2Common::Skills::SKILLS_IsSelectableCorpse3": [
+        "D2UnitStrc *"
+      ],
+      "D2GetSkillCalc": [
+        "D2UnitStrc *",
+        "int32_t",
+        "eD2Skills",
+        "int32_t"
+      ],
+      "D2Common::Skills::Skills::D2GetSkillCalc": [
+        "D2UnitStrc *",
+        "int32_t",
+        "eD2Skills",
+        "int32_t"
+      ],
+      "D2Common::Skills::D2GetSkillCalc": [
+        "D2UnitStrc *",
+        "int32_t",
+        "eD2Skills",
+        "int32_t"
+      ],
+      "UNIT_GetModuloFromSeed": [
+        "D2SeedStrc *",
+        "uint32_t"
+      ],
+      "D2Common::Seed::UNIT_GetModuloFromSeed": [
+        "D2SeedStrc *",
+        "uint32_t"
+      ],
+      "STATLIST_GetMaxLifeFromUnit": [
+        "D2UnitStrc *"
+      ],
+      "D2Common::Stats::StatsEx::STATLIST_GetMaxLifeFromUnit": [
+        "D2UnitStrc *"
+      ],
+      "STATSEX_GetCurrentStat": [
+        "D2UnitStrc *",
+        "eD2UnitStat",
+        "uint16_t"
+      ],
+      "D2Common::Stats::StatsEx::STATSEX_GetCurrentStat": [
+        "D2UnitStrc *",
+        "eD2UnitStat",
+        "uint16_t"
+      ],
+      "STATLIST_SetUnitStat": [
+        "D2UnitStrc *",
+        "eD2UnitStat",
+        "int32_t",
+        "uint16_t"
+      ],
+      "D2Common::Stats::StatsEx::STATLIST_SetUnitStat": [
+        "D2UnitStrc *",
+        "eD2UnitStat",
+        "int32_t",
+        "uint16_t"
+      ],
+      "STATLIST_GetMaxManaFromUnit": [
+        "D2UnitStrc *"
+      ],
+      "D2Common::Stats::StatsEx::STATLIST_GetMaxManaFromUnit": [
+        "D2UnitStrc *"
+      ],
+      "SetState": [
+        "D2UnitStrc *",
+        "eD2States",
+        "int32_t"
+      ],
+      "D2Common::DATATBLS::ItemStats::SetState": [
+        "D2UnitStrc *",
+        "eD2States",
+        "int32_t"
+      ]
+    },
+    "variableNames": [],
+    "voidPointerFunctions": [],
+    "rootQualifiedTypedefs": [],
+    "unionNames": [],
+    "globalTypes": {
+      "sgptDataTable": "D2DataTableTxtStrc *",
+      "D2Common::ITEMS::Items::sgptDataTable": "D2DataTableTxtStrc *"
+    }
+  },
+  "options": {
+    "outputDir": "./out",
+    "format": "cpp",
+    "organization": "namespace",
+    "generateCMake": false,
+    "generateSourceMaps": false,
+    "transformPreset": "full",
+    "includeAddressComments": false,
+    "promoteStaticGlobals": false
+  },
+  "tags": [
+    {
+      "type": "vc8form",
+      "data": "cache(nCalcVal * 0x100,nLifeGain,int32_t,@nMaxVal,1,1);ev=0000000000;bh=298-00000000;dh=784e62d9;ord=1"
+    },
+    {
+      "type": "vc8form",
+      "data": "cache(nCalcVal * 0x100,nManaGain,int32_t,@nMaxVal,1,2);ev=0000000000;bh=298-00000000;dh=784e62d9;ord=2"
+    }
+  ],
+  "baseline": "// Redemption skill server callback (misnamed Blizzard). Checks pCorpse is a selectable corpse, optionally rolls a chance check against calc[0], then heals pUnit by calc[1] life and calc[2] mana (both capped to txt max), sets STATE_redeemed on the corpse, and clears its CANBEATTACKED/TARGETABLE flags. Returns 1 if redemption was applied.\n// 1.14d: 005d0c40\nBOOL __fastcall SKILLPAL_ApplyRedemptionEffect(SGAMEDATA * pGame, D2UnitStrc * pUnit, D2UnitStrc * pCorpse, eD2Skills eSkill, int32_t nSkillLvl, int32_t bSkipChanceRoll) {\n    int32_t nCalcVal;\n    if (!(-1 < (int)eSkill && (int)eSkill < D2Common::ITEMS::Items::sgptDataTable->nTxtSkillsCount)) {\n      return 0;\n    }\n\n    D2SkillsTxt* pSkillRecord = D2Common::ITEMS::Items::sgptDataTable->pTxtSkills + eSkill;\n    if (!(pSkillRecord && pCorpse)) {\n      return 0;\n    }\n\n    int nStatVal = D2Common::Skills::SKILLS_IsSelectableCorpse3(pCorpse);\n    if (!nStatVal) {\n      return 0;\n    }\n    if (!bSkipChanceRoll) {\n      uint32_t uRandPct;\n      nCalcVal = D2Common::Skills::D2GetSkillCalc(pUnit, pSkillRecord->calc[0], eSkill, nSkillLvl);\n      uRandPct = D2Common::Seed::UNIT_GetModuloFromSeed(&pUnit->sSeed, 100);\n      if (nCalcVal <= (int)uRandPct) {\n        return 0;\n      }\n    }\n\n    nCalcVal = D2Common::Skills::D2GetSkillCalc(pUnit, pSkillRecord->calc[1], eSkill, nSkillLvl);\n    int32_t nMaxVal = D2Common::Stats::StatsEx::STATLIST_GetMaxLifeFromUnit(pUnit);\n    nStatVal = D2Common::Stats::StatsEx::STATSEX_GetCurrentStat(pUnit, UNITSTAT_hitpoints, 0);\n    nStatVal += nCalcVal * 0x100;\n    if (nMaxVal < nStatVal) {\n      nStatVal = nMaxVal;\n    }\n\n    D2Common::Stats::StatsEx::STATLIST_SetUnitStat(pUnit, UNITSTAT_hitpoints, nStatVal, 0);\n    nCalcVal = D2Common::Skills::D2GetSkillCalc(pUnit, pSkillRecord->calc[2], eSkill, nSkillLvl);\n    nMaxVal = D2Common::Stats::StatsEx::STATLIST_GetMaxManaFromUnit(pUnit);\n    nStatVal = D2Common::Stats::StatsEx::STATSEX_GetCurrentStat(pUnit, UNITSTAT_mana, 0);\n    nStatVal += nCalcVal * 0x100;\n    if (nMaxVal < nStatVal) {\n      nStatVal = nMaxVal;\n    }\n\n    D2Common::Stats::StatsEx::STATLIST_SetUnitStat(pUnit, UNITSTAT_mana, nStatVal, 0);\n    D2Common::DATATBLS::ItemStats::SetState(pCorpse, STATE_redeemed, 1);\n    pCorpse->eUnitFlags &= ~(UNITFLAG_CANBEATTACKED | UNITFLAG_TARGETABLE);\n    return 1;\n}",
+  "candidate": "// Redemption skill server callback (misnamed Blizzard). Checks pCorpse is a selectable corpse, optionally rolls a chance check against calc[0], then heals pUnit by calc[1] life and calc[2] mana (both capped to txt max), sets STATE_redeemed on the corpse, and clears its CANBEATTACKED/TARGETABLE flags. Returns 1 if redemption was applied.\n// 1.14d: 005d0c40\nBOOL __fastcall SKILLPAL_ApplyRedemptionEffect(SGAMEDATA * pGame, D2UnitStrc * pUnit, D2UnitStrc * pCorpse, eD2Skills eSkill, int32_t nSkillLvl, int32_t bSkipChanceRoll) {\n    int32_t nCalcVal;\n    if (!(-1 < (int)eSkill && (int)eSkill < D2Common::ITEMS::Items::sgptDataTable->nTxtSkillsCount)) {\n      return 0;\n    }\n\n    D2SkillsTxt* pSkillRecord = D2Common::ITEMS::Items::sgptDataTable->pTxtSkills + eSkill;\n    if (!(pSkillRecord && pCorpse)) {\n      return 0;\n    }\n\n    int nStatVal = D2Common::Skills::SKILLS_IsSelectableCorpse3(pCorpse);\n    if (!nStatVal) {\n      return 0;\n    }\n    if (!bSkipChanceRoll) {\n      uint32_t uRandPct;\n      nCalcVal = D2Common::Skills::D2GetSkillCalc(pUnit, pSkillRecord->calc[0], eSkill, nSkillLvl);\n      uRandPct = D2Common::Seed::UNIT_GetModuloFromSeed(&pUnit->sSeed, 100);\n      if (nCalcVal <= (int)uRandPct) {\n        return 0;\n      }\n    }\n\n    nCalcVal = D2Common::Skills::D2GetSkillCalc(pUnit, pSkillRecord->calc[1], eSkill, nSkillLvl);\n    int32_t nLifeGain = nCalcVal * 0x100;\n    int32_t nMaxVal = D2Common::Stats::StatsEx::STATLIST_GetMaxLifeFromUnit(pUnit);\n    nStatVal = D2Common::Stats::StatsEx::STATSEX_GetCurrentStat(pUnit, UNITSTAT_hitpoints, 0);\n    nStatVal += nLifeGain;\n    if (nMaxVal < nStatVal) {\n      nStatVal = nMaxVal;\n    }\n\n    D2Common::Stats::StatsEx::STATLIST_SetUnitStat(pUnit, UNITSTAT_hitpoints, nStatVal, 0);\n    nCalcVal = D2Common::Skills::D2GetSkillCalc(pUnit, pSkillRecord->calc[2], eSkill, nSkillLvl);\n    int32_t nManaGain = nCalcVal * 0x100;\n    nMaxVal = D2Common::Stats::StatsEx::STATLIST_GetMaxManaFromUnit(pUnit);\n    nStatVal = D2Common::Stats::StatsEx::STATSEX_GetCurrentStat(pUnit, UNITSTAT_mana, 0);\n    nStatVal += nManaGain;\n    if (nMaxVal < nStatVal) {\n      nStatVal = nMaxVal;\n    }\n\n    D2Common::Stats::StatsEx::STATLIST_SetUnitStat(pUnit, UNITSTAT_mana, nStatVal, 0);\n    D2Common::DATATBLS::ItemStats::SetState(pCorpse, STATE_redeemed, 1);\n    pCorpse->eUnitFlags &= ~(UNITFLAG_CANBEATTACKED | UNITFLAG_TARGETABLE);\n    return 1;\n}",
+  "scope": "Current MCP function, callable/global declarations and exact untagged-main/tagged-branch codegen. Native and complete-file calibration receipts kept outside fixture."
+}

@@ -58,6 +58,8 @@ import { builtinTruthSite } from './truth-form-safety.js';
  *                        X reads `*N` (`X.m` reads `N->m`). With an anchor, reads before it
  *                        keep E; `cache(E,N,T,@A,k)` moves only the first k reads. `@call`
  *                        selects the unique call statement that reads E, for a pure &member.
+ *                        `cache(E,N,T,@A,k,i)` selects the i-th anchor in its block. Indexed
+ *                        anchors must all occur in one block; @call remains unique/unindexed.
  *                        Refused when E or a name in E is stored in that range.
  *   cache(E,N)           N is an existing local stored from E: each E after that store
  *                        reads N, up to the next store to E or N.
@@ -450,7 +452,7 @@ export type Vc8Form =
   | { op: 'join'; into: string; from: string }
   | { op: 'coalesce'; name: string; from?: string }
   | { op: 'recordwalk'; name: string; index: number }
-  | { op: 'cache'; expr: string; name: string; type?: string; anchor?: string; count?: number }
+  | { op: 'cache'; expr: string; name: string; type?: string; anchor?: string; count?: number; anchorIndex?: number }
   | { op: 'own'; name: string; type: string; rename?: string; live?: boolean }
   | { op: 'guards'; split: number; index: number }
   | { op: 'merge-guards'; index: number }
@@ -620,6 +622,14 @@ export function parseVc8Form(text: string): Vc8Form | undefined {
       // `cache(E,N,T,@A,k)`: only the first k reads from the anchor on.
       if (!anchor && args.length === 5 && args[3].startsWith('@') && int(args[4], NaN) >= 1) {
         return { op: 'cache', expr: args[0], name: args[1], type: args[2], anchor: args[3].slice(1), count: int(args[4], NaN) };
+      }
+      // Explicit selection among repeated stores/tests of one anchor. Keep the old
+      // first-anchor spelling unchanged; the new form always states a bounded read count.
+      if (!anchor && args.length === 6 && args[3].startsWith('@') && args[3].length > 1 && args[3] !== '@call') {
+        const count = int(args[4], NaN), anchorIndex = int(args[5], NaN);
+        if (Number.isSafeInteger(count) && count >= 1 && Number.isSafeInteger(anchorIndex) && anchorIndex >= 1) {
+          return { op: 'cache', expr: args[0], name: args[1], type: args[2], anchor: args[3].slice(1), count, anchorIndex };
+        }
       }
       return undefined;
     case 'own': {
@@ -1535,6 +1545,9 @@ function anchors(s: Statement, a: string): boolean {
 }
 
 function doCache(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'cache' }>): void {
+  if (f.anchorIndex !== undefined && (!Number.isSafeInteger(f.anchorIndex) || f.anchorIndex < 1 || !Number.isSafeInteger(f.count) || f.count! < 1 || !f.type || !f.anchor || f.anchor === 'call')) {
+    refuse('an indexed cache needs positive anchor/read counts and a named store/test anchor');
+  }
   // `&X` caches X's address: each X is read through the local, `X.m` as `N->m`.
   const byAddress = f.type !== undefined && norm(f.expr).startsWith('&');
   const want = byAddress ? norm(f.expr).slice(1) : norm(f.expr);
@@ -1551,7 +1564,10 @@ function doCache(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'cache' }>): void {
   // Identifier is also the AST kind of a declaration's name. Count and rewrite
   // value positions only; type syntax, qualified-name pieces and constant/type
   // queries keep their original spelling (decltype(x) differs from decltype(*p)).
+  // Grouping adds no evaluation to value caches. Address caches retain their
+  // enclosing member node so their existing dot-to-arrow rewrite stays intact.
   const isE = (n: ASTNode): boolean => {
+    if (!byAddress && n.kind === NodeKind.ParenExpr) return false;
     if (!isExpression(n.kind) || text(n as Expression) !== want) return false;
     // norm deliberately follows a global when it gains a namespace. A qualified
     // global with the same leaf name as a local is nevertheless another binding.
@@ -1643,6 +1659,15 @@ function doCache(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'cache' }>): void {
         }
         if (hits.length !== 1) refuse(`@call needs one call reading ${f.expr}, found ${hits.length}`);
         block = hits[0]!.b; at = hits[0]!.k;
+      } else if (f.anchorIndex !== undefined) {
+        const hits = blocks(fn).map(b => ({ b, positions: b.statements.flatMap((s, k) => anchors(s, a) ? [k] : []) }))
+          .filter(hit => hit.positions.length > 0);
+        // A name reused in another scope is not another lifetime of this anchor.
+        // Do not pick across branches or shadowed bindings by a traversal ordinal.
+        if (hits.length !== 1) refuse(`indexed anchor ${f.anchor} occurs in ${hits.length} blocks`);
+        const hit = hits[0], selected = hit.positions[f.anchorIndex - 1];
+        if (selected === undefined) refuse(`no anchor #${f.anchorIndex} storing or testing ${f.anchor}`);
+        block = hit.b; at = selected;
       } else {
         for (const b of blocks(fn)) {
           const k = b.statements.findIndex(s => anchors(s, a));
