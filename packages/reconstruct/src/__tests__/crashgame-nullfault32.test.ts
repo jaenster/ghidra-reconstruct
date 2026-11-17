@@ -20,7 +20,7 @@ void Fog::Src::ErrorManager::CrashGame(void)
 const form = `nullfault32();ev=0000000000;bh=5-f8b0e2a8;dh=${vc8formBodyHash(decompiled)}`;
 const options = { outputDir: './out', format: 'cpp', organization: 'namespace', generateCMake: false,
   generateSourceMaps: false, transformPreset: 'full' } as ReconstructOptions;
-const programInfo = { name: 'Game.exe', path: '/tmp/Game.exe', format: 'PE', architecture: 'x86', compiler: 'msvc',
+const programInfo = { name: 'Game.exe', path: '/tmp/Game.exe', format: 'PE', compiler: 'msvc',
   imageBase: '0x400000', languageId: 'x86:LE:32:default', endianness: 'little', pointerSize: 4 } as never;
 
 function emitted(tag: 'current' | 'absent' | 'stale'): string {

@@ -33,7 +33,8 @@ describe('nullfield collector uses real snapshot context', () => {
   it('discovers a generic field address with languageId and no architecture property', () => {
     const result = collect({ languageId: 'x86:LE:32:default', pointerSize: 4 });
     assert.deepEqual(result.map(c => c.form), ['nullfield(p,S,n)']);
-    assert.match(result[0].text, /\(uint32_t\)\(uintptr_t\)/);
+    assert.match(result[0].text, /\(uintptr_t\)/);
+    assert.doesNotMatch(result[0].text, /\(uint32_t\)\s*\(uintptr_t\)/);
   });
 
   it('refuses absent, non-x86, and non-32-bit target identity', () => {
