@@ -46,6 +46,12 @@
  * Made only when the object is pure (names, members, `*`), the pieces tile [N, N+4) with
  * the value piece 1 or 2 bytes at N and not itself a zero, and the value names nothing the
  * object is built from, so the order of the two stores cannot matter.
+ *
+ * With an explicit little-endian target fact, a standalone masked dword store
+ * to a bounded nonvolatile uint16_t local array can instead clear its upper
+ * element: `words._60_4_ &= 0xffff` is `words[31] = 0`. The lower element stays
+ * untouched. Unknown targets, widths, bounds and value-consuming assignments
+ * retain the byte-range representation (array-mask-clear.ts).
  */
 
 import { NodeKind } from '../../../ast/kinds.js';
@@ -71,6 +77,9 @@ import { createKindTransformer, createTransformer, sequence, nodesEqual, type Tr
 import { Expr } from '../../../ast/factory.js';
 import type { TransformPlugin, PluginOptions } from '../types.js';
 import { createPlugin } from '../registry.js';
+import { createArrayMaskClearTransformer, type ArrayMaskClearOptions } from './array-mask-clear.js';
+
+export interface SubpieceAccessOptions extends PluginOptions, ArrayMaskClearOptions {}
 
 // ============================================
 // HELPERS
@@ -386,8 +395,8 @@ function createZeroExtendedStoreTransformer(): Transformer {
   });
 }
 
-function createSubpieceAccessTransformer(): Transformer {
-  return sequence(createZeroExtendedStoreTransformer(), createThreeByteStoreTransformer(), createSubpieceReadTransformer());
+function createSubpieceAccessTransformer(options: SubpieceAccessOptions = {}): Transformer {
+  return sequence(createZeroExtendedStoreTransformer(), createThreeByteStoreTransformer(), createSubpieceReadTransformer(), createArrayMaskClearTransformer(options));
 }
 
 // ============================================
@@ -398,11 +407,11 @@ export const subpieceAccessPlugin: TransformPlugin = createPlugin(
   'subpiece-access',
   'SUBPIECE Access',
   "Rewrites Ghidra SUBPIECE member accesses (expr._N_M_) into valid C++ byte-range reads *(T *)((char *)expr + N)",
-  () => createSubpieceAccessTransformer(),
+  (options?: SubpieceAccessOptions) => createSubpieceAccessTransformer(options),
   {
     priority: 46, // just after bitfield-access (45); both rewrite MemberExpr accesses
     defaultEnabled: true,
     tags: ['cleanup', 'ghidra'],
-    version: '1.0.0',
+    version: '1.1.0',
   },
 );
