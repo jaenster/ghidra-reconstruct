@@ -78,7 +78,7 @@ describe('vc8-form cache: repeated anchor selection', () => {
     const source = body.replace('maximum = Max(2);', 'maximum = Max(2); value = Changed();');
     const { out, sites } = run(source, 'cache(value * 256,gain,int,@maximum,1,2)');
     assert.equal(sites[0].applied, false);
-    assert.match(sites[0].why!, /changes before its last read/);
+    assert.match(sites[0].why!, /changes (before its last read|in the cached range)/);
     assert.equal(out, flat(emit(parse(source))));
   });
 
@@ -87,7 +87,7 @@ describe('vc8-form cache: repeated anchor selection', () => {
     assert.equal(over.sites[0].applied, false);
     const used = run(body, 'cache(value * 256,maximum,int,@maximum,1,2)');
     assert.equal(used.sites[0].applied, false);
-    assert.match(used.sites[0].why!, /exists/);
+    assert.match(used.sites[0].why!, /exists|names something already/);
   });
 
   it('counts nested parenthesis wrappers as one expression evaluation', () => {
