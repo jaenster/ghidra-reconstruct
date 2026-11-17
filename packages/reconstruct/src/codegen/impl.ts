@@ -3282,6 +3282,8 @@ function transformDecompiledCode(
         globalTypes: context.funcPtrArgCasts.globalTypes,
         enumConstants: context.funcPtrArgCasts.enumConstantNames,
         enumValues: context.funcPtrArgCasts.enumValues,
+        // An array member's address on an integer second value: its offset and element size.
+        structLayouts: context.funcPtrArgCasts.structLayouts,
       };
       perPluginOptions['split-lives'] = {
         functionReturnTypes: context.funcPtrArgCasts.functionReturnTypes,
