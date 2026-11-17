@@ -97,7 +97,9 @@ for (com.google.gson.JsonElement pe : props) { com.google.gson.JsonObject P = pe
     if (!nsig.apply(cur).equals(nsig.apply(js.apply(ex, "signature")))) why = op + " signature is " + cur; else if (!nconv.apply(f.getCallingConventionName()).equals(nconv.apply(js.apply(ex, "callingConvention")))) why = op + " convention is " + f.getCallingConventionName();
     java.util.List<String[]> s = psig.apply(js.apply(o, "signature")); type.apply(s.get(0)[0]); for (int i = 1; i < s.size(); i++) type.apply(s.get(i)[0]); }
    else { ghidra.program.model.listing.Function f = fnAt.apply(js.apply(o, "function")); String st = norm.apply(js.apply(o, "storage"));
-    try { varAt.apply(new Object[]{f, st, js.apply(ex, "name"), js.apply(ex, "type")}); if (op.equals("retype_local")) type.apply(js.apply(o, "type")); }
+    try { ghidra.program.model.listing.Variable cv = varAt.apply(new Object[]{f, st, js.apply(ex, "name"), js.apply(ex, "type")}); if (op.equals("retype_local")) { int nl = type.apply(js.apply(o, "type")).getLength();
+      // a decompiler (HASH) local cannot change size: Ghidra drops its storage and the local with it
+      if (st.startsWith("HASH:") && nl != cv.getLength()) why = op + " changes the size of decompiler local " + cv.getName() + " (" + cv.getLength() + " -> " + nl + " bytes), which Ghidra cannot do"; } }
     catch (Exception x) { boolean already = false; // an earlier proposal of the same round already made exactly this change
      for (ghidra.program.model.listing.Variable v : f.getAllVariables()) { if (!norm.apply(v.getVariableStorage().toString()).equals(st)) continue;
       if (op.equals("retype_local") && nsig.apply(v.getDataType().getDisplayName()).equals(nsig.apply(type.apply(js.apply(o, "type")).getDisplayName()))) already = true;
