@@ -26,7 +26,9 @@ describe('indexed cache anchors through Redemption function codegen', () => {
     assert.match(actual, /nStatVal \+= nLifeGain;/);
     assert.match(actual, /nStatVal \+= nManaGain;/);
   });
-  it('applies bounded captures after instruction-backed arithmetic adds shift parentheses', () => {
+  it('applies bounded captures beside shift evidence on a signed operand', () => {
+    // nCalcVal is a signed skill calc: the arithmetic pass keeps the multiply (a shift of a
+    // negative value is undefined), so the captures still read `nCalcVal * 0x100`.
     const lines = fn.decompiled!.split('\n');
     const arithSites = {
       lineCount: fn.decompiled!.endsWith('\n') ? lines.length - 1 : lines.length,
@@ -34,12 +36,11 @@ describe('indexed cache anchors through Redemption function codegen', () => {
         ? [[i + 1, [{ kind: 'mul', log2: 8, evidence: 'shift' }]]] : []),
     };
     assert.equal(arithSites.lines.length, 2);
-    const tags = fixture.tags.map((tag: { type: string; data: string }) =>
-      ({ ...tag, data: tag.data.replace('nCalcVal * 0x100', 'nCalcVal << 8') }));
-    const actual = generateFunctionImplementation({ ...fn, arithSites, tags: [...(fn.tags ?? []), ...tags] } as ExtractedFunction,
+    const actual = generateFunctionImplementation({ ...fn, arithSites, tags: [...(fn.tags ?? []), ...fixture.tags] } as ExtractedFunction,
       undefined, options, { targetPointerSize: 4, targetLanguageId: 'x86:LE:32:default', funcPtrArgCasts: fixture.tables });
-    assert.match(actual, /nLifeGain = nCalcVal << 8;\s+int32_t nMaxVal = .*GetMaxLifeFromUnit/);
-    assert.match(actual, /nManaGain = nCalcVal << 8;\s+nMaxVal = .*GetMaxManaFromUnit/);
+    assert.doesNotMatch(actual, /nCalcVal << 8/);
+    assert.match(actual, /nLifeGain = nCalcVal \* 0x100;\s+int32_t nMaxVal = .*GetMaxLifeFromUnit/);
+    assert.match(actual, /nManaGain = nCalcVal \* 0x100;\s+nMaxVal = .*GetMaxManaFromUnit/);
     assert.match(actual, /nStatVal \+= nLifeGain;/);
     assert.match(actual, /nStatVal \+= nManaGain;/);
   });
