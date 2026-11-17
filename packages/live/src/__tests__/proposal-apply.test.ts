@@ -98,7 +98,7 @@ describe('proposal-render: vc8form and linkage', () => {
     assert.ok(!plain.includes('op.equals("vc8form")') && !plain.includes('"vc8form"}') && !plain.includes('__EXT_'));
     const t = renderProposalScript([...rows, ...ext], { program: 'win', author: '*', dry: false }).text;
     assert.ok(!t.includes('__EXT_'));
-    assert.ok(t.includes('"rename_local", "delete_label", "linkage", "vc8form"};'));
+    assert.ok(t.includes('"rename_local", "delete_label", "linkage", "vc8form", "set_namespace", "add_tag", "add_comment", "funcdef_return", "funcdef_param"};'));
     assert.ok(t.includes('else if (op.equals("vc8form")) { ghidra.program.model.listing.Function f = fnAt.apply(js.apply(o, "address")); java.util.Set<String> cur = tagsOf.apply(f, "vc8form");'));
     assert.ok(t.includes('f.addTag("vc8form:" + js.apply(o, "tag").trim());'));
     assert.ok(t.includes('f.setParentNamespace(nsAt.apply(js.apply(o, "namespace")));'));

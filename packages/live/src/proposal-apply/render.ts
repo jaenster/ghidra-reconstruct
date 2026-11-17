@@ -13,13 +13,16 @@
  *
  * The port of the D2 workspace's docs/tools/ghidra-apply/proposal_render.py: for the ops that
  * script knew the output is its output byte for byte (the JSON as Python's json.dumps writes it,
- * the placeholders replaced in its order). The ops it did not know (vc8form, linkage) add their
+ * the placeholders replaced in its order). The ops it did not know (vc8form, linkage, ...) add their
  * code to the template only when the group holds one (ext-ops.ts).
+ *
+ * A proposal with a structural op (set_namespace: it moves code between translation units) is held
+ * back, whole, unless --structural is given: the owner applies those deliberately, with a rebuild.
  */
 
 import { readFileSync, writeFileSync } from 'node:fs';
 import { PROPOSAL_APPLY_TEMPLATE } from './template.js';
-import { extensionParts } from './ext-ops.js';
+import { extensionParts, STRUCTURAL_OPS } from './ext-ops.js';
 
 export interface ProposalRow {
   id: number;
@@ -41,12 +44,20 @@ export interface RenderOptions {
    * archive. A name not listed that several categories hold stays an error.
    */
   types?: Record<string, string>;
+  /** Render proposals with a structural op too; without it they are held back. */
+  structural?: boolean;
 }
 
 export interface Rendered {
   text: string;
   proposals: number;
   ops: number;
+  /** Ids of the proposals held back because they hold a structural op and `structural` was not set. */
+  held: number[];
+}
+
+function isStructural(ops: Array<Record<string, unknown>>): boolean {
+  return ops.some((o) => (STRUCTURAL_OPS as readonly unknown[]).includes(o.op));
 }
 
 /** Python's json.dumps(v, separators=(',', ':')): ensure_ascii, no spaces, keys in their order. */
@@ -93,12 +104,14 @@ function loginOf(author: ProposalRow['author']): string | undefined {
 }
 
 /** The proposals of one group, as proposal_render.py selects them. */
-export function selectGroup(all: ProposalRow[], opts: RenderOptions): Array<{ id: number; ops: Array<Record<string, unknown>> }> {
+export function selectGroup(all: ProposalRow[], opts: RenderOptions, held: number[] = []): Array<{ id: number; ops: Array<Record<string, unknown>> }> {
   let rows: Array<{ id: number; ops: Array<Record<string, unknown>> }> = [];
   for (const p of all) {
     if (opts.author !== '*' && loginOf(p.author) !== opts.author) continue;
     const ops = p.ops.filter((o) => o.program === opts.program);
-    if (ops.length) rows.push({ id: p.id, ops });
+    if (!ops.length) continue;
+    if (!opts.structural && isStructural(ops)) { held.push(p.id); continue; }
+    rows.push({ id: p.id, ops });
   }
   const [chunk, size] = opts.chunk ?? [0, 0];
   if (size) rows = rows.slice(chunk * size, (chunk + 1) * size);
@@ -106,7 +119,8 @@ export function selectGroup(all: ProposalRow[], opts: RenderOptions): Array<{ id
 }
 
 export function renderProposalScript(all: ProposalRow[], opts: RenderOptions): Rendered {
-  const rows = selectGroup(all, opts);
+  const held: number[] = [];
+  const rows = selectGroup(all, opts, held);
   const json = pyJsonDumps(rows);
   if (json.includes('"""')) throw new Error('the proposals hold """, which would end the Java text block');
   const [chunk, size] = opts.chunk ?? [0, 0];
@@ -117,7 +131,7 @@ export function renderProposalScript(all: ProposalRow[], opts: RenderOptions): R
   t = replaceAll(t, '__TAG__', opts.tag ?? 'community-proposal');
   t = replaceAll(t, '__JSON__', replaceAll(json, '\\', '\\\\'));
   t = replaceAll(t, '__TYPES__', replaceAll(replaceAll(pyJsonDumps(opts.types ?? {}), '\\', '\\\\'), '"', '\\"'));
-  return { text: t, proposals: rows.length, ops: rows.reduce((n, r) => n + r.ops.length, 0) };
+  return { text: t, proposals: rows.length, ops: rows.reduce((n, r) => n + r.ops.length, 0), held };
 }
 
 /** The rows of a proposals file: a list, or an MCP answer with a `proposals` list. */
@@ -128,9 +142,11 @@ export function readProposals(path: string): ProposalRow[] {
   return list;
 }
 
-const USAGE = 'usage: proposal-render [--types <name-to-path.json>] <proposals.json> <win|mac> <author|*> <true|false> <out.java> [tag] [chunk/size]';
+const USAGE = 'usage: proposal-render [--types <name-to-path.json>] [--structural] <proposals.json> <win|mac> <author|*> <true|false> <out.java> [tag] [chunk/size]';
 
-export function main(argv: string[]): number {
+export function main(argv0: string[]): number {
+  const structural = argv0.includes('--structural');
+  let argv = argv0.filter((a) => a !== '--structural');
   let types: Record<string, string> | undefined;
   const ti = argv.indexOf('--types');
   if (ti >= 0) {
@@ -146,8 +162,9 @@ export function main(argv: string[]): number {
     if (!m) { process.stderr.write(`chunk/size is two numbers, like 0/40\n${USAGE}\n`); return 2; }
     chunk = [Number(m[1]), Number(m[2])];
   }
-  const r = renderProposalScript(readProposals(src), { program, author, dry: dry === 'true', tag, chunk, types });
+  const r = renderProposalScript(readProposals(src), { program, author, dry: dry === 'true', tag, chunk, types, structural });
   writeFileSync(out, r.text);
+  for (const id of r.held) process.stderr.write(`HELD ${id}: moves a function between files (set_namespace); render it with --structural when the owner applies it\n`);
   process.stdout.write(`${out} ${[...r.text].length} proposals ${r.proposals} ops ${r.ops}\n`);
   return 0;
 }
