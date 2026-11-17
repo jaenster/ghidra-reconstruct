@@ -39,6 +39,27 @@ test('the committed text is read, not an edit in the working tree', () => {
   assert.match(read[0].text, /ENGINE_Step/);
 });
 
+test('a Windows short directory name reads the committed source', { skip: process.platform !== 'win32' }, t => {
+  const { dir } = repo();
+  try {
+    const short = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+      '(New-Object -ComObject Scripting.FileSystemObject).GetFolder($env:GHIDRA_FOREIGN_TEST_DIR).ShortPath',
+    ], { encoding: 'utf-8', env: { ...process.env, GHIDRA_FOREIGN_TEST_DIR: dir } }).trim();
+    if (short.toLowerCase() === fs.realpathSync.native(dir).toLowerCase()) {
+      t.skip('This volume does not expose an 8.3 directory alias');
+      return;
+    }
+    fs.writeFileSync(path.join(dir, 'support', 'control.cpp'), 'void f() { ENGINE_Other(); }\n');
+    const entries = [{ path: path.join(short, 'support') }];
+    const read = readForeignSourcesAt(entries, short);
+    assert.deepStrictEqual(read.sources.map(r => path.basename(r.path)), ['control.cpp']);
+    assert.match(read.sources[0].text, /ENGINE_Step/);
+    assert.equal(foreignSourcesFingerprint(entries, short), read.fingerprint);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('the fingerprint moves with a commit to the sources and not with any other commit', () => {
   const { dir, git } = repo();
   const entries = [{ path: path.join(dir, 'support') }];

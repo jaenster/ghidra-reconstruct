@@ -136,7 +136,7 @@ describe('PATH_CalculatePath 00649970: a pointer slot stored into a D2PathPointS
         ...cases.map(([x, y]) => `  printf("%08x\\n", PackStart(${x}, ${y}));`), '  return 0;', '}'].join('\n');
       writeFileSync(join(dir, 'u.cpp'), `${unit(statements)}\n${main}\n`);
       execFileSync(HOST![0], [...HOST!.slice(1), '-std=c++17', '-w', '-o', join(dir, 'u'), join(dir, 'u.cpp')], { stdio: 'pipe' });
-      const got = execFileSync(join(dir, 'u'), { encoding: 'utf8' }).trim().split('\n');
+      const got = execFileSync(join(dir, 'u'), { encoding: 'utf8' }).trim().split(/\r?\n/);
       const want = cases.map(([x, y]) => (((y & 0xffff) << 16 | (x & 0xffff)) >>> 0).toString(16).padStart(8, '0'));
       assert.deepEqual(got, want);
     } finally { rmSync(dir, { recursive: true, force: true }); }
