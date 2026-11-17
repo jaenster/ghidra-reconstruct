@@ -3092,6 +3092,7 @@ function transformDecompiledCode(
     }
     const enablePlugins: string[] = [];
     const perPluginOptions: Record<string, unknown> = {};
+    const allocWrapperSignatures: Record<string, { parameterTypes: string[]; implicitParameterTypes: string[] }> = {};
     const flagPrefix: string[] = [];
     const overrideCastTypedefs = new Set<string>();
     // A walk to a list's last node tests the link in memory, not a copy (tail-walk-reread.ts).
@@ -3132,6 +3133,7 @@ function transformDecompiledCode(
     }
 
     const tebFields = getTebFields();
+    perPluginOptions['subpiece-access'] = { littleEndian: context?.targetLanguageId?.split(':')[1] === 'LE' };
     // Under every preset: a TEB label has no declaration left to fall back on.
     if (Object.keys(tebFields).length > 0) {
       enablePlugins.push('teb-field-access');
@@ -3365,6 +3367,9 @@ function transformDecompiledCode(
         aggregateSizes: context.funcPtrArgCasts.aggregateSizes,
         unionNames: context.funcPtrArgCasts.unionNames,
         typedefTargets: context.funcPtrArgCasts.typedefTargets,
+        functionParamTypes: context.funcPtrArgCasts.functionParamTypes,
+        enclosingSegments: enclosing?.ghidraNamespaceSegments ?? enclosing?.namespaceSegments,
+        wrapperSignatures: allocWrapperSignatures,
       };
       perPluginOptions['union-arrow-member'] = {
         unionNames: context.funcPtrArgCasts.unionNames,
@@ -4607,6 +4612,7 @@ function transformDecompiledCode(
           aggregateMembers: context?.funcPtrArgCasts?.aggregateMembers,
           unionNames: context?.funcPtrArgCasts?.unionNames,
           accessors: context?.accessorTwins,
+          macroSignatures: allocWrapperSignatures,
           ...(context?.funcPtrArgCasts?.outParams ? {
             outParamWidth: (callee: string, index: number) => context.funcPtrArgCasts!.outParams!.outParamWidthDocumented(callee, index),
             typeSize: (spelling: string) => context.funcPtrArgCasts!.outParams!.typeSize(spelling),

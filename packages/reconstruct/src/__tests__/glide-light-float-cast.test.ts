@@ -136,7 +136,7 @@ describe('RENDERER_GLIDE_DrawWallTilePerspective 0050cf70: a float stored into a
         ].join('\n')), '  return 0;', '}'].join('\n');
       writeFileSync(join(dir, 'u.cpp'), `${unit(code)}\n${main}\n`);
       execFileSync(HOST![0], [...HOST!.slice(1), '-std=c++17', '-w', '-o', join(dir, 'u'), join(dir, 'u.cpp')], { stdio: 'pipe' });
-      const got = execFileSync(join(dir, 'u'), { encoding: 'utf8' }).trim().split('\n');
+      const got = execFileSync(join(dir, 'u'), { encoding: 'utf8' }).trim().split(/\r?\n/);
       assert.deepEqual(got, cases.map(([o, s]) => `${10 + o} ${20 + o * s}`));
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });

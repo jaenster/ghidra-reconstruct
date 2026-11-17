@@ -4,8 +4,8 @@ import assert from 'node:assert/strict';
 import { generateFunctionImplementation, getParseErrorCount } from '../codegen/impl.js';
 import { javaStringHash } from '../extract/compare-sites.js';
 
-// Produced by the actual standalone and combined Java extractors on an isolated
-// Ghidra12.2 import. Copied native-verified type/storage models; not an owning export.
+// Focused type/storage and call-order facts from the standalone and combined Java
+// extractors on an isolated Ghidra12.2 import. Not an owning export.
 const fixtureText = readFileSync(new URL('./fixtures/strlen-difference-gfx-sdk.json', import.meta.url), 'utf8');
 const fresh = () => JSON.parse(fixtureText);
 type Fixture = ReturnType<typeof fresh>;

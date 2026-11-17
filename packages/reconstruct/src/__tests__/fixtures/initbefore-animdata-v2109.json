@@ -1,0 +1,455 @@
+{
+  "function": {
+    "name": "ANIMDATA_GetAnimDataForUnit",
+    "address": "0066a9b0",
+    "entryPoint": "0066a9b0",
+    "signature": "D2AnimDataRecordStrc * ANIMDATA_GetAnimDataForUnit(D2UnitStrc * pUnit, uint32_t nClassId, uint32_t nCofMode, uint32_t nWeaponClass, D2InventoryStrc * pInventory)",
+    "returnType": "D2AnimDataRecordStrc *",
+    "callingConvention": "__fastcall",
+    "size": 103,
+    "isThunk": false,
+    "isExternal": false,
+    "hasVarArgs": false,
+    "namespace": "D2Common::DATATBLS::AnimTbls",
+    "comment": "@function ANIMDATA_GetAnimDataForUnit\n@address Game.exe.ram:0066a9b0\n@date 2026.08.28\n@calling __fastcall\n@description Gets the AnimData record for a unit. Builds the composit animation\\nname via COMPOSIT_BuildCofPath, then looks it up via ANIMDATA_GetRecordByNameHash.\\nCalled by SetAnimData and composit rendering code.",
+    "sourceFile": null,
+    "sourceLine": null,
+    "sourceInfo": null,
+    "parameters": [
+      {
+        "name": "pUnit",
+        "dataType": "D2UnitStrc *",
+        "size": 4,
+        "ordinal": 0,
+        "storage": "ECX:4",
+        "stackOffset": null,
+        "resolvedType": null
+      },
+      {
+        "name": "nClassId",
+        "dataType": "uint32_t",
+        "size": 4,
+        "ordinal": 1,
+        "storage": "EDX:4",
+        "stackOffset": null,
+        "resolvedType": null
+      },
+      {
+        "name": "nCofMode",
+        "dataType": "uint32_t",
+        "size": 4,
+        "ordinal": 2,
+        "storage": "Stack[0x4]:4",
+        "stackOffset": 4,
+        "resolvedType": null
+      },
+      {
+        "name": "nWeaponClass",
+        "dataType": "uint32_t",
+        "size": 4,
+        "ordinal": 3,
+        "storage": "Stack[0x8]:4",
+        "stackOffset": 8,
+        "resolvedType": null
+      },
+      {
+        "name": "pInventory",
+        "dataType": "D2InventoryStrc *",
+        "size": 4,
+        "ordinal": 4,
+        "storage": "Stack[0xc]:4",
+        "stackOffset": 12,
+        "resolvedType": null
+      }
+    ],
+    "localVariables": [
+      {
+        "name": "pRecord",
+        "dataType": "D2AnimDataRecordStrc *",
+        "size": 4,
+        "storage": "EAX:4",
+        "stackOffset": null,
+        "resolvedType": "D2AnimDataRecordStrc *"
+      },
+      {
+        "name": "pAnimTbls",
+        "dataType": "D2AnimDataRecordStrc *",
+        "size": 4,
+        "storage": "EAX:4",
+        "stackOffset": null,
+        "resolvedType": "D2AnimDataRecordStrc *"
+      },
+      {
+        "name": "local_8",
+        "dataType": "uint",
+        "size": 4,
+        "storage": "Stack[-0x8]:4",
+        "stackOffset": -8,
+        "resolvedType": "uint"
+      },
+      {
+        "name": "local_c",
+        "dataType": "uint32_t",
+        "size": 4,
+        "storage": "Stack[-0xc]:4",
+        "stackOffset": -12,
+        "resolvedType": null
+      },
+      {
+        "name": "szCofName",
+        "dataType": "CHAR *",
+        "size": 4,
+        "storage": "Stack[-0x10]:4",
+        "stackOffset": -16,
+        "resolvedType": "CHAR[8]"
+      },
+      {
+        "name": "nCofNameLen",
+        "dataType": "int32_t",
+        "size": 4,
+        "storage": "Stack[-0x14]:4",
+        "stackOffset": -20,
+        "resolvedType": "int32_t"
+      }
+    ],
+    "tags": [
+      {
+        "type": "llm-named"
+      }
+    ],
+    "decompiled": "\n/* WARNING: Enum \"eCollisionFlags\": Some values do not have unique names */\n/* WARNING: Enum \"eD2TimerType\": Some values do not have unique names */\n/* WARNING: Enum \"eD2TimerTypeDWORD\": Some values do not have unique names */\n/* @function ANIMDATA_GetAnimDataForUnit\n   @address Game.exe.ram:0066a9b0\n   @date 2026.08.28\n   @calling __fastcall\n   @description Gets the AnimData record for a unit. Builds the composit animation\\nname via\n   COMPOSIT_BuildCofPath, then looks it up via ANIMDATA_GetRecordByNameHash.\\nCalled by SetAnimData\n   and composit rendering code. */\n\nD2AnimDataRecordStrc * __fastcall\nD2Common::DATATBLS::AnimTbls::ANIMDATA_GetAnimDataForUnit\n          (D2UnitStrc *pUnit,uint32_t nClassId,uint32_t nCofMode,uint32_t nWeaponClass,\n          D2InventoryStrc *pInventory)\n\n{\n  D2AnimDataRecordStrc *pRecord;\n  D2AnimDataStrc *pDVar1;\n  int32_t nCofNameLen;\n  CHAR szCofName [8];\n  uint local_8;\n  \n  local_8 = DEFAULT_SECURITY_COOKIE ^ (uint)&stack0xfffffffc;\n  szCofName[0] = '\\0';\n  szCofName[1] = '\\0';\n  szCofName[2] = '\\0';\n  szCofName[3] = '\\0';\n  szCofName[4] = '\\0';\n  szCofName[5] = '\\0';\n  szCofName[6] = '\\0';\n  szCofName[7] = '\\0';\n  nCofNameLen = 0;\n  D2Common::COMPOSIT::Composit::COMPOSIT_BuildCofPath\n            (pUnit,nClassId,nCofMode,nWeaponClass,pInventory,szCofName,&nCofNameLen,0,1);\n  pRecord = D2Common::DATATBLS::AnimTbls::ANIMDATA_GetRecordByNameHash(szCofName);\n  if (pRecord == (D2AnimDataRecordStrc *)0x0) {\n    pDVar1 = D2Common::DATATBLS::DataTbls::TXT_AnimTbls_Get();\n    pRecord = &pDVar1->pDefaultRecord;\n  }\n  compiler::__security_check_cookie();\n  return pRecord;\n}\n\n"
+  },
+  "options": {
+    "outputDir": "./out",
+    "format": "cpp",
+    "organization": "namespace",
+    "generateCMake": false,
+    "generateSourceMaps": false,
+    "transformPreset": "full",
+    "includeAddressComments": false,
+    "promoteStaticGlobals": false
+  },
+  "tables": {
+    "paramFuncdefs": {},
+    "zeroArityCallbackSlots": {
+      "CreateThread": {
+        "2": "LPTHREAD_START_ROUTINE"
+      }
+    },
+    "zeroArityCallbackCasts": {
+      "_atexit": {
+        "0": {
+          "returnType": "void",
+          "paramTypes": [],
+          "convention": "__cdecl"
+        }
+      },
+      "atexit": {
+        "0": {
+          "returnType": "void",
+          "paramTypes": [],
+          "convention": "__cdecl"
+        }
+      }
+    },
+    "discardedReturnCallbackCasts": {
+      "_eh_vector_constructor_iterator_": {
+        "3": {
+          "returnType": "void",
+          "paramTypes": [
+            "void*"
+          ],
+          "convention": "__fastcall"
+        },
+        "4": {
+          "returnType": "void",
+          "paramTypes": [
+            "void*"
+          ],
+          "convention": "__fastcall"
+        }
+      },
+      "_eh_vector_destructor_iterator_": {
+        "3": {
+          "returnType": "void",
+          "paramTypes": [
+            "void*"
+          ],
+          "convention": "__fastcall"
+        }
+      }
+    },
+    "funcdefSignatures": {},
+    "funcdefConventions": {},
+    "funcdefConventionKeywords": {},
+    "functionSignatures": {
+      "D2Common::DATATBLS::AnimTbls::ANIMDATA_GetAnimDataForUnit": "D2AnimDataRecordStrc *(D2UnitStrc *,uint32_t,uint32_t,uint32_t,D2InventoryStrc *)",
+      "ANIMDATA_GetAnimDataForUnit": "D2AnimDataRecordStrc *(D2UnitStrc *,uint32_t,uint32_t,uint32_t,D2InventoryStrc *)"
+    },
+    "functionGhidraConventions": {
+      "D2Common::DATATBLS::AnimTbls::ANIMDATA_GetAnimDataForUnit": "__fastcall",
+      "ANIMDATA_GetAnimDataForUnit": "__fastcall"
+    },
+    "functionStoredAs": {},
+    "autoProtoAliases": {},
+    "variableNames": [],
+    "voidPointerFunctions": [
+      "VirtualAllocEx",
+      "HeapReAlloc",
+      "GlobalLock",
+      "LocalLock",
+      "MapViewOfFile",
+      "MapViewOfFileEx",
+      "LockResource",
+      "malloc",
+      "calloc",
+      "realloc",
+      "bsearch",
+      "memcpy",
+      "memmove",
+      "memset",
+      "memchr",
+      "HeapAlloc",
+      "VirtualAlloc"
+    ],
+    "rootQualifiedTypedefs": [],
+    "voidPointerFields": [],
+    "functionParamTypes": {
+      "D2Common::DATATBLS::AnimTbls::ANIMDATA_GetAnimDataForUnit": [
+        "D2UnitStrc *",
+        "uint32_t",
+        "uint32_t",
+        "uint32_t",
+        "D2InventoryStrc *"
+      ],
+      "DATATBLS::AnimTbls::ANIMDATA_GetAnimDataForUnit": [
+        "D2UnitStrc *",
+        "uint32_t",
+        "uint32_t",
+        "uint32_t",
+        "D2InventoryStrc *"
+      ],
+      "AnimTbls::ANIMDATA_GetAnimDataForUnit": [
+        "D2UnitStrc *",
+        "uint32_t",
+        "uint32_t",
+        "uint32_t",
+        "D2InventoryStrc *"
+      ],
+      "ANIMDATA_GetAnimDataForUnit": [
+        "D2UnitStrc *",
+        "uint32_t",
+        "uint32_t",
+        "uint32_t",
+        "D2InventoryStrc *"
+      ],
+      "ANIMDATA_GetAnimDataForUnit#5": [
+        "D2UnitStrc *",
+        "uint32_t",
+        "uint32_t",
+        "uint32_t",
+        "D2InventoryStrc *"
+      ],
+      "InterlockedCompareExchange": [
+        "LONG volatile *",
+        "LONG",
+        "LONG"
+      ],
+      "_set_se_translator": [
+        "void *"
+      ],
+      "FloatToLong": [
+        "int32_t",
+        "int32_t"
+      ]
+    },
+    "pointerOnlyParamTypes": {},
+    "functionReturnTypes": {
+      "D2Common::DATATBLS::AnimTbls::ANIMDATA_GetAnimDataForUnit": "D2AnimDataRecordStrc *",
+      "DATATBLS::AnimTbls::ANIMDATA_GetAnimDataForUnit": "D2AnimDataRecordStrc *",
+      "AnimTbls::ANIMDATA_GetAnimDataForUnit": "D2AnimDataRecordStrc *",
+      "ANIMDATA_GetAnimDataForUnit": "D2AnimDataRecordStrc *",
+      "InterlockedCompareExchange": "LONG",
+      "_set_se_translator": "void *",
+      "FloatToLong": "uint32_t",
+      "LoadImageA": "HANDLE",
+      "LoadImageW": "HANDLE",
+      "GetStockObject": "HGDIOBJ",
+      "SelectObject": "HGDIOBJ",
+      "CONCAT11": "uint16_t",
+      "CONCAT12": "uint32_t",
+      "CONCAT13": "uint32_t",
+      "CONCAT21": "uint32_t",
+      "CONCAT22": "uint32_t",
+      "CONCAT31": "uint32_t",
+      "CONCAT44": "uint64_t",
+      "CONCAT14": "uint64_t",
+      "CONCAT41": "uint64_t",
+      "CONCAT24": "uint64_t",
+      "CONCAT42": "uint64_t"
+    },
+    "functionConventions": {
+      "D2Common::DATATBLS::AnimTbls::ANIMDATA_GetAnimDataForUnit": "__fastcall",
+      "DATATBLS::AnimTbls::ANIMDATA_GetAnimDataForUnit": "__fastcall",
+      "AnimTbls::ANIMDATA_GetAnimDataForUnit": "__fastcall",
+      "ANIMDATA_GetAnimDataForUnit": "__fastcall",
+      "InterlockedCompareExchange": "__cdecl",
+      "_set_se_translator": "__cdecl",
+      "FloatToLong": "__cdecl"
+    },
+    "functionNames": [
+      "D2Common::DATATBLS::AnimTbls::ANIMDATA_GetAnimDataForUnit",
+      "DATATBLS::AnimTbls::ANIMDATA_GetAnimDataForUnit",
+      "AnimTbls::ANIMDATA_GetAnimDataForUnit",
+      "ANIMDATA_GetAnimDataForUnit",
+      "InterlockedCompareExchange"
+    ],
+    "pinnableOverloads": {},
+    "overloadedFunctionNames": [
+      "InterlockedCompareExchange",
+      "_set_se_translator",
+      "FloatToLong"
+    ],
+    "globalTypes": {},
+    "globalAddresses": {},
+    "globalSizes": {},
+    "globalElementSizes": {},
+    "dataExtents": [],
+    "globalNamespaces": {},
+    "initializerDataNamespaces": {},
+    "ambiguousGlobalNames": [],
+    "stringConstantNames": [],
+    "stringLiteralAddresses": {},
+    "globalDeclaredSizes": {},
+    "floatConstantValues": {},
+    "varArgFunctions": [],
+    "writeEffects": {
+      "D2Common::DATATBLS::AnimTbls::ANIMDATA_GetAnimDataForUnit": {
+        "unknown": true,
+        "reads": {
+          "unknown": true
+        }
+      },
+      "DATATBLS::AnimTbls::ANIMDATA_GetAnimDataForUnit": {
+        "unknown": true,
+        "reads": {
+          "unknown": true
+        }
+      },
+      "AnimTbls::ANIMDATA_GetAnimDataForUnit": {
+        "unknown": true,
+        "reads": {
+          "unknown": true
+        }
+      },
+      "ANIMDATA_GetAnimDataForUnit": {
+        "unknown": true,
+        "reads": {
+          "unknown": true
+        }
+      }
+    },
+    "fieldTypes": {},
+    "typedefTargets": {
+      "pointer": "void *",
+      "_locale_t": "void *",
+      "LPVOID": "void *",
+      "PVOID": "void *",
+      "LPCVOID": "void *",
+      "HANDLE": "void *",
+      "HGDIOBJ": "void *",
+      "HICON": "HICON__ *",
+      "HCURSOR": "HICON__ *",
+      "HBRUSH": "HBRUSH__ *"
+    },
+    "structFields": {
+      "CRITICAL_SECTION": {
+        "DebugInfo": "void*",
+        "LockCount": "long",
+        "RecursionCount": "long",
+        "OwningThread": "void*",
+        "LockSemaphore": "void*",
+        "SpinCount": "unsigned long"
+      },
+      "POINT": {
+        "x": "long",
+        "y": "long"
+      },
+      "EH3_SCOPETABLE_ENTRY": {
+        "EnclosingLevel": "int32_t",
+        "FilterFunc": "EH3_FILTER *",
+        "HandlerFunc": "EH3_HANDLER"
+      },
+      "EH3_EXCEPTION_REGISTRATION": {
+        "Next": "EH3_EXCEPTION_REGISTRATION *",
+        "ExceptionHandler": "void *",
+        "ScopeTable": "EH3_SCOPETABLE_ENTRY *",
+        "TryLevel": "int32_t"
+      },
+      "EH4_EXCEPTION_REGISTRATION": {
+        "Next": "EH4_EXCEPTION_REGISTRATION *",
+        "ExceptionHandler": "EH4_EXCEPT_HANDLER",
+        "EncodedScopeTable": "uint32_t",
+        "TryLevel": "int32_t"
+      },
+      "RECT": {
+        "left": "long",
+        "top": "long",
+        "right": "long",
+        "bottom": "long"
+      },
+      "FILETIME": {
+        "dwLowDateTime": "DWORD",
+        "dwHighDateTime": "DWORD"
+      },
+      "GUID": {
+        "Data1": "DWORD",
+        "Data2": "WORD",
+        "Data3": "WORD",
+        "Data4": "BYTE[8]"
+      },
+      "OVERLAPPED": {
+        "Internal": "DWORD",
+        "InternalHigh": "DWORD",
+        "Offset": "DWORD",
+        "OffsetHigh": "DWORD",
+        "hEvent": "HANDLE"
+      },
+      "PALETTEENTRY": {
+        "peRed": "BYTE",
+        "peGreen": "BYTE",
+        "peBlue": "BYTE",
+        "peFlags": "BYTE"
+      }
+    },
+    "convertingAggregates": [],
+    "aggregateMembers": {},
+    "unionNames": [],
+    "structFieldOffsets": {},
+    "aggregateSizes": {},
+    "aggregateLayouts": {},
+    "structLayouts": {},
+    "funcdefDecls": {},
+    "structFieldFuncdefs": {},
+    "fieldFuncdefs": {},
+    "vtableDispatch": {
+      "classes": {},
+      "vtables": {}
+    },
+    "enumValues": {},
+    "enumTypes": [],
+    "unsignedEnums": [],
+    "enumConstantNames": [],
+    "enumConstantTypes": {},
+    "shiftedPointers": {},
+    "outParams": {},
+    "paramReach": {}
+  },
+  "tag": "initbefore(nCofNameLen,szCofName);ev=0000000000;bh=103-00000000;dh=e84700d1",
+  "baseline": "// Gets the AnimData record for a unit. Builds the composit animation\n// name via COMPOSIT_BuildCofPath, then looks it up via ANIMDATA_GetRecordByNameHash.\n// Called by SetAnimData and composit rendering code.\n// 1.14d: 0066a9b0\nD2AnimDataRecordStrc * __fastcall ANIMDATA_GetAnimDataForUnit(D2UnitStrc * pUnit, uint32_t nClassId, uint32_t nCofMode, uint32_t nWeaponClass, D2InventoryStrc * pInventory) {\n    D2AnimDataStrc* pDVar1;\n    char szCofName[8];\n    memset(szCofName, 0, 8 * sizeof(szCofName[0]));\n    int32_t nCofNameLen = 0;\n    D2Common::COMPOSIT::Composit::COMPOSIT_BuildCofPath(pUnit, nClassId, nCofMode, nWeaponClass, pInventory, szCofName, &nCofNameLen, 0, 1);\n    D2AnimDataRecordStrc* pRecord = D2Common::DATATBLS::AnimTbls::ANIMDATA_GetRecordByNameHash(szCofName);\n    if (!pRecord) {\n      pDVar1 = D2Common::DATATBLS::DataTbls::TXT_AnimTbls_Get();\n      pRecord = &pDVar1->pDefaultRecord;\n    }\n\n    return pRecord;\n}",
+  "candidate": "// Gets the AnimData record for a unit. Builds the composit animation\n// name via COMPOSIT_BuildCofPath, then looks it up via ANIMDATA_GetRecordByNameHash.\n// Called by SetAnimData and composit rendering code.\n// 1.14d: 0066a9b0\nD2AnimDataRecordStrc * __fastcall ANIMDATA_GetAnimDataForUnit(D2UnitStrc * pUnit, uint32_t nClassId, uint32_t nCofMode, uint32_t nWeaponClass, D2InventoryStrc * pInventory) {\n    D2AnimDataStrc* pDVar1;\n    char szCofName[8];\n    int32_t nCofNameLen = 0;\n    memset(szCofName, 0, 8 * sizeof(szCofName[0]));\n    D2Common::COMPOSIT::Composit::COMPOSIT_BuildCofPath(pUnit, nClassId, nCofMode, nWeaponClass, pInventory, szCofName, &nCofNameLen, 0, 1);\n    D2AnimDataRecordStrc* pRecord = D2Common::DATATBLS::AnimTbls::ANIMDATA_GetRecordByNameHash(szCofName);\n    if (!pRecord) {\n      pDVar1 = D2Common::DATATBLS::DataTbls::TXT_AnimTbls_Get();\n      pRecord = &pDVar1->pDefaultRecord;\n    }\n\n    return pRecord;\n}",
+  "source": "dd289669c82a03e993a928b2b0f2c724a1cc731d",
+  "generatorMain": "ad73d788be4614e8a294587afa868afeb5391eba",
+  "ghidraVersion": 2109,
+  "owningExport": false
+}

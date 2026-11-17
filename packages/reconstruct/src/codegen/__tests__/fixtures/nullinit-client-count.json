@@ -1,0 +1,162 @@
+{
+  "source": "dd289669c82a03e993a928b2b0f2c724a1cc731d",
+  "generatorMain": "ad73d788be4614e8a294587afa868afeb5391eba",
+  "ghidraVersion": 2109,
+  "fn": {
+    "name": "QSERVER_GetClientCountByServerId",
+    "address": "0052ec90",
+    "entryPoint": "0052ec90",
+    "signature": "uint32_t QSERVER_GetClientCountByServerId(uint16_t nServerId)",
+    "returnType": "uint32_t",
+    "callingConvention": "__stdcall",
+    "size": 126,
+    "isThunk": false,
+    "isExternal": false,
+    "hasVarArgs": false,
+    "namespace": "D2Game::GAME::Server",
+    "comment": "@function QSERVER_GetClientCountByServerId\n@address Game.exe.ram:0052ec90\n@date 2026.06.13\n@calling __stdcall\n@description Diablo 2 1.14d reverse team\nhttps://blizzhackers.dev",
+    "sourceFile": null,
+    "sourceLine": null,
+    "sourceInfo": null,
+    "parameters": [
+      {
+        "name": "nServerId",
+        "dataType": "uint16_t",
+        "size": 2,
+        "ordinal": 0,
+        "storage": "Stack[0x4]:2",
+        "stackOffset": 4,
+        "resolvedType": null
+      }
+    ],
+    "localVariables": [
+      {
+        "name": "nToken",
+        "dataType": "SGAMEDATA *",
+        "size": 4,
+        "storage": "ESI:4",
+        "stackOffset": null,
+        "resolvedType": "SGAMEDATA *"
+      },
+      {
+        "name": "pGame",
+        "dataType": "SGAMEDATA *",
+        "size": 4,
+        "storage": "EAX:4",
+        "stackOffset": null,
+        "resolvedType": "SGAMEDATA *"
+      },
+      {
+        "name": "nErrorAddress",
+        "dataType": "void *",
+        "size": 4,
+        "storage": "EAX:4",
+        "stackOffset": null,
+        "resolvedType": "void *"
+      },
+      {
+        "name": "nServerToken",
+        "dataType": "uint32_t",
+        "size": 4,
+        "storage": "HASH:5f4426ed78:4",
+        "stackOffset": null,
+        "resolvedType": null
+      },
+      {
+        "name": "nLine",
+        "dataType": "int32_t",
+        "size": 4,
+        "storage": "HASH:3f9227e650:4",
+        "stackOffset": null,
+        "resolvedType": "int32_t"
+      },
+      {
+        "name": "nClientsCount",
+        "dataType": "uint32_t",
+        "size": 4,
+        "storage": "HASH:5f46133ef6:4",
+        "stackOffset": null,
+        "resolvedType": "uint32_t"
+      }
+    ],
+    "tags": [
+      {
+        "type": "halt-returns"
+      }
+    ],
+    "decompiled": "\n/* WARNING: Enum \"eCollisionFlags\": Some values do not have unique names */\n/* WARNING: Enum \"eD2TimerType\": Some values do not have unique names */\n/* WARNING: Enum \"eD2TimerTypeDWORD\": Some values do not have unique names */\n/* @function QSERVER_GetClientCountByServerId\n   @address Game.exe.ram:0052ec90\n   @date 2026.06.13\n   @calling __stdcall\n   @description Diablo 2 1.14d reverse team\n   https://blizzhackers.dev */\n\nuint32_t D2Game::GAME::Server::QSERVER_GetClientCountByServerId(uint16_t nServerId)\n\n{\n  SGAMEDATA *pGame;\n  void *nErrorAddress;\n  SGAMEDATA *nToken;\n  uint32_t nClientsCount;\n  int32_t nLine;\n  \n                    /* LPCRITICAL_SECTION lpCriticalSection for EnterCriticalSection */\n  EnterCriticalSection(&gQServerGameListCs);\n  pGame = gaQServerGameByToken[nServerId];\n  nToken = (SGAMEDATA *)0x0;\n  if ((pGame != (SGAMEDATA *)0x0) && (pGame != (SGAMEDATA *)0xffffffff)) {\n    nToken = pGame;\n  }\n                    /* LPCRITICAL_SECTION lpCriticalSection for LeaveCriticalSection */\n  LeaveCriticalSection(&gQServerGameListCs);\n  pGame = D2Game::GAME::Server::QSERVER_FindAndLockGame((uint)nToken);\n  if (pGame == (SGAMEDATA *)0x0) {\n    nLine = 0x12c6;\n  }\n  else {\n    nClientsCount = pGame->nClientsCount;\n    if (pGame->lpCriticalSection != (LPCRITICAL_SECTION)0x0) {\n                    /* LPCRITICAL_SECTION lpCriticalSection for LeaveCriticalSection */\n      LeaveCriticalSection(pGame->lpCriticalSection);\n      return nClientsCount;\n    }\n    nLine = 0x1064;\n  }\n  nErrorAddress = Fog::Src::ErrorManager::GetInstructionPointer();\n  Fog::Src::ErrorManager::ERROR_UnrecoverableInternalError_Halt(\"\",nErrorAddress,nLine);\n                    /* WARNING: Subroutine does not return */\n  compiler::exit(-1);\n}\n\n"
+  },
+  "tables": {
+    "paramFuncdefs": {},
+    "funcdefSignatures": {},
+    "functionSignatures": {
+      "QSERVER_FindAndLockGame": "SGAMEDATA *(uint)",
+      "D2Game::GAME::Server::QSERVER_FindAndLockGame": "SGAMEDATA *(uint)"
+    },
+    "functionReturnTypes": {
+      "QSERVER_FindAndLockGame": "SGAMEDATA *",
+      "D2Game::GAME::Server::QSERVER_FindAndLockGame": "SGAMEDATA *"
+    },
+    "functionParamTypes": {
+      "QSERVER_FindAndLockGame": [
+        "uint"
+      ],
+      "D2Game::GAME::Server::QSERVER_FindAndLockGame": [
+        "uint"
+      ]
+    },
+    "structFields": {
+      "SGAMEDATA": {
+        "lpCriticalSection": "LPCRITICAL_SECTION",
+        "nClientsCount": "int"
+      }
+    },
+    "structFieldOffsets": {
+      "SGAMEDATA": {
+        "lpCriticalSection": 24,
+        "nClientsCount": 140
+      }
+    },
+    "structLayouts": {
+      "SGAMEDATA": [
+        {
+          "name": "lpCriticalSection",
+          "type": "LPCRITICAL_SECTION",
+          "offset": 24,
+          "size": 4
+        },
+        {
+          "name": "nClientsCount",
+          "type": "int",
+          "offset": 140,
+          "size": 4
+        }
+      ]
+    },
+    "aggregateSizes": {
+      "SGAMEDATA": 7668
+    },
+    "globalTypes": {
+      "gQServerGameListCs": "_RTL_CRITICAL_SECTION",
+      "gaQServerGameByToken": "SGAMEDATA*[1025]"
+    },
+    "variableNames": [],
+    "voidPointerFunctions": [],
+    "rootQualifiedTypedefs": [],
+    "unionNames": []
+  },
+  "options": {
+    "outputDir": "./out",
+    "format": "cpp",
+    "organization": "namespace",
+    "generateCMake": false,
+    "generateSourceMaps": false,
+    "transformPreset": "full",
+    "includeAddressComments": false,
+    "promoteStaticGlobals": false
+  },
+  "tag": "nullinit(nToken,@EnterCriticalSection);ev=0000000000;bh=126-00000000;dh=064c211a",
+  "baseline": "// 1.14d: 0052ec90\nuint32_t __stdcall QSERVER_GetClientCountByServerId(uint16_t nServerId) {\n    /* LPCRITICAL_SECTION lpCriticalSection for EnterCriticalSection */ EnterCriticalSection(&gQServerGameListCs);\n    SGAMEDATA* pGame = gaQServerGameByToken[nServerId];\n    SGAMEDATA* nToken = 0;\n    if (pGame && pGame != (SGAMEDATA*)-1) {\n      nToken = pGame;\n    }\n\n    /* LPCRITICAL_SECTION lpCriticalSection for LeaveCriticalSection */ LeaveCriticalSection(&gQServerGameListCs);\n    pGame = D2Game::GAME::Server::QSERVER_FindAndLockGame((uint32_t)nToken);\n    if (!pGame) {\n      Fog::Src::ErrorManager::ERROR_UnrecoverableInternalError_Halt(\"\", Fog::Src::ErrorManager::GetInstructionPointer(), 0x12c6);\n      exit(-1);\n    } else {\n      uint32_t nClientsCount;\n      nClientsCount = pGame->nClientsCount;\n      if (!pGame->lpCriticalSection) {\n        Fog::Src::ErrorManager::ERROR_UnrecoverableInternalError_Halt(\"\", Fog::Src::ErrorManager::GetInstructionPointer(), 0x1064);\n        exit(-1);\n      }\n\n      /* LPCRITICAL_SECTION lpCriticalSection for LeaveCriticalSection */ LeaveCriticalSection(pGame->lpCriticalSection);\n      return nClientsCount;\n    }\n}",
+  "candidate": "// 1.14d: 0052ec90\nuint32_t __stdcall QSERVER_GetClientCountByServerId(uint16_t nServerId) {\n    SGAMEDATA* nToken = 0;\n    /* LPCRITICAL_SECTION lpCriticalSection for EnterCriticalSection */ EnterCriticalSection(&gQServerGameListCs);\n    SGAMEDATA* pGame = gaQServerGameByToken[nServerId];\n    if (pGame && pGame != (SGAMEDATA*)-1) {\n      nToken = pGame;\n    }\n\n    /* LPCRITICAL_SECTION lpCriticalSection for LeaveCriticalSection */ LeaveCriticalSection(&gQServerGameListCs);\n    pGame = D2Game::GAME::Server::QSERVER_FindAndLockGame((uint32_t)nToken);\n    if (!pGame) {\n      Fog::Src::ErrorManager::ERROR_UnrecoverableInternalError_Halt(\"\", Fog::Src::ErrorManager::GetInstructionPointer(), 0x12c6);\n      exit(-1);\n    } else {\n      uint32_t nClientsCount;\n      nClientsCount = pGame->nClientsCount;\n      if (!pGame->lpCriticalSection) {\n        Fog::Src::ErrorManager::ERROR_UnrecoverableInternalError_Halt(\"\", Fog::Src::ErrorManager::GetInstructionPointer(), 0x1064);\n        exit(-1);\n      }\n\n      /* LPCRITICAL_SECTION lpCriticalSection for LeaveCriticalSection */ LeaveCriticalSection(pGame->lpCriticalSection);\n      return nClientsCount;\n    }\n}",
+  "scope": "Current MCP function and actual used SGAMEDATA field/lookup-call declarations. Production generator replay only: no native facts or full-model native calibration claimed. Native gain is measured separately at current published source stage."
+}

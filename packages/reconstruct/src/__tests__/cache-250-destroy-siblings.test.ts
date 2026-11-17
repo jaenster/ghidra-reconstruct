@@ -1,17 +1,17 @@
-/** Exact-live Windows pseudocode for the remaining issue #250 §9 Destroy sites. */
+/** Windows pseudocode plus v2109 tags/vtable-held context for the remaining #250 Destroy sites. */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
 import { generateProject } from '../codegen/index.js';
 import { vc8formBodyHash, vc8FormSpec } from '../codegen/vc8form-spec.js';
-import type { ExtractedDataType, ExtractedFunction, ExtractedNamespace, ProgramInfo, ReconstructOptions } from '../types.js';
+import type { AnalyzedDataSymbol, ExtractedDataType, ExtractedFunction, ExtractedNamespace, ProgramInfo, ReconstructOptions } from '../types.js';
 
-interface Case { address: string; element: string; key: string; module: string; clear: string; arrayDestructor: string; dh: string }
+interface Case { address: string; element: string; key: string; module: string; clear: string; arrayDestructor: string; dh: string; generatedDh: string; ev: string; vtable: string }
 const cases: Case[] = [
-  { address: '00603780', element: 'CELLIST', key: 'HASHKEY_NONE', module: 'D2CMP', clear: '00602800', arrayDestructor: '00603060', dh: 'f0050322' },
-  { address: '00610020', element: 'StringEntryNode', key: 'HASHKEY_STRI', module: 'D2Common', clear: '0060eb70', arrayDestructor: '0060f610', dh: 'a9645b72' },
-  { address: '006107d0', element: 'MappingEntryNode', key: 'HASHKEY_STRI', module: 'D2Common', clear: '0060ee60', arrayDestructor: '0060f950', dh: '7f7fd55f' },
+  { address: '00603780', element: 'CELLIST', key: 'HASHKEY_NONE', module: 'D2CMP', clear: '00602800', arrayDestructor: '00603060', dh: 'f0050322', generatedDh: '13f07340', ev: 'c3b487136a', vtable: '006e5de8' },
+  { address: '00610020', element: 'StringEntryNode', key: 'HASHKEY_STRI', module: 'D2Common', clear: '0060eb70', arrayDestructor: '0060f610', dh: 'a9645b72', generatedDh: 'ed6f578a', ev: '030fb3f19b', vtable: '006e62b4' },
+  { address: '006107d0', element: 'MappingEntryNode', key: 'HASHKEY_STRI', module: 'D2Common', clear: '0060ee60', arrayDestructor: '0060f950', dh: '7f7fd55f', generatedDh: '1ed2bc65', ev: '5a622812a5', vtable: '006e62c8' },
 ];
 const programInfo: ProgramInfo = { name: 'Game.exe', path: '/Redivivus/Game.exe', format: 'PE', architecture: 'x86',
   compiler: 'msvc', imageBase: '0x400000', languageId: 'x86:LE:32:default', endianness: 'little', pointerSize: 4 };
@@ -22,9 +22,9 @@ function fixture(c: Case) {
   const decompiled = readFileSync(new URL(`./live-${c.address}.txt`, import.meta.url), 'utf8');
   const bodyHash = vc8formBodyHash(decompiled);
   assert.equal(bodyHash, c.dh, `${c.address} live decompile changed`);
-  const form = `cache(&this->tSlotListArray,pArray,TSGrowableArray<TSExplicitList<${c.element}, -572662307>>*,@call)`;
-  // ev is a fixture placeholder; bh is the oracle-masked live reference hash.
-  const probeTag = { type: 'vc8form', data: `${form};ev=0000000000;bh=40-8561c9a1;dh=${bodyHash}` };
+  const form = `cache(&pThis->tSlotListArray,pArray,TSGrowableArray<TSExplicitList<${c.element}, -572662307>>*)`;
+  // The actual v2109 tag uses the generator-stage hash after template respelling.
+  const probeTag = { type: 'vc8form', data: `${form};ev=${c.ev};bh=40-8561c9a1;dh=${c.generatedDh}` };
   const target: ExtractedFunction = {
     name: 'Destroy', address: `0x${c.address}`,
     signature: `void Destroy(${hashTable} * this)`, returnType: 'void',
@@ -75,28 +75,43 @@ function fixture(c: Case) {
     ? [{ kind: 'STRUCTURE', name: c.key, category: '/', size: 1, fields: [] } as ExtractedDataType]
     : [{ kind: 'STRUCTURE', name: c.key, category: '/', size: 4,
         fields: [{ name: 'szString', offset: 0, size: 4, dataType: 'char *' }] } as ExtractedDataType];
+  // Register the real Ghidra list spelling, including its negative argument.
+  dataTypes.push({ kind: 'STRUCTURE', name: `TSExplicitList<${c.element},-572662307>`, category: '/', size: 12,
+    fields: [
+      { name: 'm_linkoffset', dataType: 'int', offset: 0, size: 4 },
+      { name: 'm_terminator', dataType: `TSLink<${c.element}>`, offset: 4, size: 8 },
+    ] } as ExtractedDataType);
+  // A plain function pointer in the real vtable keeps Destroy's receiver explicit.
+  const heldDestroy: AnalyzedDataSymbol = {
+    name: 'vftable', namespace: hashTable, address: c.vtable,
+    dataType: 'pointer[4]', size: 16, isInitialized: true, xrefCount: 1, scope: 'global',
+    initializedData: { kind: 'array', elements: ['InternalDelete', 'InternalNew', 'ScalarDeletingDestructor', 'Destroy']
+      .map(name => ({ kind: 'pointer' as const, value: `${hashTable}::${name}` })) },
+  };
   const emit = (tags: ExtractedFunction['tags']) => {
+    const functions = structuredClone([{ ...target, tags }, internalClear, arrayDestructor]);
     const project = generateProject('cache-250-destroy-siblings',
-      structuredClone([{ ...target, tags }, internalClear, arrayDestructor]), [],
-      structuredClone(dataTypes), [], structuredClone(namespaces), options, programInfo);
+      functions, [],
+      structuredClone(dataTypes), structuredClone([heldDestroy]), structuredClone(namespaces), options, programInfo);
+    assert.equal(vc8formBodyHash(functions[0].decompiled!), c.generatedDh);
     return [...project.files.values()].filter(f => f.type === 'implementation').map(f => f.content).join('\n');
   };
   return { bodyHash, form, probeTag, target, emit };
 }
 
 for (const c of cases) describe(`Redivivus issue #250 ${c.address} live Destroy cache`, () => {
-  it('accepts the exact-live hash and emits member calls with a typed pArray', () => {
+  it('applies the generator-stage tag with an explicit held receiver and typed pArray', () => {
     const { bodyHash, probeTag, target, emit } = fixture(c);
-    assert.equal(vc8FormSpec({ ...target, tags: [probeTag] })?.forms.length, 1);
+    assert.equal(vc8FormSpec({ ...target, tags: [probeTag] })?.forms.length, 0);
     const absent = emit(target.tags);
     const tagged = emit([...(target.tags ?? []), probeTag]);
-    const stale = emit([...(target.tags ?? []), { ...probeTag, data: probeTag.data.replace(`dh=${bodyHash}`, 'dh=ffffffff') }]);
+    const stale = emit([...(target.tags ?? []), { ...probeTag, data: probeTag.data.replace(`dh=${c.generatedDh}`, 'dh=ffffffff') }]);
     assert.equal(stale, absent);
     assert.notEqual(tagged, absent);
-    assert.match(absent, /this->InternalClear\(1\)/);
+    assert.match(absent, /pThis->InternalClear\(1\)/);
     assert.doesNotMatch(absent, /pArray/);
-    assert.match(tagged, /this->InternalClear\(1\)/);
-    assert.match(tagged, /pArray = &this->tSlotListArray;/);
+    assert.match(tagged, /pThis->InternalClear\(1\)/);
+    assert.match(tagged, /pArray = &pThis->tSlotListArray;/);
     assert.match(tagged, /pArray->TSGrowableArray<TSExplicitList<[^\n]+>>::Destructor\(\)/);
     assert.match(tagged, /pArray->m_alloc = 0;\n    pArray->m_count = 0;\n    pArray->m_data = 0;/);
     console.log(`${c.address} dh=${bodyHash} absent/tagged/stale passed`);

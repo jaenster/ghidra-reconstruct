@@ -22,4 +22,13 @@ describe('clamp collector candidates', () => {
     assert.deepEqual(clampForms('int f(unsigned int u) { int v = u; if (v < 0) { v = 0; } return v; }'), []);
     assert.deepEqual(clampForms('int f(int a) { int v = a; use(v); if (v < 0) { v = 0; } return v; }'), []);
   });
+
+  it('discovers a bound-first clamp whose condition does not name the destination', () => {
+    assert.deepEqual(clampForms('int f(int a) { int v = 1; if (a >= 1) v = a; return v; }'), ['clamp(v)']);
+  });
+
+  it('retains the old unindexed site and discovers the additional bound-first site', () => {
+    assert.deepEqual(clampForms('int f(int a) { int v = 1; if (a > 1) v = a; v = a; if (v > 10) v = 10; return v; }'),
+      ['clamp(v)', 'clamp(v,2)']);
+  });
 });

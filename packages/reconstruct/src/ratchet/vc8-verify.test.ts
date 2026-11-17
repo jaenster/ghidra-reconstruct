@@ -42,7 +42,11 @@ function compiles(root: string, n: number): Promise<number[]> {
   })));
 }
 
-describe('vc8-verify drive', () => {
+// Wine's dosdevices links use POSIX paths and filenames ending in a colon.
+// Native Windows cannot create those fixture links, even with Git Bash installed.
+describe('vc8-verify drive', {
+  skip: process.platform === 'win32' ? 'Wine drive links require POSIX filesystem semantics' : false,
+}, () => {
   it('reads the drive link and checkout from the oracle env.sh', () => {
     const f = fixture();
     const saved = process.env.ORACLE_DRIVE;

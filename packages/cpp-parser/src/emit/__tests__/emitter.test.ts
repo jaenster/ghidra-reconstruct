@@ -3,7 +3,7 @@ import assert from 'node:assert';
 import { CppEmitter, emit, DEFAULT_STYLE, GOOGLE_STYLE, createStyle } from '../index.js';
 import { Type, Expr, Stmt, Decl } from '../../ast/factory.js';
 import { NodeKind } from '../../ast/kinds.js';
-import type { AssignExpr, BinaryExpr, BinaryOperator, CallExpr, CharLiteralExpr, CommaExpr, CompoundStmt, ConditionalExpr, DeclStmt, ExprStmt, Expression, FunctionDecl, IfStmt, InitListExpr, ParenExpr, PpConditionalStmt, ReturnStmt, Statement, UnaryExpr, VariableDecl } from '../../ast/nodes.js';
+import type { AssignExpr, BinaryExpr, BinaryOperator, CallExpr, CharLiteralExpr, CommaExpr, CompoundStmt, ConditionalExpr, DeclStmt, ExprStmt, Expression, FunctionDecl, IfStmt, InitListExpr, ParenExpr, PpConditionalStmt, ReturnStmt, Statement, SwitchStmt, UnaryExpr, VariableDecl, WhileStmt } from '../../ast/nodes.js';
 import { parse } from '../../parser/index.js';
 import type { DeclStmt as LocalDeclStmt, TypeNode, VariableDecl as LocalVariableDecl } from '../../ast/nodes.js';
 
@@ -520,6 +520,25 @@ describe('CppEmitter', () => {
       const reparsed = parse(emitted).declarations[0] as FunctionDecl;
       assert.strictEqual(reparsed.parameters.length, 2, emitted);
       assert.strictEqual(reparsed.parameters[0].defaultValue?.kind, NodeKind.ParenExpr, emitted);
+    });
+
+    it('uses statement parentheses for whole comma conditions while preserving nested grouping and call arity', () => {
+      for (const statement of [
+        'if ((a, (b, c))) { g((a, b)); }',
+        'while ((a, (b, c))) { g((a, b)); break; }',
+        'switch ((a, (b, c))) { default: g((a, b)); break; }',
+      ]) {
+        const output = emit(parse(`void f(int a, int b, int c) { ${statement} }`));
+        assert.match(output, /(?:if|while|switch) \(a\s*,\s*\(b\s*,\s*c\)\)/);
+        assert.match(output, /g\(\(a\s*,\s*b\)\)/);
+        const fn = parse(output).declarations[0] as FunctionDecl;
+        const condition = (fn.body!.statements[0] as IfStmt | WhileStmt | SwitchStmt).condition as BinaryExpr;
+        assert.strictEqual(condition.kind, NodeKind.BinaryExpr);
+        assert.strictEqual(condition.operator, ',');
+        assert.strictEqual(condition.right.kind, NodeKind.ParenExpr);
+        assert.strictEqual(((condition.right as ParenExpr).expression as BinaryExpr).operator, ',');
+        assert.strictEqual(emit(parse(output)), output);
+      }
     });
 
     it('keeps a comma expression grouped within sizeof', () => {

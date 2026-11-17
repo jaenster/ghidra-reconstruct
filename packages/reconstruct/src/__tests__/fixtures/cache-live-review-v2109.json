@@ -1,0 +1,322 @@
+[
+  {
+    "name": "OBJECT_DispatchShrineClientFunc",
+    "address": "004bd650",
+    "entryPoint": "004bd650",
+    "signature": "void OBJECT_DispatchShrineClientFunc(D2UnitStrc * pUnit)",
+    "returnType": "void",
+    "callingConvention": "__cdecl",
+    "size": 84,
+    "isThunk": false,
+    "isExternal": false,
+    "hasVarArgs": false,
+    "namespace": "D2Client::UNIT::Object",
+    "comment": "@function OBJECT_DispatchShrineClientFunc\n@address Game.exe.ram:004bd650\n@date 2026.02.10\n@params\n  pUnit: EDI:4 (D2UnitStrc *)\n@description Diablo 2 1.14d reverse team\nhttps://blizzhackers.dev\n\nFunction uses custom registers for function arguments!\n[D2UnitStrc * pUnit@EDI:4]",
+    "sourceFile": null,
+    "sourceLine": null,
+    "sourceInfo": null,
+    "parameters": [
+      {
+        "name": "pUnit",
+        "dataType": "D2UnitStrc *",
+        "size": 4,
+        "ordinal": 0,
+        "storage": "EDI:4",
+        "stackOffset": null,
+        "resolvedType": null
+      }
+    ],
+    "localVariables": [
+      {
+        "name": "pShrinesTxt",
+        "dataType": "D2ShrinesTxt *",
+        "size": 4,
+        "storage": "EAX:4",
+        "stackOffset": null,
+        "resolvedType": "D2ShrinesTxt *"
+      },
+      {
+        "name": "nAddress",
+        "dataType": "void *",
+        "size": 4,
+        "storage": "EAX:4",
+        "stackOffset": null,
+        "resolvedType": "void *"
+      },
+      {
+        "name": "nLine",
+        "dataType": "int32_t",
+        "size": 4,
+        "storage": "HASH:3f8bf380d5:4",
+        "stackOffset": null,
+        "resolvedType": "int32_t"
+      }
+    ],
+    "tags": [
+      {
+        "type": "llm-artifact-fix"
+      },
+      {
+        "type": "halt-returns"
+      },
+      {
+        "type": "vc8form",
+        "data": "cache(&aShrineDispatchTable{pShrinesTxt->nCode},pEntry,D2ShrineDispatchEntryStrc*);ev=0d798208fb;bh=84-b69a4fbd;dh=e781a5e8"
+      },
+      {
+        "type": "vc8form",
+        "data": "rowptr(aShrineDispatchTable[pShrinesTxt->nCode],t2_r0,D2ShrineDispatchEntryStrc);ev=c2d01502fe;bh=84-b69a4fbd;dh=e781a5e8"
+      }
+    ],
+    "decompiled": "\n/* WARNING: Enum \"eCollisionFlags\": Some values do not have unique names */\n/* WARNING: Enum \"eD2TimerType\": Some values do not have unique names */\n/* WARNING: Enum \"eD2TimerTypeDWORD\": Some values do not have unique names */\n/* @function OBJECT_DispatchShrineClientFunc\n   @address Game.exe.ram:004bd650\n   @date 2026.02.10\n   @params\n     pUnit: EDI:4 (D2UnitStrc *)\n   @description Diablo 2 1.14d reverse team\n   https://blizzhackers.dev\n   \n   Function uses custom registers for function arguments!\n   [D2UnitStrc * pUnit@EDI:4] */\n\nvoid __cdecl D2Client::UNIT::Object::OBJECT_DispatchShrineClientFunc(D2UnitStrc *pUnit)\n\n{\n  D2ShrinesTxt *pShrinesTxt;\n  void *nAddress;\n  int32_t nLine;\n  \n  pShrinesTxt = D2Common::Units::Units::GetShrineTxtRecordFromObject(pUnit);\n  if (pShrinesTxt == (D2ShrinesTxt *)0x0) {\n    nLine = 0x37a;\n  }\n  else {\n    if ((int)(uint)pShrinesTxt->nCode < D2Client::UNIT::Object::nShrineDispatchTableSize) {\n      if (D2Client::UNIT::Object::aShrineDispatchTable[pShrinesTxt->nCode].fpClientOverlayUpdate !=\n          (fnShrineClientOverlayUpdate *)0x0) {\n        (*D2Client::UNIT::Object::aShrineDispatchTable[pShrinesTxt->nCode].fpClientOverlayUpdate)\n                  (pUnit,pShrinesTxt);\n      }\n      return;\n    }\n    nLine = 0x37b;\n  }\n  nAddress = Fog::Src::ErrorManager::GetInstructionPointer();\n  Fog::Src::ErrorManager::ERROR_UnrecoverableInternalError_Halt(\"\",nAddress,nLine);\n                    /* WARNING: Subroutine does not return */\n  compiler::exit(-1);\n}\n\n",
+    "calledFunctions": []
+  },
+  {
+    "name": "TEXT_CalculateTextHeight",
+    "address": "005019c0",
+    "entryPoint": "005019c0",
+    "signature": "int32_t TEXT_CalculateTextHeight(WCHAR * szBuffer)",
+    "returnType": "int32_t",
+    "callingConvention": "__cdecl",
+    "size": 119,
+    "isThunk": false,
+    "isExternal": false,
+    "hasVarArgs": false,
+    "namespace": "D2Win::Src::D2WinFont",
+    "comment": "@function TEXT_CalculateTextHeight\n@address Game.exe.ram:005019c0\n@date 2026.06.12\n@params\n  szBuffer: ESI:4 (WCHAR *)\n@description Diablo 2 1.14d reverse team\nhttps://blizzhackers.dev\n\nFunction uses custom registers for function arguments!\n[WCHAR * szBuffer@ESI:4]",
+    "sourceFile": null,
+    "sourceLine": null,
+    "sourceInfo": null,
+    "parameters": [
+      {
+        "name": "szBuffer",
+        "dataType": "WCHAR *",
+        "size": 4,
+        "ordinal": 0,
+        "storage": "ESI:4",
+        "stackOffset": null,
+        "resolvedType": null
+      }
+    ],
+    "localVariables": [
+      {
+        "name": "nErrAddr",
+        "dataType": "void *",
+        "size": 4,
+        "storage": "EAX:4",
+        "stackOffset": null,
+        "resolvedType": "void *"
+      },
+      {
+        "name": "nLineCount",
+        "dataType": "int",
+        "size": 4,
+        "storage": "EDI:4",
+        "stackOffset": null,
+        "resolvedType": "int"
+      },
+      {
+        "name": "nStrLen",
+        "dataType": "int",
+        "size": 4,
+        "storage": "EAX:4",
+        "stackOffset": null,
+        "resolvedType": "int"
+      },
+      {
+        "name": "nErrLine",
+        "dataType": "int32_t",
+        "size": 4,
+        "storage": "HASH:3f84b05444:4",
+        "stackOffset": null,
+        "resolvedType": "int32_t"
+      }
+    ],
+    "tags": [
+      {
+        "type": "llm-artifact-fix"
+      },
+      {
+        "type": "halt-returns"
+      },
+      {
+        "type": "vc8form",
+        "data": "cache(*szBuffer,t2_c0,uint16_t,@nStrLen > 0);ev=b9df1c2ed1;bh=119-74e6a928;dh=91f0f8a2"
+      }
+    ],
+    "decompiled": "\n/* @function TEXT_CalculateTextHeight\n   @address Game.exe.ram:005019c0\n   @date 2026.06.12\n   @params\n     szBuffer: ESI:4 (WCHAR *)\n   @description Diablo 2 1.14d reverse team\n   https://blizzhackers.dev\n   \n   Function uses custom registers for function arguments!\n   [WCHAR * szBuffer@ESI:4] */\n\nint32_t __cdecl D2Win::Src::D2WinFont::TEXT_CalculateTextHeight(WCHAR *szBuffer)\n\n{\n  void *nErrAddr;\n  int nStrLen;\n  int nLineCount;\n  int32_t nErrLine;\n  \n  if (szBuffer == (WCHAR *)0x0) {\n    nErrLine = 0x25e;\n    nErrAddr = Fog::Src::ErrorManager::GetInstructionPointer();\n    Fog::Src::ErrorManager::ERROR_UnrecoverableInternalError_Halt(\"\",nErrAddr,nErrLine);\n                    /* WARNING: Subroutine does not return */\n    compiler::exit(-1);\n  }\n  nLineCount = 1;\n  nStrLen = D2Lang::Unicode::UNISYS::STRING_GetWideStringLength(szBuffer);\n  if (0 < nStrLen) {\n    do {\n      if (*szBuffer == L'\\n') {\n        nLineCount = nLineCount + 1;\n      }\n      szBuffer = szBuffer + 1;\n      nStrLen = nStrLen + -1;\n    } while (nStrLen != 0);\n  }\n  return (int)((uint)(gaFontCache[gnLastUsedFontId].pFontTableHeader)->nLineHeight * gnFontIdLarge *\n              nLineCount) / 10;\n}\n\n",
+    "calledFunctions": [],
+    "branchLayout": {
+      "lineCount": 42,
+      "ifs": [
+        [
+          21,
+          2
+        ],
+        [
+          30,
+          52
+        ],
+        [
+          32,
+          58
+        ]
+      ],
+      "lines": [
+        [
+          21,
+          [
+            0,
+            2
+          ]
+        ],
+        [
+          22,
+          [
+            4
+          ]
+        ],
+        [
+          23,
+          [
+            9
+          ]
+        ],
+        [
+          24,
+          [
+            20
+          ]
+        ],
+        [
+          26,
+          [
+            30
+          ]
+        ],
+        [
+          28,
+          [
+            38
+          ]
+        ],
+        [
+          29,
+          [
+            43
+          ]
+        ],
+        [
+          30,
+          [
+            48,
+            52
+          ]
+        ],
+        [
+          32,
+          [
+            54,
+            58
+          ]
+        ],
+        [
+          33,
+          [
+            60
+          ]
+        ],
+        [
+          35,
+          [
+            63
+          ]
+        ],
+        [
+          36,
+          [
+            66
+          ]
+        ],
+        [
+          37,
+          [
+            69
+          ]
+        ],
+        [
+          39,
+          [
+            71,
+            76,
+            79,
+            86,
+            90,
+            97,
+            100,
+            105,
+            107,
+            110,
+            112,
+            115,
+            117,
+            118
+          ]
+        ]
+      ],
+      "edges": [
+        {
+          "line": 21,
+          "ord": 0,
+          "keyword": "if",
+          "jcc": 2,
+          "target": 35,
+          "fall": 4,
+          "fallLines": [
+            22,
+            23,
+            24,
+            26
+          ],
+          "takenLines": [
+            28,
+            29
+          ],
+          "cc": "JNZ"
+        },
+        {
+          "line": 30,
+          "ord": 0,
+          "keyword": "if",
+          "jcc": 52,
+          "target": 71,
+          "fall": 54,
+          "fallLines": [
+            32
+          ],
+          "takenLines": [
+            39
+          ],
+          "cc": "JLE"
+        },
+        {
+          "line": 32,
+          "ord": 0,
+          "keyword": "if",
+          "jcc": 58,
+          "target": 63,
+          "fall": 60,
+          "fallLines": [
+            33
+          ],
+          "takenLines": [
+            35,
+            36
+          ],
+          "cc": "JNZ"
+        }
+      ]
+    },
+    "compareSites": "0\t==\tINT_EQUAL\t4\t1\t0\tv:szBuffer\tc:0\t005019c0\t005019c2\tJNZ\t005019c0\tTEST\t4\tr\tz\t0\t1\n1\t<\tINT_SLESS\t4\t0\t0\tc:0\tv:nStrLen\t005019f0\t005019f4\tJLE\t005019f0\tTEST\t4\tr\tz\t0\t1\n2\t==\t-\n3\t!=\t-"
+  }
+]

@@ -256,9 +256,10 @@ function gitLocation(root: string): { top: string; sub: string } | null {
   } catch {
     return null;
   }
-  // realpath both sides: /tmp and /private/tmp, a symlinked home.
-  const realRoot = nodeFs.existsSync(root) ? nodeFs.realpathSync(root) : nodePath.join(nodeFs.realpathSync(probe), nodePath.relative(probe, root));
-  const sub = nodePath.relative(nodeFs.realpathSync(top), realRoot).split(nodePath.sep).join('/');
+  // Resolve both sides through the OS: symlinks and Windows 8.3 aliases must
+  // name the same directory as Git's long work-tree path.
+  const realRoot = nodeFs.existsSync(root) ? nodeFs.realpathSync.native(root) : nodePath.join(nodeFs.realpathSync.native(probe), nodePath.relative(probe, root));
+  const sub = nodePath.relative(nodeFs.realpathSync.native(top), realRoot).split(nodePath.sep).join('/');
   return { top, sub: sub === '' ? '.' : sub };
 }
 

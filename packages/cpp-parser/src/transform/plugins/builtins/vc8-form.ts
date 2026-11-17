@@ -1,4 +1,6 @@
+import { zeroRejectChoice } from './zero-reject-choice.js';
 import { builtinTruthSite } from './truth-form-safety.js';
+import { splitCompoundAdd } from './split-compound-add.js';
 /**
  * VC8 source forms recorded per function.
  *
@@ -28,6 +30,13 @@ import { builtinTruthSite } from './truth-form-safety.js';
  *                        Refused when one statement mentions what another stores, or
  *                        when a statement that stores through memory shares the run with
  *                        a call.
+ *   guardchoice(A,B)     the unique top-level zero-A/zero-B rejection and zero-B
+ *                        call/goto alternative becomes one zero/zero return guard
+ *                        followed by a B-based choice between the same two calls.
+ *                        Tests require ordinary nonvolatile builtin integers and
+ *                        both alternatives are declared direct calls. The
+ *                        immediately shared label and other incoming gotos stay.
+ *                        Extra statements, local lifetimes and ambiguous sites refuse.
  *   fold(V)              each value stored to local V is written into its uses up to the
  *                        next store to V, and the store goes; `*V` of a stored `&X` is X.
  *                        V's declaration goes once nothing names V. A compound store
@@ -58,9 +67,17 @@ import { builtinTruthSite } from './truth-form-safety.js';
  *                        X reads `*N` (`X.m` reads `N->m`). With an anchor, reads before it
  *                        keep E; `cache(E,N,T,@A,k)` moves only the first k reads. `@call`
  *                        selects the unique call statement that reads E, for a pure &member.
+ *                        `cache(E,N,T,@A,k,i)` selects the i-th anchor in its block. Indexed
+ *                        anchors must all occur in one block; @call remains unique/unindexed.
  *                        Refused when E or a name in E is stored in that range.
  *   cache(E,N)           N is an existing local stored from E: each E after that store
  *                        reads N, up to the next store to E or N.
+ *   fieldalias(A)        `T** A=&P->F; T* V=Make(); *A=V; if(!P->B)return;`
+ *                        becomes `P->F=Make(); T** A=&P->F; if(!P->B)return;`.
+ *                        The alias remains for later calls; only its pure address
+ *                        calculation moves. Requires unique stable bindings, exact
+ *                        nonvolatile pointer types and disjoint field layouts. A
+ *                        producer is folded only when it has one value use.
  *   own(V,T[,N])         V's initializer is a dead copy Ghidra merged into it: V is
  *                        declared as a T of its own (named N), without it; a cast of V or
  *                        &V to T or T* goes, and the declaration moves onto V's first
@@ -140,6 +157,10 @@ import { builtinTruthSite } from './truth-form-safety.js';
  *   dup(S)               the expression statement S after an if/else (an else-if chain
  *                        with a final else) is written at the end of every arm instead;
  *                        refused when an arm can leave.
+ *                        An initialized, nonvolatile 32-bit integer declaration may also
+ *                        name S: its bare declaration stays before the if and its value
+ *                        is assigned in each arm. That case requires declaration-free
+ *                        arms, no shadowing, jumps, labels or exception handlers.
  *   hoist(S[,i])         the plain store S that begins the arm of an if with no else is
  *                        written just before the if (the decompiler sinks a store into the
  *                        only branch that reads it; the source as often wrote it above
@@ -191,19 +212,39 @@ import { builtinTruthSite } from './truth-form-safety.js';
  *                        and L have stable nonvolatile reads; this AST has no global or
  *                        member declaration facts to prove that property by itself.
  *
+ *   initbefore(V,A)      `char A[N]; memset(A,0,sizeof(A)); int V=0;` stages the
+ *                        private integer initializer immediately before the clear. The
+ *                        three statements must be adjacent in one block; both names
+ *                        unique automatic locals, N a positive literal, the clear the
+ *                        exact whole byte array, and V a nonvolatile primitive integer.
+ *                        Alias/class types and unmodelled control flow refuse. Neither
+ *                        name changes, and the array declaration stays first.
  *   decl(V,W)            the declaration of V without an initializer moves to just before
  *                        the declaration of W in its block; refused when a statement it
  *                        moves past names V.
  *   split(V,T,N)         the store `V = E;` that begins a new life of V is written
  *                        `T N = E;` and that life's reads read N (E may read V: it reads
  *                        the old value, and keeps V); refused when V is read again after
- *                        them before a new store, or inside a loop.
+ *                        them before a new store, or inside a loop. An addressed scalar
+ *                        requires one outer-block zero reset, the same ordinary 32-bit
+ *                        type, no earlier identity escape and all address uses afterward.
+ *   split(V,T,N,add)     an explicit final `V += K;` lifetime becomes `T N = V + K;`.
+ *                        Requires ordinary signed-int types (aliases need proof), a
+ *                        signed-int literal K, flat top-level int locals and only known
+ *                        primitive value calls after the update. Slot/address escapes,
+ *                        unknown/reference calls, shadowing and other control entries
+ *                        refuse. Three-argument split keeps its existing selection.
  *   zerolife(V)          `T V = F(...); if (V) return;` becomes
  *                        `if (F(...)) return; T V = 0;`: the continuing path's later
  *                        lifetime starts at zero. Both T and the declared call result
  *                        must be ordinary 32-bit integers of the same signedness. The statements must be
  *                        adjacent; aliases, declaration specifiers, labels, jumps,
  *                        lambdas and a return that reads V are refused.
+ *   nullinit(V,@F)       move one ordinary outer-block pointer initialized to literal
+ *                        null immediately before the unique earlier standalone call F.
+ *                        No value read or call moves: only a private null initialization.
+ *                        Ambiguous/shadowed bindings, address exposure, complex types,
+ *                        labels, jumps, lambdas and intervening control/type declarations refuse.
  *   tsel(C[,i])          the i-th `if (C) { V1 = A1; ... } else { V1 = B1; ... }` storing the
  *                        same locals in both arms, followed by a call statement reading each
  *                        Vk once as a whole argument, is written with each read `C ? Ak : Bk`;
@@ -238,6 +279,12 @@ import { builtinTruthSite } from './truth-form-safety.js';
  *                        calls nothing, stores nothing and reads only such locals and
  *                        constants; refused under `&&`, `||` or `?:` arms, which would make
  *                        the call conditional, and in a loop condition.
+ *                        A pointer lookup may cross bare, nonvolatile pointer declarations
+ *                        that shadow nothing it reads. A top-level pointer temporary may
+ *                        be dead before terminal labels when the entire suffix names it
+ *                        nowhere and cannot jump back. These extensions require typed
+ *                        by-value call arguments, an exact pointer return type, and no
+ *                        references or lambda captures.
  *   fill(A[,i])          `memset(A[ + K], 0, N * sizeof(A[0]));` (or a byte count, A a
  *                        local array of a scalar whose size divides it), and the pointer
  *                        loop the string instruction decompiles to, `P = A; for (N = K; N;
@@ -416,13 +463,14 @@ import { builtinTruthSite } from './truth-form-safety.js';
  *                        avoiding narrowing case labels under integral promotions.
  */
 
-import { NodeKind, isExpression, isType } from '../../../ast/kinds.js';
+import { NodeKind, isDeclaration, isExpression, isType } from '../../../ast/kinds.js';
 import type {
   ASTNode, AssignExpr, BinaryExpr, CallExpr, CompoundStmt, ConditionalExpr, CStyleCastExpr, DeclStmt, Expression, SwitchStmt,
   ExprStmt, ForStmt, FunctionDecl, Identifier, IfStmt, IntegerLiteralExpr, MemberExpr, ParenExpr, PostfixExpr, ReturnStmt, Statement, SubscriptExpr, TranslationUnit,
   TypeNode, UnaryExpr, VariableDecl,
 } from '../../../ast/nodes.js';
 import { parse } from '../../../parser/index.js';
+import { restoreFieldAliasStore } from './field-alias-store.js';
 import { emit } from '../../../emit/index.js';
 import { isKeywordString } from '../../../lexer/keywords.js';
 import { cloneNode } from '../../transformer.js';
@@ -433,6 +481,7 @@ import { shapeOfNode, shapeOfSpelling, sameShape } from './call-arg-cast.js';
 import { isPure } from './pseudo-op-lower.js';
 import { localTypesOf } from './compare-form.js';
 import { calleeName, scopedLookup } from './call-arg-cast.js';
+import type { AllocMacroSignature } from './alloc-macros.js';
 import { coalesceLocal } from './copy-coalesce.js';
 import { initializerIsDead } from './store-liveness.js';
 import { recordWalk, type RecordWalkTables } from './record-walk.js';
@@ -441,15 +490,19 @@ import { restoreSwitchDefault, switchDefaultValue } from './switch-default.js';
 import { countdownFieldPtrwalk } from './countdown-field-ptrwalk.js';
 
 export type Vc8Form =
+  | { op: 'guardchoice'; first: string; second: string }
   | { op: 'zerolife'; name: string }
   | { op: 'nullfault32' }
   | { op: 'swdefault'; expr: string; values: string[]; index?: number }
   | { op: 'seq'; targets: string[]; index?: number }
+  | { op: 'initbefore'; name: string; array: string }
   | { op: 'fold'; name: string }
   | { op: 'join'; into: string; from: string }
   | { op: 'coalesce'; name: string; from?: string }
   | { op: 'recordwalk'; name: string; index: number }
-  | { op: 'cache'; expr: string; name: string; type?: string; anchor?: string; count?: number }
+  | { op: 'cache'; expr: string; name: string; type?: string; anchor?: string; count?: number; anchorIndex?: number }
+  | { op: 'fieldalias'; name: string }
+  | { op: 'nullinit'; name: string; before: string }
   | { op: 'own'; name: string; type: string; rename?: string; live?: boolean }
   | { op: 'guards'; split: number; index: number }
   | { op: 'merge-guards'; index: number }
@@ -477,7 +530,7 @@ export type Vc8Form =
   | { op: 'select'; cond: string; index: number }
   | { op: 'decl'; name: string; before: string }
   | { op: 'unselect'; cond: string; index: number }
-  | { op: 'split'; name: string; type: string; rename: string }
+  | { op: 'split'; name: string; type: string; rename: string; add?: true }
   | { op: 'tsel'; cond: string; index: number }
   | { op: 'switch'; expr: string; index: number }
   | { op: 'nestcall'; name: string; index: number }
@@ -524,6 +577,9 @@ export interface Vc8Accessor {
 
 /** The tables vc8-form reads: select-argument's, and the accessors `acc` writes. */
 export type Vc8FormTables = SelectArgumentOptions & RecordWalkTables & {
+  /** Parameter types supplied by the producer of wrappers emitted in this body. */
+  macroSignatures?: Record<string, AllocMacroSignature>;
+  aggregateSizes?: Record<string, number>;
   accessors?: Vc8Accessor[];
   /**
    * Bytes a callee stores through argument `index` (a non-null `&local`) on every path
@@ -554,7 +610,7 @@ export interface Vc8FormOptions {
   selectTables?: Vc8FormTables;
 }
 
-const OPS = new Set(['zerolife', 'nullfault32', 'swdefault', 'seq', 'fold', 'join', 'coalesce', 'recordwalk', 'cache', 'own', 'guards', 'merge-guards', 'retval', 'branchret', 'width', 'boolflag', 'retwiden', 'arms',
+const OPS = new Set(['fieldalias', 'zerolife', 'nullfault32', 'swdefault', 'seq', 'fold', 'join', 'coalesce', 'recordwalk', 'cache', 'own', 'guards', 'merge-guards', 'retval', 'branchret', 'width', 'boolflag', 'retwiden', 'arms', 'guardchoice', 'initbefore', 'nullinit',
   'nest', 'merge-tail', 'tailguard', 'tailcopy', 'continue', 'dup', 'tarms', 'zero', 'nonzero', 'bool', 'cmp', 'swap', 'ifsel', 'clamp', 'split', 'select', 'decl', 'unselect', 'tsel', 'hoist',
   'nestcall', 'fill', 'elems', 'copy', 'shift', 'ptrwalk', 'rowptr', 'acc', 'retvar', 'onecall', 'roundup', 'swmerge', 'switch', 'dec', 'opas', 'range', 'castout', 'signbit', 'nullfield', 'zinit', 'znew', 'swclamp', 'retbase', 'postdec']);
 
@@ -588,6 +644,8 @@ export function parseVc8Form(text: string): Vc8Form | undefined {
   const anchor = args.length > 0 && args[args.length - 1].startsWith('@') ? args.pop()!.slice(1) : undefined;
   const int = (s: string | undefined, d: number) => (s === undefined || s === '' ? d : /^\d+$/.test(s) ? Number(s) : NaN);
   switch (m[1]) {
+    case 'initbefore': return args.length === 2 && !anchor && args.every(a => /^[A-Za-z_]\w*$/.test(a) && !isKeywordString(a)) && args[0] !== args[1]
+      ? { op: 'initbefore', name: args[0], array: args[1] } : undefined;
     case 'zerolife': return args.length === 1 && !anchor && /^[A-Za-z_]\w*$/.test(args[0]) && !isKeywordString(args[0])
       ? { op: 'zerolife', name: args[0] } : undefined;
     case 'swdefault': {
@@ -596,6 +654,7 @@ export function parseVc8Form(text: string): Vc8Form | undefined {
       return args.length >= 2 && args[0] !== '' && values.every(v => v !== undefined) && new Set(values).size === values.length
         && (n === undefined || (Number.isSafeInteger(n) && n >= 1)) ? { op: 'swdefault', expr: args[0], values: args.slice(1), ...(n === undefined ? {} : { index: n }) } : undefined;
     }
+    case 'guardchoice': return args.length === 2 && !anchor && args[0] !== args[1] && args.every(a => /^[A-Za-z_]\w*$/.test(a)) ? { op: 'guardchoice', first: args[0], second: args[1] } : undefined;
     case 'nullfault32': return args.length === 0 && !anchor ? { op: 'nullfault32' } : undefined;
     case 'seq': {
       // `seq(a,b,@N)`: the N-th run, when several store these.
@@ -611,6 +670,8 @@ export function parseVc8Form(text: string): Vc8Form | undefined {
         ? { op: 'nullfield', expr: args[0], struct: args[1], field: args[2] } : undefined;
     case 'join': return args.length === 2 && !anchor && args.every(a => /^[A-Za-z_]\w*$/.test(a)) && args[0] !== args[1]
       ? { op: 'join', into: args[0], from: args[1] } : undefined;
+    case 'fieldalias': return !anchor && args.length === 1 && /^[A-Za-z_]\w*$/.test(args[0])
+      ? { op: 'fieldalias', name: args[0] } : undefined;
     case 'cache':
       if (args.length === 2 && !anchor) return { op: 'cache', expr: args[0], name: args[1] };
       if (args.length === 3) return { op: 'cache', expr: args[0], name: args[1], type: args[2], anchor };
@@ -618,7 +679,18 @@ export function parseVc8Form(text: string): Vc8Form | undefined {
       if (!anchor && args.length === 5 && args[3].startsWith('@') && int(args[4], NaN) >= 1) {
         return { op: 'cache', expr: args[0], name: args[1], type: args[2], anchor: args[3].slice(1), count: int(args[4], NaN) };
       }
+      // Explicit selection among repeated stores/tests of one anchor. Keep the old
+      // first-anchor spelling unchanged; the new form always states a bounded read count.
+      if (!anchor && args.length === 6 && args[3].startsWith('@') && args[3].length > 1 && args[3] !== '@call') {
+        const count = int(args[4], NaN), anchorIndex = int(args[5], NaN);
+        if (Number.isSafeInteger(count) && count >= 1 && Number.isSafeInteger(anchorIndex) && anchorIndex >= 1) {
+          return { op: 'cache', expr: args[0], name: args[1], type: args[2], anchor: args[3].slice(1), count, anchorIndex };
+        }
+      }
       return undefined;
+    case 'nullinit':
+      return args.length === 1 && /^[A-Za-z_]\w*$/.test(args[0]) && anchor && /^(?:::)?[A-Za-z_]\w*(?:::[A-Za-z_]\w*)*$/.test(anchor)
+        ? { op: 'nullinit', name: args[0], before: anchor } : undefined;
     case 'own': {
       // `own(V,T[,N],live)`: the initializer is read, and a compile matched the original
       // with it dropped all the same.
@@ -743,7 +815,8 @@ export function parseVc8Form(text: string): Vc8Form | undefined {
         ? { op: 'clamp', name: args[0], index: i } : undefined;
     }
     case 'decl': return args.length === 2 && !anchor ? { op: 'decl', name: args[0], before: args[1] } : undefined;
-    case 'split': return args.length === 3 && !anchor ? { op: 'split', name: args[0], type: args[1], rename: args[2] } : undefined;
+    case 'split': return !anchor && (args.length === 3 || (args.length === 4 && args[3] === 'add'))
+      ? { op: 'split', name: args[0], type: args[1], rename: args[2], ...(args.length === 4 ? { add: true as const } : {}) } : undefined;
     case 'dec': {
       if (args.length !== 2 || anchor || !/^[A-Za-z_]\w*$/.test(args[0]) || !/^[1-9]\d*$/.test(args[1])) return undefined;
       const amount = Number(args[1]);
@@ -1355,13 +1428,10 @@ function doFieldCoalesce(fn: FunctionDecl, name: string, target: string): void {
     if (e.kind !== NodeKind.CallExpr) return read(e);
     const call = e as CallExpr, callee = calleeName(call.callee);
     if (!callee || types.has(callee) || !call.arguments.every(read)) return false;
-    let params = scopedLookup(selectTables?.functionParamTypes ?? {}, callee, selectTables?.enclosingSegments ?? []);
-    // alloc-macros writes this five-argument wrapper of the six-argument Fog call.
-    if (!params && callee === 'D2_REALLOC_POOL_AT') {
-      const original = selectTables?.functionParamTypes?.['Fog::Memory::ReAllocServerMemory'];
-      if (original?.length === 6) params = original.slice(0, 5);
-    }
-    return !!params && params.length === call.arguments.length && params.every(scalar);
+    const params = scopedLookup(selectTables?.functionParamTypes ?? {}, callee, selectTables?.enclosingSegments ?? [])
+      ?? selectTables?.macroSignatures?.[callee]?.parameterTypes;
+    return !!params && params.length === call.arguments.length && params.every(scalar)
+      && (selectTables?.macroSignatures?.[callee]?.implicitParameterTypes.every(scalar) ?? true);
   };
   for (const { node } of walk(fn.body!)) {
     if ([NodeKind.GotoStmt, NodeKind.LabelStmt, NodeKind.CaseStmt, NodeKind.DefaultStmt,
@@ -1425,6 +1495,22 @@ function doJoin(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'join' }>): void {
   // The five measured sites use int and int32_t. A same-width unsigned value is
   // not equivalent in C++ comparisons, shifts, overloads, or conversions.
   const signedWord = new Set(['int', 'int32_t', 'BOOL']);
+  const typeNames = new Set<string>();
+  const signedWordType = (spelling: string): boolean => {
+    if (!signedWord.has(spelling)) return false;
+    const seen = new Set<string>();
+    for (let i = 0; i < 8; i++) {
+      if (seen.has(spelling)) return false;
+      seen.add(spelling);
+      typeNames.add(spelling);
+      // Keep the known emitted word aliases, but an explicit typedef model
+      // must agree: BOOL can never stand for an unsigned, narrow or class type.
+      const target = spelling === 'int' ? undefined : selectTables?.typedefTargets?.[spelling];
+      if (target === undefined) return signedWord.has(spelling);
+      spelling = target.trim();
+    }
+    return false;
+  };
   const intoType = text(decl!.type);
   const parameters = fn.parameters.filter(p => p.name?.name === f.from);
   const prior = body.statements.slice(0, index)
@@ -1458,7 +1544,12 @@ function doJoin(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'join' }>): void {
     }
   }
   const fromType = parameters.length ? text(parameters[0].type) : text(prior[0]!.type);
-  if (!signedWord.has(intoType) || !signedWord.has(fromType)) refuse('joined values must both be signed 32-bit integers');
+  if (!signedWordType(intoType) || !signedWordType(fromType)) refuse('joined values must both be signed 32-bit integers');
+  for (const { node } of walk(body)) {
+    if (![NodeKind.TypedefDecl, NodeKind.TypeAliasDecl, NodeKind.StructDecl, NodeKind.UnionDecl, NodeKind.EnumDecl].includes(node.kind)) continue;
+    const name = (node as unknown as { name?: Identifier }).name;
+    if (name && typeNames.has(text(name))) refuse('a joined type is hidden by a local type declaration');
+  }
   if (body.statements.slice(0, index).some(s => mentions(s, f.into))) refuse(`${f.into} is named before its declaration`);
   if (body.statements.slice(index + 1).some(s => mentions(s, f.from))) refuse(`${f.from} is named after the join`);
   if (storedNames(init).has(f.from)) refuse(`${f.from} is written by the initializer`);
@@ -1514,26 +1605,93 @@ function anchors(s: Statement, a: string): boolean {
 }
 
 function doCache(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'cache' }>): void {
+  if (f.anchorIndex !== undefined && (!Number.isSafeInteger(f.anchorIndex) || f.anchorIndex < 1 || !Number.isSafeInteger(f.count) || f.count! < 1 || !f.type || !f.anchor || f.anchor === 'call')) {
+    refuse('an indexed cache needs positive anchor/read counts and a named store/test anchor');
+  }
   // `&X` caches X's address: each X is read through the local, `X.m` as `N->m`.
   const byAddress = f.type !== undefined && norm(f.expr).startsWith('&');
   const want = byAddress ? norm(f.expr).slice(1) : norm(f.expr);
   const locals = localNames(fn);
-  const isE = (n: ASTNode) => isExpression(n.kind) && text(n as Expression) === want;
+  const parents = parentsOf(fn);
+  const scopes = new Set([NodeKind.FunctionDecl, NodeKind.MethodDecl, NodeKind.LambdaExpr,
+    NodeKind.ClassDecl, NodeKind.StructDecl, NodeKind.UnionDecl]);
+  const unevaluated = new Set([NodeKind.SizeofExpr, NodeKind.AlignofExpr, NodeKind.NoexceptExpr, NodeKind.TypeidExpr,
+    NodeKind.StaticAssertDecl, NodeKind.EnumeratorDecl, NodeKind.ExprTemplateArg, NodeKind.Attribute]);
+  const nested = (n: ASTNode): boolean => {
+    for (let p = parents.get(n); p; p = parents.get(p)) if (scopes.has(p.kind)) return true;
+    return false;
+  };
+  // Identifier is also the AST kind of a declaration's name. Count and rewrite
+  // value positions only; type syntax, qualified-name pieces and constant/type
+  // queries keep their original spelling (decltype(x) differs from decltype(*p)).
+  // Grouping adds no evaluation to value caches. Address caches retain their
+  // enclosing member node so their existing dot-to-arrow rewrite stays intact.
+  const isE = (n: ASTNode): boolean => {
+    if (!byAddress && n.kind === NodeKind.ParenExpr) return false;
+    if (!isExpression(n.kind) || text(n as Expression) !== want) return false;
+    // norm deliberately follows a global when it gains a namespace. A qualified
+    // global with the same leaf name as a local is nevertheless another binding.
+    if ([...walk(n)].some(x => x.node.kind === NodeKind.QualifiedId && localDependencies.has(text(x.node)))) return false;
+    let child = n;
+    for (let p = parents.get(child); p; child = p, p = parents.get(p)) {
+      const fields = p as unknown as Record<string, unknown>;
+      if (isType(p.kind) || unevaluated.has(p.kind) || p.kind === NodeKind.QualifiedId ||
+          fields.name === child || fields.label === child || fields.target === child ||
+          (p.kind === NodeKind.CaseStmt && fields.value === child)) return false;
+      if (p.kind === NodeKind.VariableDecl && (p as VariableDecl).specifiers.some(s =>
+          s === 'constexpr' || s === 'constinit' || s === 'static' || s === 'thread_local')) return false;
+    }
+    if (nested(n)) refuse(`${f.expr} occurs in a nested scope`);
+    return true;
+  };
+  const declarations = [...walk(fn.body!)].filter(x => x.node.kind === NodeKind.VariableDecl && !nested(x.node))
+    .map(x => x.node as VariableDecl);
+  // A recorded tag may no longer be valid C++ (the live Shrine tag, for
+  // example, spells its subscript with braces). Refuse that form without
+  // sending the whole function through raw-decompile fallback.
+  let expression: Expression;
+  try { expression = parseExpr(f.expr); }
+  catch { refuse(`cannot parse cache expression ${f.expr}`); }
+  const dependencies = identifiers(expression);
+  const localDependencies = new Set([...dependencies].filter(name => locals.has(name)));
+  if ([...walk(expression)].some(x => x.node.kind === NodeKind.QualifiedId && localDependencies.has(text(x.node))))
+    refuse(`${f.expr} has an ambiguous qualified binding`);
+  for (const name of dependencies) {
+    const count = declarations.filter(d => d.name.name === name).length + fn.parameters.filter(p => p.name?.name === name).length;
+    if (count > 1) refuse(`${name} has ambiguous bindings`);
+  }
   const stores = (n: ASTNode) => {
     for (const { node } of walk(n)) {
-      if (node.kind !== NodeKind.AssignExpr) continue;
-      const l = text((node as AssignExpr).left);
-      if (l === want || identifiers((node as AssignExpr).left).has(f.name)) return true;
-      if (isId(unparen((node as AssignExpr).left)) && identifiers(parseExpr(f.expr)).has((unparen((node as AssignExpr).left) as Identifier).name)) return true;
+      const target = node.kind === NodeKind.AssignExpr ? (node as AssignExpr).left
+        : node.kind === NodeKind.PostfixExpr || (node.kind === NodeKind.UnaryExpr && ['++', '--'].includes((node as UnaryExpr).operator))
+          ? (node as UnaryExpr | PostfixExpr).operand : undefined;
+      if (!target) continue;
+      if (text(target) === want || identifiers(target).has(f.name)) return true;
+      if (isId(unparen(target)) && dependencies.has((unparen(target) as Identifier).name)) return true;
     }
     return false;
   };
+  const changesDependency = (n: ASTNode) => [...walk(n)].some(({ node }) => {
+    const target = node.kind === NodeKind.AssignExpr ? (node as AssignExpr).left
+      : node.kind === NodeKind.PostfixExpr || (node.kind === NodeKind.UnaryExpr && ['++', '--'].includes((node as UnaryExpr).operator))
+        ? (node as UnaryExpr | PostfixExpr).operand : undefined;
+    const variable = target && unparen(target);
+    return variable && isId(variable) && dependencies.has(variable.name);
+  });
   const replaceIn = (n: ASTNode): number => {
     let k = 0;
     for (const { node, slot } of [...walk(n)]) {
       if (!slot || !isE(node)) continue;
       const owner = !Array.isArray(slot.parent) ? (slot.parent as unknown as ASTNode) : undefined;
-      if (owner && owner.kind === NodeKind.AssignExpr && slot.key === 'left') refuse(`${f.expr} is stored`);
+      if (owner && ((owner.kind === NodeKind.AssignExpr && slot.key === 'left') ||
+          owner.kind === NodeKind.PostfixExpr || (owner.kind === NodeKind.UnaryExpr &&
+          ['++', '--'].includes((owner as UnaryExpr).operator)))) refuse(`${f.expr} is stored`);
+      // Keep mutations embedded in a cached expression out: `(p++, *p)`
+      // cannot read a value saved before p advanced. A later statement in
+      // the final loop body is different: existing measured tags deliberately
+      // cache its first read across the loop (TEXT_CalculateTextHeight).
+      for (let p = parents.get(node); p && isExpression(p.kind); p = parents.get(p))
+        if (changesDependency(p)) refuse(`${f.expr} changes within a cached read`);
       const id = { kind: NodeKind.Identifier, name: f.name } as Identifier;
       if (!byAddress) put(slot, id);
       else if (owner && owner.kind === NodeKind.MemberExpr && slot.key === 'object' && !(owner as unknown as { isArrow: boolean }).isArrow) {
@@ -1545,7 +1703,7 @@ function doCache(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'cache' }>): void {
     return k;
   };
   if (f.type) {
-    if (locals.has(f.name)) refuse(`${f.name} exists`);
+    freshName(fn, f.name);
     let block: CompoundStmt | undefined, at = -1;
     if (f.anchor) {
       const a = norm(f.anchor);
@@ -1561,6 +1719,15 @@ function doCache(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'cache' }>): void {
         }
         if (hits.length !== 1) refuse(`@call needs one call reading ${f.expr}, found ${hits.length}`);
         block = hits[0]!.b; at = hits[0]!.k;
+      } else if (f.anchorIndex !== undefined) {
+        const hits = blocks(fn).map(b => ({ b, positions: b.statements.flatMap((s, k) => anchors(s, a) ? [k] : []) }))
+          .filter(hit => hit.positions.length > 0);
+        // A name reused in another scope is not another lifetime of this anchor.
+        // Do not pick across branches or shadowed bindings by a traversal ordinal.
+        if (hits.length !== 1) refuse(`indexed anchor ${f.anchor} occurs in ${hits.length} blocks`);
+        const hit = hits[0], selected = hit.positions[f.anchorIndex - 1];
+        if (selected === undefined) refuse(`no anchor #${f.anchorIndex} storing or testing ${f.anchor}`);
+        block = hit.b; at = selected;
       } else {
         for (const b of blocks(fn)) {
           const k = b.statements.findIndex(s => anchors(s, a));
@@ -1579,6 +1746,27 @@ function doCache(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'cache' }>): void {
       }
       if (!block) refuse(`no block holds every ${f.expr}`);
     }
+    // The insertion is before a whole statement. A dependency declared in that
+    // statement (including another declarator) is not yet in scope/initialized.
+    // Declarations in enclosing blocks and loop/if initializers may dominate it.
+    const declaredBefore = (d: VariableDecl): boolean => {
+      let point: ASTNode = block!.statements[at];
+      for (let p = parents.get(point); p; point = p, p = parents.get(p)) {
+        if (p.kind === NodeKind.CompoundStmt) {
+          const statements = (p as CompoundStmt).statements, index = statements.indexOf(point as Statement);
+          if (index >= 0 && statements.slice(0, index).some(s => s.kind === NodeKind.DeclStmt &&
+              (s as DeclStmt).declarations.includes(d))) return true;
+        }
+        if ([NodeKind.ForStmt, NodeKind.IfStmt, NodeKind.SwitchStmt].includes(p.kind)) {
+          const node = p as unknown as { init?: ASTNode; body?: ASTNode; thenBranch?: ASTNode; elseBranch?: ASTNode };
+          if (node.init && [node.body, node.thenBranch, node.elseBranch].includes(point) &&
+              [...walk(node.init)].some(x => x.node === d)) return true;
+        }
+      }
+      return false;
+    };
+    for (const d of declarations) if (dependencies.has(d.name.name) && !declaredBefore(d))
+      refuse(`${d.name.name} is not declared before the cache`);
     const rest = block!.statements.slice(at);
     const reads = (s: ASTNode) => [...walk(s)].filter(x => isE(x.node)).length;
     // Without an anchor every read is after the local; with one, reads before it keep E.
@@ -1589,13 +1777,16 @@ function doCache(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'cache' }>): void {
     for (let k = 0; k < rest.length && seen < (f.count ?? Infinity); k++) { const r = reads(rest[k]); if (r > 0) { last = k; seen += r; } }
     if (last < 0) refuse(`${f.expr} is not read after the anchor`);
     if (f.count !== undefined && seen !== f.count) refuse(`the first ${f.count} reads of ${f.expr} do not end a statement`);
-    for (let k = 0; k < last; k++) if (stores(rest[k])) refuse(`${f.expr} changes before its last read`);
+    for (let k = 0; k < last; k++) if (stores(rest[k])) refuse(`${f.expr} changes in the cached range`);
     let n = 0;
     for (const s of rest.slice(0, last + 1)) n += replaceIn(s);
-    const decl = parse(`void __vc8f() { ${f.type} ${f.name} = ${f.expr}; }`).declarations[0] as FunctionDecl;
-    const d = decl.body!.statements[0];
+    let d: Statement;
+    try {
+      const decl = parse(`void __vc8f() { ${f.type} ${f.name} = ${f.expr}; }`).declarations[0] as FunctionDecl;
+      d = decl.body!.statements[0];
+      if (declOf(d)) (declOf(d)!).type = parseType(f.type);
+    } catch { refuse(`cannot declare ${f.type} ${f.name}`); }
     if (!declOf(d)) refuse(`cannot declare ${f.type} ${f.name}`);
-    (declOf(d)!).type = parseType(f.type);
     block!.statements.splice(at, 0, d);
     if (n === 0) refuse('nothing to read the local');
     return;
@@ -2446,7 +2637,7 @@ function doMergeTail(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'merge-tail' }>
   b.statements.splice(k + 1, between.length);
 }
 
-/** Put a shared, two-call void tail on the path that skips one invitation-style arm. */
+/** Put a shared, two-call void tail on the path that skips one guarded arm. */
 function doTailguard(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'tailguard' }>): void {
   if (text(fn.returnType) !== 'void') refuse('the function does not return void');
   const { b, k, s } = nthIf(fn, f.cond, f.index);
@@ -2519,6 +2710,60 @@ function doContinue(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'continue' }>): 
   b.statements.splice(k, 1, { ...s, condition: negateWrap(s.condition), thenBranch: cont } as IfStmt, ...arm);
 }
 
+function doInitBefore(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'initbefore' }>): void {
+  const nodes = [...walk(fn.body!)].map(x => x.node);
+  if (nodes.some(n => /Goto|Label|Asm|Seh|SEH|CoAwait|CoYield|Lambda|Try|Catch/.test(n.kind)))
+    refuse('unmodelled alternate entry or control flow');
+  if (nodes.some(n => n.kind === NodeKind.TypedefDecl || n.kind === NodeKind.TypeAliasDecl || n.kind === NodeKind.StructDecl))
+    refuse('local type bindings are not modelled');
+  const unique = (name: string) => {
+    if (fn.parameters.some(p => (p as unknown as { name?: Identifier }).name?.name === name)) refuse('a target shadows a parameter');
+    const ds = nodes.filter(n => n.kind === NodeKind.VariableDecl && (n as VariableDecl).name.name === name) as VariableDecl[];
+    if (ds.length !== 1) refuse('targets must be unique locals');
+    const d = ds[0];
+    if (d.specifiers.length || d.attributes.length || d.directInit || d.copyListInit || d.bitWidth) refuse('target is not an ordinary automatic declaration');
+    return d;
+  };
+  const scalar = unique(f.name), array = unique(f.array), scalarType = text(scalar.type);
+  if (!new Set(['int', 'signedint', 'unsignedint', 'int32_t', 'uint32_t']).has(scalarType)) refuse('initializer is not a plain integer');
+  if (selectTables?.typedefTargets?.[scalarType] && !/^(?:signed|unsigned)?\s*int$/.test(selectTables.typedefTargets[scalarType]))
+    refuse('integer alias has another binding');
+  if (Object.keys(selectTables?.structFields ?? {}).some(t => t.split('::').at(-1) === scalarType)
+      || selectTables?.unionNames?.some(t => t.split('::').at(-1) === scalarType)) refuse('integer spelling names an aggregate');
+  const init = scalar.initializer && unparen(scalar.initializer as Expression);
+  if (!init || init.kind !== NodeKind.IntegerLiteral || (init as IntegerLiteralExpr).value !== 0n) refuse('initializer is not literal zero');
+  if (array.initializer || array.type.kind !== NodeKind.ArrayType) refuse('buffer is not an uninitialized fixed array');
+  const a = array.type as import('../../../ast/nodes.js').ArrayType;
+  if (!['char', 'signedchar', 'unsignedchar'].includes(text(a.elementType))) refuse('buffer is not an ordinary byte array');
+  const size = a.size && unparen(a.size);
+  if (!size || size.kind !== NodeKind.IntegerLiteral || (size as IntegerLiteralExpr).value < 1n) refuse('array extent is not a positive literal');
+  const count = (size as IntegerLiteralExpr).value;
+  const sites: Array<{ st: Statement[]; i: number }> = [];
+  for (const b of blocks(fn)) for (let i = 1; i + 1 < b.statements.length; i++) {
+    const st = b.statements;
+    if (declOf(st[i - 1]) !== array || declOf(st[i + 1]) !== scalar || st[i].kind !== NodeKind.ExprStmt) continue;
+    const e = unparen((st[i] as ExprStmt).expression);
+    if (e.kind !== NodeKind.CallExpr) continue;
+    const c = e as CallExpr;
+    if (!['memset', '::memset', 'std::memset'].includes(text(c.callee)) || c.arguments.length !== 3
+        || mentions(st[i], f.name) || new RegExp(`\\b${f.name}\\b`).test(text(st[i]))) continue;
+    if (!isId(unparen(c.arguments[0])) || (unparen(c.arguments[0]) as Identifier).name !== f.array) continue;
+    const zero = unparen(c.arguments[1]);
+    if (zero.kind !== NodeKind.IntegerLiteral || (zero as IntegerLiteralExpr).value !== 0n) continue;
+    const n = unparen(c.arguments[2]);
+    const extent = text(n);
+    const whole = n.kind === NodeKind.IntegerLiteral && (n as IntegerLiteralExpr).value === count
+      || extent === `sizeof(${f.array})` || extent === `${count}*sizeof(${f.array}[0])`;
+    if (whole) sites.push({ st, i });
+  }
+  if (sites.length !== 1) refuse('no unique adjacent whole-buffer clear and zero initializer');
+  // A literal-zero primitive initializer has no effects or external identity. Its
+  // declaration crosses only a statement that cannot name it; no call or memory
+  // operation is reordered against any other observable operation.
+  const { st, i } = sites[0];
+  [st[i], st[i + 1]] = [st[i + 1], st[i]];
+}
+
 function doDecl(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'decl' }>): void {
   for (const b of blocks(fn)) {
     const from = b.statements.findIndex(s => declOf(s)?.name.name === f.name);
@@ -2536,6 +2781,58 @@ function doDecl(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'decl' }>): void {
     return;
   }
   refuse(`no block declares both ${f.name} and ${f.before}`);
+}
+
+function doNullinit(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'nullinit' }>): void {
+  const body = fn.body!;
+  const declarations = [...walk(body)].filter(({ node }) => node.kind === NodeKind.VariableDecl && (node as VariableDecl).name.name === f.name);
+  if (declarations.length !== 1 || fn.parameters.some(p => p.name?.name === f.name)) refuse(`${f.name} is not one unshadowed local`);
+  const from = body.statements.findIndex(s => declOf(s)?.name.name === f.name);
+  if (from < 0) refuse(`${f.name} is not an outer-block declaration`);
+  const d = declOf(body.statements[from])!;
+  if (d.specifiers.length || d.attributes.length || d.directInit || d.copyListInit || d.bitWidth) refuse(`${f.name} has declaration specifiers or special initialization`);
+  if (d.type.kind !== NodeKind.PointerType || /[<([&]|\b(?:const|volatile|restrict|_Atomic|decltype|typeof)\b/.test(emit(d.type as never))) refuse(`${f.name} is not an ordinary object pointer`);
+  if ([...walk(d.type)].some(({ node }) => [NodeKind.ArrayType, NodeKind.FunctionType, NodeKind.ReferenceType, NodeKind.RValueReferenceType, NodeKind.MemberPointerType].includes(node.kind))) refuse(`${f.name} has a complex pointee type`);
+  const value = d.initializer && unparen(d.initializer as Expression);
+  if (!value || !(value.kind === NodeKind.NullptrLiteral || value.kind === NodeKind.IntegerLiteral && (value as IntegerLiteralExpr).value === 0n)) refuse(`${f.name} is not initialized to literal null`);
+  if (addressTaken(fn, f.name)) refuse(`${f.name}'s address is taken`);
+  const before = norm(f.before);
+  if (localNames(fn).has(before)) refuse(`${f.before} names a local callable`);
+  const calls: Array<{ node: CallExpr; statement: Statement }> = [];
+  for (const statement of body.statements) {
+    if (statement.kind !== NodeKind.ExprStmt) continue;
+    const e = unparen((statement as ExprStmt).expression);
+    if (e.kind === NodeKind.CallExpr && norm(calleeName((e as CallExpr).callee) ?? '') === before) calls.push({ node: e as CallExpr, statement });
+  }
+  const allCalls = [...walk(body)].filter(({ node }) => node.kind === NodeKind.CallExpr && norm(calleeName((node as CallExpr).callee) ?? '') === before);
+  if (calls.length !== 1 || allCalls.length !== 1) refuse(`${f.before} is not one standalone outer-block call`);
+  const to = body.statements.indexOf(calls[0].statement);
+  if (to >= from) refuse(`${f.name} is not after ${f.before}`);
+  if (body.statements.slice(0, from).some(s => mentions(s, f.name))) refuse(`${f.name} is named before its declaration`);
+  for (const { node } of walk(body)) {
+    if ([NodeKind.GotoStmt, NodeKind.LabelStmt, NodeKind.LambdaExpr, NodeKind.AsmDecl, NodeKind.TryStmt, NodeKind.SehTryStmt].includes(node.kind)) refuse('nullinit does not model jumps, lambdas, assembly or exception blocks');
+    if (node.kind === NodeKind.VariableDecl) {
+      const other = node as VariableDecl;
+      if (other !== d && other.initializer && mentions(other.initializer, f.name) && emit(other.type as never).includes('&')) refuse(`${f.name} initializes a reference`);
+    }
+    const castType = (node as unknown as { type?: TypeNode }).type;
+    if (castType && /CastExpr$/.test(node.kind) && mentions(node, f.name) && emit(castType as never).includes('&')) refuse(`${f.name} is cast to a reference`);
+    if (node.kind !== NodeKind.CallExpr || !mentions(node, f.name)) continue;
+    const call = node as CallExpr;
+    if (mentions(call.callee, f.name)) refuse(`${f.name} is used as a callable`);
+    for (const arg of call.arguments) {
+      if (!mentions(arg, f.name)) continue;
+      const a = unparen(arg);
+      if (a.kind !== NodeKind.CStyleCastExpr || !isId(unparen((a as CStyleCastExpr).expression), f.name) || !/^(?:u?int(?:8|16|32|64)_t|u?intptr_t|uint|int|unsignedint|long|unsignedlong)$/.test(text((a as CStyleCastExpr).type))) refuse(`${f.name} is passed without an explicit integer value cast`);
+    }
+  }
+  for (const s of body.statements.slice(to, from)) {
+    if (s.kind === NodeKind.ExprStmt) continue;
+    const other = declOf(s);
+    if (!other || mentions(d.type, other.name.name)) refuse('nullinit crosses control, multiple or type declarations');
+  }
+  const [statement] = body.statements.splice(from, 1);
+  body.statements.splice(to, 0, statement);
 }
 
 function doSelect(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'select' }>): void {
@@ -2568,7 +2865,9 @@ function doDup(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'dup' }>): void {
   for (const b of blocks(fn)) {
     for (let k = 1; k < b.statements.length; k++) {
       const s = b.statements[k];
-      if (s.kind === NodeKind.ExprStmt && text((s as ExprStmt).expression) === w && b.statements[k - 1].kind === NodeKind.IfStmt) hits.push({ b, k });
+      if (b.statements[k - 1].kind !== NodeKind.IfStmt) continue;
+      if ((s.kind === NodeKind.ExprStmt && text((s as ExprStmt).expression) === w)
+        || (s.kind === NodeKind.DeclStmt && norm(emit(s as never)).replace(/;$/, '') === w)) hits.push({ b, k });
     }
   }
   if (hits.length !== 1) refuse(`${hits.length} statements ${f.stmt} after an if`);
@@ -2584,6 +2883,40 @@ function doDup(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'dup' }>): void {
     break;
   }
   const s = b.statements[k];
+  let tail = s;
+  let bare: Statement | undefined;
+  if (s.kind === NodeKind.DeclStmt) {
+    const d = declOf(s);
+    const spelling = d && emit(d.type as never);
+    const type = spelling?.replace(/\s+/g, '').replace(/^::/, '');
+    // Only the fixed integer spellings already known to this target, without
+    // resolving user typedefs or erasing a namespace that could name a class.
+    if (!d || !type || /\b(?:const|volatile)\b/.test(spelling!) || !RANGE[type]
+      || intType(type, false)?.w !== 4 || d.specifiers.length || d.attributes.length
+      || d.directInit || !d.initializer || d.initializer.kind === NodeKind.InitListExpr)
+      refuse('dup declaration needs one plain initialized 32-bit integer');
+    const name = d!.name.name;
+    const names = (n: ASTNode) => new RegExp(`(^|[^A-Za-z0-9_])${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}([^A-Za-z0-9_]|$)`).test(emit(n as never));
+    if (names(b.statements[k - 1]) || names(d!.initializer!)) refuse(`${name} would be captured or read before initialization`);
+    for (const { node } of walk(fn.body!)) {
+      if (node.kind === NodeKind.GotoStmt || node.kind === NodeKind.LabelStmt)
+        refuse('dup declaration does not cross control entries');
+      if (isDeclaration(node.kind) && node.kind !== NodeKind.VariableDecl
+        && node.kind !== NodeKind.ParameterDecl)
+        refuse('dup declaration does not model local type or callable declarations');
+    }
+    for (const { node } of walk(b.statements[k - 1])) {
+      if (isDeclaration(node.kind) || JUMPS.has(node.kind) || node.kind === NodeKind.CaseStmt
+        || node.kind === NodeKind.DefaultStmt || node.kind === NodeKind.TryStmt
+        || node.kind === NodeKind.SehTryStmt || node.kind === NodeKind.ThrowExpr
+        || node.kind === NodeKind.LambdaExpr || node.kind === NodeKind.PpConditionalStmt)
+        refuse('dup declaration needs arms without declarations, exits or handlers');
+    }
+    bare = cloneNode(s);
+    (declOf(bare)!).initializer = null;
+    tail = parseStmts(`${name} = 0;`)[0];
+    ((tail as ExprStmt).expression as AssignExpr).right = cloneNode(d!.initializer! as Expression);
+  }
   // S lands at the end of each arm: an arm that ends in a jump would never reach it, and a
   // name the arm declares would capture one S reads.
   for (const a of arms) {
@@ -2599,10 +2932,11 @@ function doDup(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'dup' }>): void {
   }
   for (const a of arms) {
     const blk = asBlock(a.holder[a.key]!);
-    blk.statements.push(cloneNode(s));
+    blk.statements.push(cloneNode(tail));
     a.holder[a.key] = blk;
   }
   b.statements.splice(k, 1);
+  if (bare) b.statements.splice(k - 1, 0, bare);
 }
 
 /**
@@ -2952,7 +3286,17 @@ function doClamp(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'clamp' }>): void {
   if (addressTaken(fn, f.name)) refuse(`&${f.name} is taken`);
   const reverse: Record<string, string> = { '<': '>', '<=': '>=', '>': '<', '>=': '<=' };
   const opposite: Record<string, string> = { '<': '>=', '<=': '>', '>': '<=', '>=': '<' };
-  const hits: Array<{ b: CompoundStmt; k: number; value: Expression; bound: Expression; op: string; decl?: VariableDecl; store?: AssignExpr }> = [];
+  const literalBound = (e: Expression): bigint | undefined => {
+    const n = unparen(e);
+    if (n.kind === NodeKind.UnaryExpr && ['+', '-'].includes((n as UnaryExpr).operator)) {
+      const v = literalBound((n as UnaryExpr).operand);
+      return v === undefined ? undefined : ((n as UnaryExpr).operator === '-' ? -v : v);
+    }
+    return n.kind === NodeKind.IntegerLiteral && (n as IntegerLiteralExpr).suffix === ''
+      && (n as IntegerLiteralExpr).value >= 0n && (n as IntegerLiteralExpr).value <= 0x7fffffffn
+      ? (n as IntegerLiteralExpr).value : undefined;
+  };
+  const hits: Array<{ b: CompoundStmt; k: number; value: Expression; bound: Expression; op: string; decl?: VariableDecl; store?: AssignExpr; boundFirst?: boolean; first?: Statement }> = [];
   for (const b of blocks(fn)) {
     for (let k = 0; k + 1 < b.statements.length; k++) {
       const first = b.statements[k];
@@ -2969,25 +3313,50 @@ function doClamp(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'clamp' }>): void {
       const condition = unparen(guard.condition);
       if (condition.kind !== NodeKind.BinaryExpr) continue;
       const compare = condition as BinaryExpr;
-      let op = compare.operator as string;
-      let bound: Expression;
-      if (isId(unparen(compare.left), f.name) && opposite[op]) bound = compare.right;
-      else if (isId(unparen(compare.right), f.name) && reverse[op]) {
-        bound = compare.left;
-        op = reverse[op];
-      } else continue;
       const branch = guard.thenBranch.kind === NodeKind.CompoundStmt
         ? ((guard.thenBranch as CompoundStmt).statements.length === 1 ? (guard.thenBranch as CompoundStmt).statements[0] : undefined)
         : guard.thenBranch;
       const clampStore = branch && storeOf(branch);
-      if (!clampStore || clampStore.operator !== '=' || !isId(unparen(clampStore.left), f.name) || text(clampStore.right) !== text(bound)) continue;
-      hits.push({ b, k, value, bound, op, decl: decl?.name.name === f.name ? decl : undefined, store });
+      if (!clampStore || clampStore.operator !== '=' || !isId(unparen(clampStore.left), f.name)) continue;
+      let op = compare.operator as string;
+      let bound: Expression | undefined;
+      if (isId(unparen(compare.left), f.name) && opposite[op]) bound = compare.right;
+      else if (isId(unparen(compare.right), f.name) && reverse[op]) { bound = compare.left; op = reverse[op]; }
+      const destination = { decl: decl?.name.name === f.name ? decl : undefined, store };
+      if (bound && text(clampStore.right) === text(bound)) {
+        hits.push({ b, k, value, bound, op, ...destination });
+        continue;
+      }
+      // V=L; if (E op L) V=E, with a literal bound. Keep this test's sense;
+      // tarms can choose the inverse-condition spelling of the resulting select.
+      const e = clampStore.right;
+      const limit = literalBound(value);
+      if (limit === undefined || !opposite[compare.operator]) continue;
+      let threshold: bigint | undefined;
+      if (text(unparen(compare.left)) === text(unparen(e))) { op = compare.operator; threshold = literalBound(compare.right); }
+      else if (text(unparen(compare.right)) === text(unparen(e))) { op = reverse[compare.operator]; threshold = literalBound(compare.left); }
+      else continue;
+      if (threshold === undefined) continue;
+      if (threshold !== limit) {
+        // Integer-only proof below: E > L-1 is E >= L, and E < L+1 is E <= L.
+        // This covers Ghidra's `0 < Param1` for the same literal-one lower clamp.
+        if (op === '>' && threshold + 1n === limit) op = '>=';
+        else if (op === '<' && threshold - 1n === limit) op = '<=';
+        else continue;
+      }
+      hits.push({ b, k, value: e, bound: value, op: opposite[op], boundFirst: true, first, ...destination });
     }
   }
-  if (hits.length === 0) refuse(`no adjacent clamp of ${f.name}`);
-  if (f.index === 0 && hits.length !== 1) refuse(`${hits.length} clamps of ${f.name}`);
-  if (f.index > hits.length) refuse(`no clamp #${f.index} of ${f.name}`);
-  const { b, k, value, bound, op, decl, store } = hits[(f.index || 1) - 1];
+  // Existing tags keep their selection: value-first sites retain their old
+  // indices and an unindexed tag still means the unique old site, if present.
+  // Additional bound-first sites follow those sites for explicit indexing.
+  const legacy = hits.filter(h => !h.boundFirst);
+  const ordered = [...legacy, ...hits.filter(h => h.boundFirst)];
+  const eligible = f.index === 0 && legacy.length ? legacy : ordered;
+  if (eligible.length === 0) refuse(`no adjacent clamp of ${f.name}`);
+  if (f.index === 0 && eligible.length !== 1) refuse(`${eligible.length} clamps of ${f.name}`);
+  if (f.index > eligible.length) refuse(`no clamp #${f.index} of ${f.name}`);
+  const { b, k, value, bound, op, decl, store, boundFirst, first } = eligible[(f.index || 1) - 1];
   if (effects(value) || effects(bound)) refuse('clamp expression or bound has effects');
   if (mentions(value, f.name) || mentions(bound, f.name)) refuse(`${f.name} occurs in the clamp expression or bound`);
   const readNames = new Set([...identifiers(value), ...identifiers(bound)]);
@@ -3012,6 +3381,60 @@ function doClamp(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'clamp' }>): void {
   });
   if (!promotesToInt(value, shapeOf)) refuse(`${text(value)} is not known to be an int`);
   if (!integral32(bound, shapeOf)) refuse(`${text(bound)} is not known to be a 32-bit integer`);
+  if (boundFirst) {
+    if (declared.specifiers.length) refuse('bound-first clamp destination is not an automatic local');
+    // Removing the first store must not expose V's previous value through an
+    // alias or a hidden conversion while E is evaluated. Keep this extension
+    // to ordinary integer slots and exact pointer-member reads, with a literal L.
+    const all = [...walk(fn.body!)].map(x => x.node);
+    const opaque = new Set([NodeKind.ReferenceType, NodeKind.RValueReferenceType, NodeKind.LambdaExpr,
+      NodeKind.ClassDecl, NodeKind.StructDecl, NodeKind.UnionDecl, NodeKind.TypedefDecl, NodeKind.TypeAliasDecl, NodeKind.FunctionDecl,
+      NodeKind.GotoStmt, NodeKind.LabelStmt, NodeKind.AsmDecl, NodeKind.TryStmt, NodeKind.SehTryStmt,
+      NodeKind.ForStmt, NodeKind.ForRangeStmt, NodeKind.WhileStmt, NodeKind.DoWhileStmt, NodeKind.PpConditionalStmt,
+      NodeKind.NewExpr, NodeKind.CoAwaitExpr, NodeKind.CoYieldExpr, NodeKind.CoReturnStmt]);
+    if (all.some(n => opaque.has(n.kind))) refuse('bound-first clamp has opaque control, local types or reference bindings');
+    const e = unparen(value), localTypes = localTypesOf(fn);
+    let spelling: string | undefined, objectSpelling: string | undefined;
+    if (e.kind === NodeKind.Identifier) {
+      const t = localTypes.get((e as Identifier).name);
+      if (t) spelling = emit(t as never);
+    } else if (e.kind === NodeKind.MemberExpr) {
+      const m = e as MemberExpr, object = shapeOf(m.object);
+      const base = unparen(m.object);
+      const objectType = base.kind === NodeKind.Identifier ? localTypes.get((base as Identifier).name) : undefined;
+      if (m.isArrow && objectType && object?.stars === 1 && m.member.kind === NodeKind.Identifier) {
+        spelling = tables?.structFields?.[object.base]?.[(m.member as Identifier).name];
+        objectSpelling = emit(objectType as never);
+      }
+    }
+    if (!spelling || !builtinTruthSite(fn, value, value, tables)) refuse('bound-first clamp needs an exact builtin integer slot');
+    const seenTypes = new Set<string>(), pendingTypes = [spelling!, ...(objectSpelling ? [objectSpelling] : [])];
+    while (pendingTypes.length) {
+      const s = pendingTypes.pop()!;
+      if (/\bvolatile\b|&/.test(s)) refuse('bound-first clamp source is volatile or a reference');
+      for (const word of s.match(/[A-Za-z_]\w*/g) ?? []) if (!seenTypes.has(word)) {
+        seenTypes.add(word);
+        const target = tables?.typedefTargets?.[word];
+        if (target) pendingTypes.push(target);
+      }
+    }
+    const offset = first?.location?.start.offset;
+    if (offset === undefined) refuse('bound-first clamp has no source position');
+    for (const n of all) {
+      if ((n.location?.start.offset ?? -Infinity) >= offset! || !mentions(n, f.name)) continue;
+      if (n.kind === NodeKind.CallExpr) refuse(`${f.name} may bind a reference in an earlier call`);
+      if (n.kind === NodeKind.VariableDecl && (n as VariableDecl).name.name !== f.name) {
+        const t = shapeOfNode((n as VariableDecl).type, 0, name => tables?.typedefTargets?.[name]);
+        if (!t || (t.stars === 0 && !promotesToInt({ kind: NodeKind.Identifier, name: (n as VariableDecl).name.name } as Identifier, shapeOf)))
+          refuse(`${f.name} may bind an earlier constructor or reference`);
+      }
+      if ([NodeKind.BinaryExpr, NodeKind.AssignExpr, NodeKind.UnaryExpr, NodeKind.ConditionalExpr, NodeKind.CommaExpr,
+        NodeKind.SubscriptExpr, NodeKind.InitListExpr,
+        NodeKind.CStyleCastExpr, NodeKind.FunctionalCastExpr, NodeKind.StaticCastExpr, NodeKind.ConstCastExpr,
+        NodeKind.ReinterpretCastExpr, NodeKind.DynamicCastExpr].includes(n.kind)
+        && !builtinTruthSite(fn, n, n as Expression, tables)) refuse(`${f.name} has an earlier unproved conversion or operator`);
+    }
+  }
   const select = {
     kind: NodeKind.ConditionalExpr,
     condition: { kind: NodeKind.BinaryExpr, operator: opposite[op], left: cloneNode(value), right: cloneNode(bound) },
@@ -3071,9 +3494,87 @@ function doZeroLife(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'zerolife' }>): 
   b.statements.splice(k, 2, guard, statement);
 }
 
+/**
+ * An addressed scalar can start a fresh identity only after its old identity is
+ * proved unescaped. A final outer-block reset dominates every later use; all
+ * those uses, including address operands, belong to the new local until return.
+ */
+function doSplitAddressed(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'split' }>): void {
+  const v = f.name, body = fn.body!;
+  const decls = [...walk(body)].filter(x => x.node.kind === NodeKind.VariableDecl)
+    .map(x => x.node as VariableDecl).filter(d => d.name.name === v);
+  if (decls.length !== 1 || fn.parameters.some(p => p.name?.name === v)) refuse(`${v} needs one local binding`);
+  const decl = decls[0], type = text(decl.type);
+  if (!['int', 'int32_t', 'uint32_t', 'unsigned', 'unsignedint'].includes(type) || norm(f.type) !== type
+    || decl.specifiers.length || decl.attributes.length || decl.directInit || decl.copyListInit)
+    refuse('addressed split needs the same ordinary 32-bit scalar type');
+  const at = body.statements.findIndex(s => declOf(s) === decl);
+  if (at < 0) refuse('addressed split needs an outer-block declaration');
+  if (identifiers(body).has(f.rename)) refuse(`${f.rename} is already named in the function`);
+  let replacement: Statement;
+  try {
+    const parsed = parse(`void __vc8f() { ${f.type} ${f.rename} = 0; }`).declarations[0] as FunctionDecl;
+    replacement = parsed.body!.statements[0];
+    if (declOf(replacement)?.name.name !== f.rename) refuse('the new scalar name is not a declarator');
+  } catch {
+    refuse('the new scalar name is not a declarator');
+  }
+  const parents = parentsOf(fn);
+  for (const { node } of walk(body)) {
+    if ([NodeKind.GotoStmt, NodeKind.LabelStmt, NodeKind.LambdaExpr, NodeKind.AsmDecl, NodeKind.TryStmt,
+      NodeKind.SehTryStmt, NodeKind.WhileStmt, NodeKind.DoWhileStmt, NodeKind.ForStmt, NodeKind.ForRangeStmt,
+      NodeKind.SwitchStmt, NodeKind.PpConditionalStmt, NodeKind.FunctionDecl, NodeKind.ClassDecl,
+      NodeKind.StructDecl, NodeKind.UnionDecl, NodeKind.EnumDecl, NodeKind.TypedefDecl, NodeKind.TypeAliasDecl,
+      NodeKind.UsingDecl, NodeKind.UsingDirective, NodeKind.TemplateDecl, NodeKind.TemplateType,
+      NodeKind.CoAwaitExpr, NodeKind.CoYieldExpr, NodeKind.CoReturnStmt].includes(node.kind))
+      refuse('addressed split does not model this scope, control flow or capture');
+    if (node.kind === NodeKind.CallExpr && /(?:^|::)(?:_+|__builtin_)?(?:setjmp|longjmp)(?:\d+|ex)?$/.test(calleeName((node as CallExpr).callee) ?? ''))
+      refuse('addressed split does not model nonlocal jumps');
+    if (isId(node, v)) {
+      const p = parents.get(node);
+      if (p?.kind === NodeKind.QualifiedId) refuse(`${v} also names a qualified symbol`);
+    }
+  }
+  const sites = body.statements.map((s, k) => ({ k, store: storeOf(s) }))
+    .filter(({ k, store }) => k > at && store?.operator === '=' && isId(unparen(store.left), v)
+      && unparen(store.right).kind === NodeKind.IntegerLiteral && (unparen(store.right) as IntegerLiteralExpr).value === 0n);
+  if (sites.length !== 1) refuse('addressed split needs one outer-block zero reset');
+  const { k, store } = sites[0];
+  const before = body.statements.slice(0, k), after = body.statements.slice(k + 1);
+  if (!after.some(s => addressTaken({ ...fn, body: { ...body, statements: [s] } }, v)))
+    refuse('the new lifetime has no address use');
+  // In the old lifetime allow only plain scalar stores and reads that perform a
+  // proven value conversion. In particular, an unknown call can bind V by
+  // reference even without spelling &V, so it needs a by-value integer contract.
+  for (const s of before) for (const { node } of walk(s)) {
+    if (!isId(node, v) || node === decl.name) continue;
+    let cur: ASTNode = node, p = parents.get(cur);
+    while (p?.kind === NodeKind.ParenExpr) { cur = p; p = parents.get(cur); }
+    if (p?.kind === NodeKind.AssignExpr && (p as AssignExpr).operator === '=' && (p as AssignExpr).left === cur) {
+      let storeNode: ASTNode = p, statement = parents.get(storeNode);
+      while (statement?.kind === NodeKind.ParenExpr) { storeNode = statement; statement = parents.get(storeNode); }
+      if (statement?.kind === NodeKind.ExprStmt && (statement as ExprStmt).expression === storeNode) continue;
+    }
+    if (p?.kind === NodeKind.CallExpr) {
+      const name = calleeName((p as CallExpr).callee);
+      if (!name || localNames(fn).has(name.split('::')[0])) refuse('an earlier call may capture the scalar by reference');
+    }
+    if (readWidth(fn, node, parents) === undefined) refuse(`an earlier use may observe ${v}'s identity`);
+  }
+  const d = declOf(replacement!)!;
+  d.initializer = store!.right;
+  body.statements[k] = replacement!;
+  for (const s of after) for (const { node } of walk(s)) if (isId(node, v)) node.name = f.rename;
+}
+
 function doSplit(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'split' }>): void {
+  if (f.add) {
+    const why = splitCompoundAdd(fn, f.name, f.type, f.rename, selectTables);
+    if (why) refuse(why);
+    return;
+  }
   if (localNames(fn).has(f.rename)) refuse(`${f.rename} exists`);
-  if (addressTaken(fn, f.name)) refuse(`&${f.name} is taken`);
+  if (addressTaken(fn, f.name)) { doSplitAddressed(fn, f); return; }
   const parents = parentsOf(fn);
   const inLoop = (n: ASTNode) => { for (let p = parents.get(n); p; p = parents.get(p)) if ([NodeKind.WhileStmt, NodeKind.DoWhileStmt, NodeKind.ForStmt].includes(p.kind)) return true; return false; };
   const sites: Array<{ b: CompoundStmt; k: number; end: number }> = [];
@@ -3212,6 +3713,68 @@ function deadAfter(fn: FunctionDecl, b: CompoundStmt, k: number, last: number, v
   return !blockReadsAfter(fn, b, v, k, true);
 }
 
+/** An ordinary pointer object: no implicit construction/destruction or volatile access. */
+function nestcallPointerType(type: string | undefined): boolean {
+  return !!type && /\*$/.test(type) && !/[&()[\]]|volatile/.test(type);
+}
+
+/**
+ * The extra nestcall shapes cannot rely on addressTaken alone: a local reference or
+ * a reference parameter can expose the pointer object without a written &V. Unknown
+ * parameter types refuse, as do captures and local reference declarations.
+ */
+function privatePointerLookup(fn: FunctionDecl, v: string, value: Expression): boolean {
+  const declarations = [...walk(fn.body!)].filter(x => x.node.kind === NodeKind.VariableDecl
+    && (x.node as VariableDecl).name.name === v);
+  if (declarations.length !== 1 || fn.parameters.some(p =>
+    isId((p as unknown as { name?: Identifier | null }).name, v))) return false;
+  // Unlike source-form expression matching, type identity must retain namespaces:
+  // A::Client* and B::Client* may need a pointer adjustment between them.
+  const typeKey = (s: string) => s.replace(/\s+/g, '').replace(/^::/, '');
+  const type = typeKey(emit((declarations[0].node as VariableDecl).type as never));
+  if (!nestcallPointerType(type) || addressTaken(fn, v)) return false;
+  const lookup = unparen(value) as CallExpr;
+  const lookupName = calleeName(lookup.callee);
+  const returned = lookupName && selectTables?.functionReturnTypes
+    ? scopedLookup(selectTables.functionReturnTypes, lookupName, selectTables.enclosingSegments ?? []) : undefined;
+  if (!returned || typeKey(returned) !== type) return false;
+  for (const { node } of walk(fn.body!)) {
+    if (node.kind === NodeKind.LambdaExpr || node.kind === NodeKind.FunctionDecl
+      || node.kind === NodeKind.ClassDecl || node.kind === NodeKind.StructDecl
+      || node.kind === NodeKind.AsmDecl || node.kind === NodeKind.MacroDecl) return false;
+    if (node.kind === NodeKind.VariableDecl && [...walk((node as VariableDecl).type)].some(x =>
+      x.node.kind === NodeKind.ReferenceType || x.node.kind === NodeKind.RValueReferenceType)) return false;
+    if (node.kind === NodeKind.VariableDecl) {
+      const d = node as VariableDecl;
+      if (d.initializer?.kind === NodeKind.InitListExpr && mentions(d.initializer, v)) return false;
+    }
+    if (node.kind !== NodeKind.CallExpr) continue;
+    const call = node as CallExpr;
+    const name = calleeName(call.callee);
+    const params = name && selectTables?.functionParamTypes
+      ? scopedLookup(selectTables.functionParamTypes, name, selectTables.enclosingSegments ?? []) : undefined;
+    for (let i = 0; i < call.arguments.length; i++) {
+      if (!mentions(call.arguments[i], v)) continue;
+      const type = params?.[i];
+      if (!type || !nestcallPointerType(norm(type))) return false;
+    }
+  }
+  return true;
+}
+
+/** No later label can read V or return to a previous read of it from this suffix. */
+function deadBeforeTerminalLabels(fn: FunctionDecl, b: CompoundStmt, last: number, v: string, value: Expression): boolean {
+  if (b !== fn.body || !privatePointerLookup(fn, v, value)) return false;
+  for (let i = last; i < b.statements.length; i++) {
+    const s = b.statements[i];
+    if (i > last && mentions(s, v)) return false;
+    for (const { node } of walk(s)) {
+      if (LIFE_JUMPS.has(node.kind) && node.kind !== NodeKind.LabelStmt) return false;
+    }
+  }
+  return true;
+}
+
 function doNestcall(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'nestcall' }>): void {
   const v = f.name;
   const hits: Array<{ b: CompoundStmt; k: number; value: Expression; decl?: VariableDecl }> = [];
@@ -3225,7 +3788,16 @@ function doNestcall(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'nestcall' }>): 
   if (addressTaken(fn, v)) refuse(`&${v} is taken`);
   if (!keepsValue(declaredType(fn, v))) refuse(`${v}'s type may convert the stored value`);
   if (mentions(hit.value, v)) refuse(`${v} is stored from itself`);
-  const next = b.statements[k + 1] ?? refuse('nothing follows the store');
+  let nextIndex = k + 1;
+  while (nextIndex < b.statements.length) {
+    const d = declOf(b.statements[nextIndex]);
+    if (!d || d.initializer || d.specifiers.length || d.attributes.length
+      || !nestcallPointerType(norm(emit(d.type as never))) || d.name.name === v
+      || mentions(hit.value, d.name.name)) break;
+    if (!privatePointerLookup(fn, v, hit.value)) break;
+    nextIndex++;
+  }
+  const next = b.statements[nextIndex] ?? refuse('nothing follows the store');
   // The expression the call moves into: the statement's own, never a loop's.
   let root: Expression | undefined;
   if (next.kind === NodeKind.ExprStmt) root = (next as ExprStmt).expression;
@@ -3306,7 +3878,8 @@ function doNestcall(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'nestcall' }>): 
       default: refuse(`the call cannot go under ${p.kind}`);
     }
   }
-  if (!deadAfter(fn, b, k, k + 1, v)) refuse(`${v} is read after the next statement`);
+  if (!deadAfter(fn, b, k, nextIndex, v) && !deadBeforeTerminalLabels(fn, b, nextIndex, v, hit.value))
+    refuse(`${v} is read after the next statement`);
   put(uses[0].slot!, cloneNode(hit.value));
   if (hit.decl && mentionsOutsideDecl(fn, v)) hit.decl.initializer = null;
   else b.statements.splice(k, 1);
@@ -5104,10 +5677,12 @@ function doRetbase(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'retbase' }>): vo
 }
 
 const APPLY: { [K in Vc8Form['op']]: (fn: FunctionDecl, f: Extract<Vc8Form, { op: K }>) => void } = {
+  fieldalias: (fn, f) => { if (!restoreFieldAliasStore(fn, f.name, selectTables)) refuse(`no proved field-address store for ${f.name}`); },
+  guardchoice: (fn, f) => { const why = zeroRejectChoice(fn, f.first, f.second, selectTables); if (why) refuse(why); },
   zerolife: doZeroLife,
   nullfault32: doNullfault32,
   swdefault: (fn, f) => { const why = restoreSwitchDefault(fn, f.expr, f.values, f.index, selectTables); if (why) refuse(why); },
-  seq: doSeq, fold: doFold, join: doJoin, coalesce: doCoalesce, recordwalk: doRecordwalk, cache: doCache, own: doOwn, guards: doGuards, 'merge-guards': doMergeGuards,
+  initbefore: doInitBefore, seq: doSeq, fold: doFold, join: doJoin, coalesce: doCoalesce, recordwalk: doRecordwalk, cache: doCache, own: doOwn, guards: doGuards, 'merge-guards': doMergeGuards, nullinit: doNullinit,
   retval: doRetval, branchret: doBranchret, width: doWidth, boolflag: doBoolflag, retwiden: doRetwiden, arms: doArms,
   nest: doNest, 'merge-tail': doMergeTail, tailguard: doTailguard, tailcopy: doTailcopy, continue: doContinue, dup: doDup, tarms: doTarms, zero: doZero, nonzero: doNonzero,
   bool: doBool,
@@ -5179,6 +5754,14 @@ export function applyVc8Forms(tu: TranslationUnit, forms: Array<{ form: Vc8Form;
     prefixUsed = new Set();
     try {
       if (!fn) refuse('no function body');
+      if (form.op === 'initbefore') for (const { node } of walk(next)) {
+        if (node.kind === NodeKind.TemplateDecl) refuse('template type bindings are not modelled');
+        const named = node as unknown as { name?: Identifier; type?: TypeNode };
+        if (!['int32_t', 'uint32_t'].includes(named.name?.name ?? '')) continue;
+        if ([NodeKind.StructDecl, NodeKind.ClassDecl, NodeKind.UnionDecl].includes(node.kind)) refuse('integer spelling names an aggregate');
+        if ([NodeKind.TypedefDecl, NodeKind.TypeAliasDecl].includes(node.kind)
+            && (!named.type || !['int', 'signedint', 'unsignedint'].includes(text(named.type)))) refuse('integer alias has another binding');
+      }
       (APPLY[form.op] as (fn: FunctionDecl, f: Vc8Form) => void)(fn!, respellForm(fn!, form));
       cur = next;
       onSite?.({ form, tag, applied: true, ...(prefixUsed.size ? { prefix: [...prefixUsed] } : {}) });

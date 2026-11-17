@@ -2143,6 +2143,14 @@ export class CppEmitter {
     }
   }
 
+  private emitStatementCondition(expr: Expression): void {
+    let inner = expr;
+    while (inner.kind === NodeKind.ParenExpr) inner = (inner as ParenExpr).expression;
+    // The statement supplies the outer parentheses. Keep grouping inside the
+    // comma expression, and leave argument/initializer parentheses to emitParenExpr.
+    this.emitNode(this.isCommaOperatorExpr(inner) ? inner : expr);
+  }
+
   private emitIfStmt(node: IfStmt): void {
     if (node.isConstexpr) {
       this.write('if constexpr');
@@ -2160,7 +2168,7 @@ export class CppEmitter {
       this.write(' ');
     }
 
-    this.emitNode(node.condition);
+    this.emitStatementCondition(node.condition);
     if (this.style.spaceInsideParens) this.write(' ');
     this.write(')');
 
@@ -2277,7 +2285,7 @@ export class CppEmitter {
       this.write(' ');
     }
 
-    this.emitNode(node.condition);
+    this.emitStatementCondition(node.condition);
     if (this.style.spaceInsideParens) this.write(' ');
     this.write(') ');
     this.emitNode(node.body);
@@ -2318,7 +2326,7 @@ export class CppEmitter {
     if (this.style.spaceAfterKeyword) this.write(' ');
     this.write('(');
     if (this.style.spaceInsideParens) this.write(' ');
-    this.emitNode(node.condition);
+    this.emitStatementCondition(node.condition);
     if (this.style.spaceInsideParens) this.write(' ');
     this.write(')');
     this.emitControlFlowBody(node.body);
