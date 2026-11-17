@@ -211,6 +211,13 @@ import { builtinTruthSite } from './truth-form-safety.js';
  *                        and L have stable nonvolatile reads; this AST has no global or
  *                        member declaration facts to prove that property by itself.
  *
+ *   initbefore(V,A)      `char A[N]; memset(A,0,sizeof(A)); int V=0;` stages the
+ *                        private integer initializer immediately before the clear. The
+ *                        three statements must be adjacent in one block; both names
+ *                        unique automatic locals, N a positive literal, the clear the
+ *                        exact whole byte array, and V a nonvolatile primitive integer.
+ *                        Alias/class types and unmodelled control flow refuse. Neither
+ *                        name changes, and the array declaration stays first.
  *   decl(V,W)            the declaration of V without an initializer moves to just before
  *                        the declaration of W in its block; refused when a statement it
  *                        moves past names V.
@@ -476,6 +483,7 @@ export type Vc8Form =
   | { op: 'nullfault32' }
   | { op: 'swdefault'; expr: string; values: string[]; index?: number }
   | { op: 'seq'; targets: string[]; index?: number }
+  | { op: 'initbefore'; name: string; array: string }
   | { op: 'fold'; name: string }
   | { op: 'join'; into: string; from: string }
   | { op: 'coalesce'; name: string; from?: string }
@@ -589,7 +597,7 @@ export interface Vc8FormOptions {
   selectTables?: Vc8FormTables;
 }
 
-const OPS = new Set(['fieldalias', 'zerolife', 'nullfault32', 'swdefault', 'seq', 'fold', 'join', 'coalesce', 'recordwalk', 'cache', 'own', 'guards', 'merge-guards', 'retval', 'branchret', 'width', 'boolflag', 'retwiden', 'arms', 'guardchoice',
+const OPS = new Set(['fieldalias', 'zerolife', 'nullfault32', 'swdefault', 'seq', 'fold', 'join', 'coalesce', 'recordwalk', 'cache', 'own', 'guards', 'merge-guards', 'retval', 'branchret', 'width', 'boolflag', 'retwiden', 'arms', 'guardchoice', 'initbefore',
   'nest', 'merge-tail', 'tailguard', 'tailcopy', 'continue', 'dup', 'tarms', 'zero', 'nonzero', 'bool', 'cmp', 'swap', 'ifsel', 'clamp', 'split', 'select', 'decl', 'unselect', 'tsel', 'hoist',
   'nestcall', 'fill', 'elems', 'copy', 'shift', 'ptrwalk', 'rowptr', 'acc', 'retvar', 'onecall', 'roundup', 'swmerge', 'switch', 'dec', 'opas', 'range', 'castout', 'signbit', 'nullfield', 'zinit', 'znew', 'swclamp', 'retbase', 'postdec']);
 
@@ -623,6 +631,8 @@ export function parseVc8Form(text: string): Vc8Form | undefined {
   const anchor = args.length > 0 && args[args.length - 1].startsWith('@') ? args.pop()!.slice(1) : undefined;
   const int = (s: string | undefined, d: number) => (s === undefined || s === '' ? d : /^\d+$/.test(s) ? Number(s) : NaN);
   switch (m[1]) {
+    case 'initbefore': return args.length === 2 && !anchor && args.every(a => /^[A-Za-z_]\w*$/.test(a) && !isKeywordString(a)) && args[0] !== args[1]
+      ? { op: 'initbefore', name: args[0], array: args[1] } : undefined;
     case 'zerolife': return args.length === 1 && !anchor && /^[A-Za-z_]\w*$/.test(args[0]) && !isKeywordString(args[0])
       ? { op: 'zerolife', name: args[0] } : undefined;
     case 'swdefault': {
@@ -2681,6 +2691,60 @@ function doContinue(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'continue' }>): 
   if (why) refuse(why);
   const cont = { kind: NodeKind.CompoundStmt, statements: [{ kind: NodeKind.ContinueStmt } as unknown as Statement] } as unknown as CompoundStmt;
   b.statements.splice(k, 1, { ...s, condition: negateWrap(s.condition), thenBranch: cont } as IfStmt, ...arm);
+}
+
+function doInitBefore(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'initbefore' }>): void {
+  const nodes = [...walk(fn.body!)].map(x => x.node);
+  if (nodes.some(n => /Goto|Label|Asm|Seh|SEH|CoAwait|CoYield|Lambda|Try|Catch/.test(n.kind)))
+    refuse('unmodelled alternate entry or control flow');
+  if (nodes.some(n => n.kind === NodeKind.TypedefDecl || n.kind === NodeKind.TypeAliasDecl || n.kind === NodeKind.StructDecl))
+    refuse('local type bindings are not modelled');
+  const unique = (name: string) => {
+    if (fn.parameters.some(p => (p as unknown as { name?: Identifier }).name?.name === name)) refuse('a target shadows a parameter');
+    const ds = nodes.filter(n => n.kind === NodeKind.VariableDecl && (n as VariableDecl).name.name === name) as VariableDecl[];
+    if (ds.length !== 1) refuse('targets must be unique locals');
+    const d = ds[0];
+    if (d.specifiers.length || d.attributes.length || d.directInit || d.copyListInit || d.bitWidth) refuse('target is not an ordinary automatic declaration');
+    return d;
+  };
+  const scalar = unique(f.name), array = unique(f.array), scalarType = text(scalar.type);
+  if (!new Set(['int', 'signedint', 'unsignedint', 'int32_t', 'uint32_t']).has(scalarType)) refuse('initializer is not a plain integer');
+  if (selectTables?.typedefTargets?.[scalarType] && !/^(?:signed|unsigned)?\s*int$/.test(selectTables.typedefTargets[scalarType]))
+    refuse('integer alias has another binding');
+  if (Object.keys(selectTables?.structFields ?? {}).some(t => t.split('::').at(-1) === scalarType)
+      || selectTables?.unionNames?.some(t => t.split('::').at(-1) === scalarType)) refuse('integer spelling names an aggregate');
+  const init = scalar.initializer && unparen(scalar.initializer as Expression);
+  if (!init || init.kind !== NodeKind.IntegerLiteral || (init as IntegerLiteralExpr).value !== 0n) refuse('initializer is not literal zero');
+  if (array.initializer || array.type.kind !== NodeKind.ArrayType) refuse('buffer is not an uninitialized fixed array');
+  const a = array.type as import('../../../ast/nodes.js').ArrayType;
+  if (!['char', 'signedchar', 'unsignedchar'].includes(text(a.elementType))) refuse('buffer is not an ordinary byte array');
+  const size = a.size && unparen(a.size);
+  if (!size || size.kind !== NodeKind.IntegerLiteral || (size as IntegerLiteralExpr).value < 1n) refuse('array extent is not a positive literal');
+  const count = (size as IntegerLiteralExpr).value;
+  const sites: Array<{ st: Statement[]; i: number }> = [];
+  for (const b of blocks(fn)) for (let i = 1; i + 1 < b.statements.length; i++) {
+    const st = b.statements;
+    if (declOf(st[i - 1]) !== array || declOf(st[i + 1]) !== scalar || st[i].kind !== NodeKind.ExprStmt) continue;
+    const e = unparen((st[i] as ExprStmt).expression);
+    if (e.kind !== NodeKind.CallExpr) continue;
+    const c = e as CallExpr;
+    if (!['memset', '::memset', 'std::memset'].includes(text(c.callee)) || c.arguments.length !== 3
+        || mentions(st[i], f.name) || new RegExp(`\\b${f.name}\\b`).test(text(st[i]))) continue;
+    if (!isId(unparen(c.arguments[0])) || (unparen(c.arguments[0]) as Identifier).name !== f.array) continue;
+    const zero = unparen(c.arguments[1]);
+    if (zero.kind !== NodeKind.IntegerLiteral || (zero as IntegerLiteralExpr).value !== 0n) continue;
+    const n = unparen(c.arguments[2]);
+    const extent = text(n);
+    const whole = n.kind === NodeKind.IntegerLiteral && (n as IntegerLiteralExpr).value === count
+      || extent === `sizeof(${f.array})` || extent === `${count}*sizeof(${f.array}[0])`;
+    if (whole) sites.push({ st, i });
+  }
+  if (sites.length !== 1) refuse('no unique adjacent whole-buffer clear and zero initializer');
+  // A literal-zero primitive initializer has no effects or external identity. Its
+  // declaration crosses only a statement that cannot name it; no call or memory
+  // operation is reordered against any other observable operation.
+  const { st, i } = sites[0];
+  [st[i], st[i + 1]] = [st[i + 1], st[i]];
 }
 
 function doDecl(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'decl' }>): void {
@@ -5544,7 +5608,7 @@ const APPLY: { [K in Vc8Form['op']]: (fn: FunctionDecl, f: Extract<Vc8Form, { op
   zerolife: doZeroLife,
   nullfault32: doNullfault32,
   swdefault: (fn, f) => { const why = restoreSwitchDefault(fn, f.expr, f.values, f.index, selectTables); if (why) refuse(why); },
-  seq: doSeq, fold: doFold, join: doJoin, coalesce: doCoalesce, recordwalk: doRecordwalk, cache: doCache, own: doOwn, guards: doGuards, 'merge-guards': doMergeGuards,
+  initbefore: doInitBefore, seq: doSeq, fold: doFold, join: doJoin, coalesce: doCoalesce, recordwalk: doRecordwalk, cache: doCache, own: doOwn, guards: doGuards, 'merge-guards': doMergeGuards,
   retval: doRetval, branchret: doBranchret, width: doWidth, boolflag: doBoolflag, retwiden: doRetwiden, arms: doArms,
   nest: doNest, 'merge-tail': doMergeTail, tailguard: doTailguard, tailcopy: doTailcopy, continue: doContinue, dup: doDup, tarms: doTarms, zero: doZero, nonzero: doNonzero,
   bool: doBool,
@@ -5616,6 +5680,14 @@ export function applyVc8Forms(tu: TranslationUnit, forms: Array<{ form: Vc8Form;
     prefixUsed = new Set();
     try {
       if (!fn) refuse('no function body');
+      if (form.op === 'initbefore') for (const { node } of walk(next)) {
+        if (node.kind === NodeKind.TemplateDecl) refuse('template type bindings are not modelled');
+        const named = node as unknown as { name?: Identifier; type?: TypeNode };
+        if (!['int32_t', 'uint32_t'].includes(named.name?.name ?? '')) continue;
+        if ([NodeKind.StructDecl, NodeKind.ClassDecl, NodeKind.UnionDecl].includes(node.kind)) refuse('integer spelling names an aggregate');
+        if ([NodeKind.TypedefDecl, NodeKind.TypeAliasDecl].includes(node.kind)
+            && (!named.type || !['int', 'signedint', 'unsignedint'].includes(text(named.type)))) refuse('integer alias has another binding');
+      }
       (APPLY[form.op] as (fn: FunctionDecl, f: Vc8Form) => void)(fn!, respellForm(fn!, form));
       cur = next;
       onSite?.({ form, tag, applied: true, ...(prefixUsed.size ? { prefix: [...prefixUsed] } : {}) });
