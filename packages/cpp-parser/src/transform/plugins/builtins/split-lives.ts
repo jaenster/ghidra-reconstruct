@@ -1669,6 +1669,21 @@ export function splitLives(fn: FunctionDecl, o: SplitLivesOptions): Statement[] 
         }
       }
 
+      // A variable whose address a call is handed lives in memory for VC8 from entry to
+      // exit: every store of every life goes to its slot, and a value that is only passed on
+      // is still stored (LinkPortal 0056cf40 stores each room it finds into [EBP+0xc]). A
+      // local of its own per life would be a register value without those stores, so the
+      // lives of one type stay one variable, as the source had them.
+      if (placeholders.size > 0) {
+        const byType = new Map<string, string>();
+        for (const m of moves) {
+          const key = m.spelling;
+          const first = byType.get(key);
+          if (first === undefined) byType.set(key, m.local);
+          else { taken.delete(m.local); m.local = first; }
+        }
+      }
+
       /**
        * A step of a moved life, from the rebuilt node: a pointer life steps its address -
        * by elements where the step is a multiple of what it points at, in bytes through
@@ -1878,7 +1893,8 @@ export function splitLives(fn: FunctionDecl, o: SplitLivesOptions): Statement[] 
       let rewritten = restoreAddresses(rebuild(work) as Statement[], placeholders);
 
       if (overlay) {
-        statements = slotUnion(rewritten, v, declaredType, moves.map(m => ({ name: m.local, type: m.type })), taken);
+        const members = moves.filter((m, i) => moves.findIndex(x => x.local === m.local) === i);
+        statements = slotUnion(rewritten, v, declaredType, members.map(m => ({ name: m.local, type: m.type })), taken);
         // The lives are members now, no longer names another variable's evidence can use.
         declared.delete(v);
         changed = true;
@@ -1902,7 +1918,7 @@ export function splitLives(fn: FunctionDecl, o: SplitLivesOptions): Statement[] 
           declared.delete(v);
         }
       }
-      const decls = moves.map(m => Stmt.declStmt([Decl.variable(m.local, m.type)]) as unknown as Statement);
+      const decls = moves.filter((m, i) => moves.findIndex(x => x.local === m.local) === i).map(m => Stmt.declStmt([Decl.variable(m.local, m.type)]) as unknown as Statement);
       // After the bare declarations: one with an initializer may already use a new local.
       let at = 0;
       while (at < rewritten.length && rewritten[at].kind === NodeKind.DeclStmt

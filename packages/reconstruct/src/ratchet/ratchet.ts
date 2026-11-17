@@ -17,6 +17,7 @@ import { bodyHash, type RatchetRecord, type RecordKind, type StoredBody } from '
 import type { SymbolIndex } from './symbol-index.js';
 import { TokenKind } from '@ghidra-mcp/cpp-parser';
 import { definitionSignature, lexTokens, misparsedTypes, type FunctionExtent } from './scan.js';
+import { neutralParamRetype, neutralReturnRetype } from './neutral.js';
 
 export interface Located {
   file: string;
@@ -309,11 +310,15 @@ export function applyRecords(index: SymbolIndex, records: RatchetRecord[], opts:
       const sig = previous
         ? { paramTypes: sig0.paramTypes?.map(t => renameTypeSpelling(t, previous)!), ret: renameTypeSpelling(sig0.ret, previous) }
         : sig0;
-      if (sig.ret !== undefined && now?.retText !== undefined && now.retText !== sig.ret) retyped.push(`returns ${now.retText}, was ${sig.ret}`);
+      // A retype the stored body cannot see (neutral.ts) is no reason to refuse it.
+      if (sig.ret !== undefined && now?.retText !== undefined && now.retText !== sig.ret
+        && !neutralReturnRetype(m.scan!, sig.ret, now.retText)) retyped.push(`returns ${now.retText}, was ${sig.ret}`);
       if (sig.paramTypes && now?.paramTypes && sig.paramTypes.length === now.paramTypes.length) {
         sig.paramTypes.forEach((t, k) => {
           const j = pm.map[k];
-          if (t !== now.paramTypes![j]) retyped.push(`parameter ${k} retyped: ${t} -> ${now.paramTypes![j]}`);
+          if (t !== now.paramTypes![j] && !neutralParamRetype(m.scan!, m.bindings!, k, t, now.paramTypes![j])) {
+            retyped.push(`parameter ${k} retyped: ${t} -> ${now.paramTypes![j]}`);
+          }
         });
       }
       if (retyped.length > 0) { errors.push({ m, errors: retyped }); continue; }
