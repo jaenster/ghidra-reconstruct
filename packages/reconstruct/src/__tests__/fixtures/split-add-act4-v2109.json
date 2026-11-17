@@ -1,0 +1,622 @@
+{
+  "fn": {
+    "name": "DRLGOUTDOOR_SpawnAct4OutdoorPresets",
+    "address": "0067e6a0",
+    "entryPoint": "0067e6a0",
+    "signature": "void DRLGOUTDOOR_SpawnAct4OutdoorPresets(D2DrlgLevelStrc * pLevel)",
+    "returnType": "void",
+    "callingConvention": "__cdecl",
+    "size": 402,
+    "isThunk": false,
+    "isExternal": false,
+    "hasVarArgs": false,
+    "namespace": "D2Common::Drlg::Outdoors",
+    "comment": "@function DRLGOUTDOOR_SpawnAct4OutdoorPresets\n@address Game.exe.ram:0067e6a0\n@date 2026.06.10\n@params\n  pLevel: ESI:4 (D2DrlgLevelStrc *)\n@description Spawns outdoor presets for Act4 City of Damned / Plains of Despair.",
+    "sourceFile": null,
+    "sourceLine": null,
+    "sourceInfo": null,
+    "parameters": [
+      {
+        "name": "pLevel",
+        "dataType": "D2DrlgLevelStrc *",
+        "size": 4,
+        "ordinal": 0,
+        "storage": "ESI:4",
+        "stackOffset": null,
+        "resolvedType": null
+      }
+    ],
+    "localVariables": [
+      {
+        "name": "nPresetBaseA",
+        "dataType": "int",
+        "size": 4,
+        "storage": "EDI:4",
+        "stackOffset": null,
+        "resolvedType": "int"
+      },
+      {
+        "name": "nPresetBaseB",
+        "dataType": "int",
+        "size": 4,
+        "storage": "HASH:5f721a8cff:4",
+        "stackOffset": null,
+        "resolvedType": "int"
+      }
+    ],
+    "tags": [
+      {
+        "type": "llm-artifact-fix"
+      }
+    ],
+    "decompiled": "\n/* WARNING: Enum \"eCollisionFlags\": Some values do not have unique names */\n/* WARNING: Enum \"eD2TimerType\": Some values do not have unique names */\n/* WARNING: Enum \"eD2TimerTypeDWORD\": Some values do not have unique names */\n/* @function DRLGOUTDOOR_SpawnAct4OutdoorPresets\n   @address Game.exe.ram:0067e6a0\n   @date 2026.06.10\n   @params\n     pLevel: ESI:4 (D2DrlgLevelStrc *)\n   @description Spawns outdoor presets for Act4 City of Damned / Plains of Despair. */\n\nvoid __cdecl D2Common::Drlg::Outdoors::DRLGOUTDOOR_SpawnAct4OutdoorPresets(D2DrlgLevelStrc *pLevel)\n\n{\n  int nPresetBaseA;\n  int nPresetBaseB;\n  \n  if (pLevel->eD2LevelId == 0x6a) {\n    D2Common::Drlg::Outdoors::SpawnOutdoorLevelPreset(pLevel,0x32b,-1,0,'\\x0f');\n  }\n  nPresetBaseA = D2Common::Drlg::OutSiege::gaAct5SceneryPresetTable_0[0][pLevel->eD2LevelId + 4];\n  nPresetBaseB = D2Common::Drlg::OutSiege::gaAct5SceneryPresetTable_0[0][pLevel->eD2LevelId + 1];\n  D2Common::Drlg::Outdoors::SpawnOutdoorLevelPreset(pLevel,nPresetBaseA,-1,0,'\\x0f');\n  D2Common::Drlg::Outdoors::SpawnOutdoorLevelPreset(pLevel,nPresetBaseA + 1,-1,0,'\\x0f');\n  D2Common::Drlg::Outdoors::SpawnOutdoorLevelPreset(pLevel,nPresetBaseA + 1,-1,0,'\\x0f');\n  D2Common::Drlg::Outdoors::SpawnOutdoorLevelPreset(pLevel,nPresetBaseA + 2,-1,0,'\\x0f');\n  D2Common::Drlg::Outdoors::SpawnOutdoorLevelPreset(pLevel,nPresetBaseA + 2,-1,0,'\\x0f');\n  D2Common::Drlg::Outdoors::SpawnOutdoorLevelPreset(pLevel,nPresetBaseA + 3,-1,0,'\\x0f');\n  D2Common::Drlg::Outdoors::SpawnOutdoorLevelPreset(pLevel,nPresetBaseA + 3,-1,0,'\\x0f');\n  if (pLevel->eD2LevelId == 0x69) {\n    D2Common::Drlg::Outdoors::SpawnOutdoorLevelPreset(pLevel,0x336,-1,0,'\\x0f');\n  }\n  nPresetBaseA = nPresetBaseA + 4;\n  D2Common::Drlg::Outdoors::SpawnOutdoorLevelPreset(pLevel,nPresetBaseA,-1,0,'\\x0f');\n  D2Common::Drlg::Outdoors::SpawnOutdoorLevelPreset(pLevel,nPresetBaseA,-1,0,'\\x0f');\n  D2Common::Drlg::Outdoors::SpawnOutdoorLevelPreset(pLevel,nPresetBaseA,-1,0,'\\x0f');\n  D2Common::Drlg::Outdoors::SpawnOutdoorLevelPreset(pLevel,nPresetBaseA,-1,0,'\\x0f');\n  D2Common::Drlg::Outdoors::SpawnOutdoorLevelPreset(pLevel,nPresetBaseB,-1,0,'\\x0f');\n  D2Common::Drlg::Outdoors::SpawnOutdoorLevelPreset(pLevel,nPresetBaseB + 1,-1,0,'\\x0f');\n  D2Common::Drlg::Outdoors::SpawnOutdoorLevelPreset(pLevel,nPresetBaseB + 1,-1,0,'\\x0f');\n  D2Common::Drlg::Outdoors::SpawnOutdoorLevelPreset(pLevel,nPresetBaseB + 2,-1,0,'\\x0f');\n  D2Common::Drlg::Outdoors::SpawnOutdoorLevelPreset(pLevel,nPresetBaseB + 2,-1,0,'\\x0f');\n  nPresetBaseB = nPresetBaseB + 3;\n  D2Common::Drlg::Outdoors::SpawnOutdoorLevelPreset(pLevel,nPresetBaseB,-1,0,'\\x0f');\n  D2Common::Drlg::Outdoors::SpawnOutdoorLevelPreset(pLevel,nPresetBaseB,-1,0,'\\x0f');\n  D2Common::Drlg::Outdoors::SpawnOutdoorLevelPreset(pLevel,nPresetBaseB,-1,0,'\\x0f');\n  D2Common::Drlg::Outdoors::SpawnOutdoorLevelPreset(pLevel,nPresetBaseB,-1,0,'\\x0f');\n  return;\n}\n\n",
+    "operandRefs": {
+      "refs": [
+        {
+          "ins": "0067e6ca",
+          "op": 1,
+          "to": "006f2110",
+          "type": "READ",
+          "encoded": false
+        },
+        {
+          "ins": "0067e6d0",
+          "op": 1,
+          "to": "006f2104",
+          "type": "READ",
+          "encoded": false
+        }
+      ],
+      "derived": [],
+      "scalars": [
+        {
+          "ins": "0067e6ca",
+          "op": 1,
+          "value": "006f22b0",
+          "immediate": false
+        },
+        {
+          "ins": "0067e6d0",
+          "op": 1,
+          "value": "006f22a4",
+          "immediate": false
+        }
+      ]
+    }
+  },
+  "callees": [
+    {
+      "name": "SpawnOutdoorLevelPreset",
+      "address": "00674730",
+      "entryPoint": "00674730",
+      "signature": "BOOL SpawnOutdoorLevelPreset(D2DrlgLevelStrc * pLevel, int32_t nLevelPrestId, int32_t nRand, int32_t nOffset, char nFlags)",
+      "returnType": "BOOL",
+      "callingConvention": "__fastcall",
+      "size": 477,
+      "isThunk": false,
+      "isExternal": false,
+      "hasVarArgs": false,
+      "namespace": "D2Common::Drlg::Outdoors",
+      "comment": "@function SpawnOutdoorLevelPreset\n@address Game.exe.ram:00674730\n@date 2026.09.05\n@calling __fastcall\n@description Outdoor DRLG preset placement that tries cells in a fully randomized order: builds a shuffle table of every interior grid cell, Fisher-Yates-shuffles it using pLevel->sSeed, then walks the shuffled cells calling TestOutdoorLevelPreset and, on the first cell that passes, calls SpawnOutdoorLevelPresetEx and returns TRUE. Returns FALSE if no cell is valid. Mutates pLevel->sSeed. Contrast with SpawnPresetFarAway which picks the farthest valid cell instead of the first random one.",
+      "sourceFile": null,
+      "sourceLine": null,
+      "sourceInfo": null,
+      "parameters": [
+        {
+          "name": "pLevel",
+          "dataType": "D2DrlgLevelStrc *",
+          "size": 4,
+          "ordinal": 0,
+          "storage": "ECX:4",
+          "stackOffset": null,
+          "resolvedType": null
+        },
+        {
+          "name": "nLevelPrestId",
+          "dataType": "int32_t",
+          "size": 4,
+          "ordinal": 1,
+          "storage": "EDX:4",
+          "stackOffset": null,
+          "resolvedType": null
+        },
+        {
+          "name": "nRand",
+          "dataType": "int32_t",
+          "size": 4,
+          "ordinal": 2,
+          "storage": "Stack[0x4]:4",
+          "stackOffset": 4,
+          "resolvedType": null
+        },
+        {
+          "name": "nOffset",
+          "dataType": "int32_t",
+          "size": 4,
+          "ordinal": 3,
+          "storage": "Stack[0x8]:4",
+          "stackOffset": 8,
+          "resolvedType": null
+        },
+        {
+          "name": "nFlags",
+          "dataType": "char",
+          "size": 1,
+          "ordinal": 4,
+          "storage": "Stack[0xc]:1",
+          "stackOffset": 12,
+          "resolvedType": null
+        }
+      ],
+      "localVariables": [
+        {
+          "name": "nGridWidth",
+          "dataType": "int",
+          "size": 4,
+          "storage": "EBX:4",
+          "stackOffset": null,
+          "resolvedType": "int"
+        },
+        {
+          "name": "nTotalCells",
+          "dataType": "uint",
+          "size": 4,
+          "storage": "EDI:4",
+          "stackOffset": null,
+          "resolvedType": "uint"
+        },
+        {
+          "name": "i",
+          "dataType": "int",
+          "size": 4,
+          "storage": "ECX:4",
+          "stackOffset": null,
+          "resolvedType": "int"
+        },
+        {
+          "name": "nCellY",
+          "dataType": "int",
+          "size": 4,
+          "storage": "EAX:4",
+          "stackOffset": null,
+          "resolvedType": "int"
+        },
+        {
+          "name": "nCellX",
+          "dataType": "int",
+          "size": 4,
+          "storage": "EDX:4",
+          "stackOffset": null,
+          "resolvedType": "int"
+        },
+        {
+          "name": "nRandIdxA",
+          "dataType": "uint",
+          "size": 4,
+          "storage": "ECX:4",
+          "stackOffset": null,
+          "resolvedType": "uint"
+        },
+        {
+          "name": "nRandIdxB",
+          "dataType": "uint",
+          "size": 4,
+          "storage": "EDX:4",
+          "stackOffset": null,
+          "resolvedType": "uint"
+        },
+        {
+          "name": "uSeedLow",
+          "dataType": "BOOL",
+          "size": 4,
+          "storage": "EAX:4",
+          "stackOffset": null,
+          "resolvedType": "BOOL"
+        },
+        {
+          "name": "bCanPlace",
+          "dataType": "BOOL",
+          "size": 4,
+          "storage": "EAX:4",
+          "stackOffset": null,
+          "resolvedType": "BOOL"
+        },
+        {
+          "name": "nShuffleCount",
+          "dataType": "uint",
+          "size": 4,
+          "storage": "Stack[-0x8]:4",
+          "stackOffset": -8,
+          "resolvedType": "uint"
+        },
+        {
+          "name": "nLvlPrestId",
+          "dataType": "int32_t",
+          "size": 4,
+          "storage": "Stack[-0xc]:4",
+          "stackOffset": -12,
+          "resolvedType": "int32_t"
+        },
+        {
+          "name": "nSwapCellY",
+          "dataType": "int32_t",
+          "size": 4,
+          "storage": "Stack[-0x10]:4",
+          "stackOffset": -16,
+          "resolvedType": null
+        },
+        {
+          "name": "nSwapCellX",
+          "dataType": "int32_t",
+          "size": 4,
+          "storage": "Stack[-0x18]:4",
+          "stackOffset": -24,
+          "resolvedType": null
+        },
+        {
+          "name": "nSeedHighSpill",
+          "dataType": "int32_t",
+          "size": 4,
+          "storage": "Stack[-0x20]:4",
+          "stackOffset": -32,
+          "resolvedType": null
+        },
+        {
+          "name": "aCellShuffleTable",
+          "dataType": "int *",
+          "size": 2052,
+          "storage": "Stack[-0x824]:2052",
+          "stackOffset": -2084,
+          "resolvedType": "int[513]"
+        },
+        {
+          "name": "sNewSeed",
+          "dataType": "D2SeedStrc",
+          "size": 8,
+          "storage": "HASH:7e02f63f02d:8",
+          "stackOffset": null,
+          "resolvedType": "D2SeedStrc"
+        },
+        {
+          "name": "llSeedProduct",
+          "dataType": "longlong",
+          "size": 8,
+          "storage": "HASH:41f32c531a0:8",
+          "stackOffset": null,
+          "resolvedType": "longlong"
+        },
+        {
+          "name": "lSeedProduct",
+          "dataType": "uint64_t",
+          "size": 8,
+          "storage": "HASH:41f3e8eb46c:8",
+          "stackOffset": null,
+          "resolvedType": null
+        },
+        {
+          "name": "nRemainingShuffle",
+          "dataType": "uint",
+          "size": 4,
+          "storage": "HASH:27f12fa6c86:4",
+          "stackOffset": null,
+          "resolvedType": "uint"
+        },
+        {
+          "name": "nRemaining",
+          "dataType": "uint32_t",
+          "size": 4,
+          "storage": "HASH:29f12fa6c86:4",
+          "stackOffset": null,
+          "resolvedType": null
+        },
+        {
+          "name": "nSwapTmp",
+          "dataType": "int32_t",
+          "size": 4,
+          "storage": "HASH:3f9de93936:4",
+          "stackOffset": null,
+          "resolvedType": "int32_t"
+        }
+      ],
+      "tags": null
+    }
+  ],
+  "types": [
+    {
+      "name": "D2DrlgLevelStrc",
+      "category": "/Diablo2/DRLG",
+      "size": 560,
+      "description": "",
+      "alignment": 1,
+      "type": "structure",
+      "fields": [
+        {
+          "name": "eDrlgType",
+          "dataType": "int",
+          "offset": 0,
+          "size": 4,
+          "comment": null,
+          "bitOffset": null,
+          "bitSize": null
+        },
+        {
+          "name": "dwFlags",
+          "dataType": "uint",
+          "offset": 4,
+          "size": 4,
+          "comment": null,
+          "bitOffset": null,
+          "bitSize": null
+        },
+        {
+          "name": "nRoomExCount",
+          "dataType": "int",
+          "offset": 8,
+          "size": 4,
+          "comment": null,
+          "bitOffset": null,
+          "bitSize": null
+        },
+        {
+          "name": "nActiveCount",
+          "dataType": "uint",
+          "offset": 12,
+          "size": 4,
+          "comment": null,
+          "bitOffset": null,
+          "bitSize": null
+        },
+        {
+          "name": "pRoomExFirst",
+          "dataType": "D2RoomExStrc *",
+          "offset": 16,
+          "size": 4,
+          "comment": null,
+          "bitOffset": null,
+          "bitSize": null
+        },
+        {
+          "name": "pDrlgLevelData",
+          "dataType": "D2DrlgLevelDataUnion",
+          "offset": 20,
+          "size": 4,
+          "comment": "Union: D2LvlMazeTxt* (maze), D2DrlgLevelDataPresetArea* (preset), D2DrlgLevelDataWildernessLevel* (wilderness)",
+          "bitOffset": null,
+          "bitSize": null
+        },
+        {
+          "name": "nUnknown_018",
+          "dataType": "undefined4",
+          "offset": 24,
+          "size": 4,
+          "comment": null,
+          "bitOffset": null,
+          "bitSize": null
+        },
+        {
+          "name": "sCoordinatesAndSize",
+          "dataType": "D2DrlgCoordsStrc",
+          "offset": 28,
+          "size": 16,
+          "comment": null,
+          "bitOffset": null,
+          "bitSize": null
+        },
+        {
+          "name": "aSpawnPoints",
+          "dataType": "D2DrlgSpawnPointStrc[32]",
+          "offset": 44,
+          "size": 384,
+          "comment": "D2DrlgSpawnPointStrc[32] - 32 spawn points, 12 bytes each = 384 total",
+          "bitOffset": null,
+          "bitSize": null
+        },
+        {
+          "name": "pLevelNext",
+          "dataType": "D2DrlgLevelStrc *",
+          "offset": 428,
+          "size": 4,
+          "comment": null,
+          "bitOffset": null,
+          "bitSize": null
+        },
+        {
+          "name": "pDrlgMapFirst",
+          "dataType": "D2DrlgMapStrc *",
+          "offset": 432,
+          "size": 4,
+          "comment": "Head of linked list of DrlgMap entries for this level",
+          "bitOffset": null,
+          "bitSize": null
+        },
+        {
+          "name": "pDrlg",
+          "dataType": "D2DrlgStrc *",
+          "offset": 436,
+          "size": 4,
+          "comment": null,
+          "bitOffset": null,
+          "bitSize": null
+        },
+        {
+          "name": "nSpecialPresetCellCount",
+          "dataType": "undefined4",
+          "offset": 440,
+          "size": 4,
+          "comment": null,
+          "bitOffset": null,
+          "bitSize": null
+        },
+        {
+          "name": "pAutomapEx",
+          "dataType": "void *",
+          "offset": 444,
+          "size": 4,
+          "comment": null,
+          "bitOffset": null,
+          "bitSize": null
+        },
+        {
+          "name": "nLevelType",
+          "dataType": "int",
+          "offset": 448,
+          "size": 4,
+          "comment": null,
+          "bitOffset": null,
+          "bitSize": null
+        },
+        {
+          "name": "sSeed",
+          "dataType": "D2SeedStrc",
+          "offset": 452,
+          "size": 8,
+          "comment": null,
+          "bitOffset": null,
+          "bitSize": null
+        },
+        {
+          "name": "pLevelLinkNodeFirst",
+          "dataType": "D2DrlgLevelLinkNodeStrc *",
+          "offset": 460,
+          "size": 4,
+          "comment": "Head of linked list of level link nodes. Freed in DRLGLEVEL_FreeLevelSubStructs (Drlg.cpp line 0xC5). Node has pNext at +0xC.",
+          "bitOffset": null,
+          "bitSize": null
+        },
+        {
+          "name": "eD2LevelId",
+          "dataType": "int",
+          "offset": 464,
+          "size": 4,
+          "comment": null,
+          "bitOffset": null,
+          "bitSize": null
+        },
+        {
+          "name": "dwInactiveFrames",
+          "dataType": "int",
+          "offset": 468,
+          "size": 4,
+          "comment": null,
+          "bitOffset": null,
+          "bitSize": null
+        },
+        {
+          "name": "nSpawnPointCount",
+          "dataType": "int",
+          "offset": 472,
+          "size": 4,
+          "comment": null,
+          "bitOffset": null,
+          "bitSize": null
+        },
+        {
+          "name": "nLastRoomExCoordsIndex",
+          "dataType": "int",
+          "offset": 476,
+          "size": 4,
+          "comment": null,
+          "bitOffset": null,
+          "bitSize": null
+        },
+        {
+          "name": "sWarpCoordinates",
+          "dataType": "D2DrlgLevelWarpCoordinatesStrc",
+          "offset": 480,
+          "size": 76,
+          "comment": "Warp coordinate data: 9 X coords, 9 Y coords, and entry count. Accessed via GetWarpCoordinatesFromRoomEx returning pLevel+0x1E0",
+          "bitOffset": null,
+          "bitSize": null
+        },
+        {
+          "name": "pRoomExStateFlags",
+          "dataType": "int *",
+          "offset": 556,
+          "size": 4,
+          "comment": null,
+          "bitOffset": null,
+          "bitSize": null
+        }
+      ],
+      "values": null,
+      "underlyingType": null,
+      "returnType": null,
+      "parameters": null,
+      "callingConvention": null,
+      "effectiveCallingConvention": null,
+      "hasUnknownCallingConvention": null,
+      "hasVarArgs": false,
+      "kind": "STRUCTURE"
+    },
+    {
+      "name": "int32_t",
+      "category": "/stdint.h",
+      "size": 4,
+      "description": "Signed Integer (compiler-specific size)",
+      "alignment": 4,
+      "type": "typedef",
+      "fields": null,
+      "values": null,
+      "underlyingType": "int",
+      "returnType": null,
+      "parameters": null,
+      "callingConvention": null,
+      "effectiveCallingConvention": null,
+      "hasUnknownCallingConvention": null,
+      "hasVarArgs": false,
+      "kind": "TYPEDEF"
+    }
+  ],
+  "globals": [
+    {
+      "name": "gaAct5SceneryPresetTable_0",
+      "namespace": "D2Common::Drlg::OutSiege",
+      "address": "006f2100",
+      "dataType": "int[15][7]",
+      "size": 420,
+      "isInitialized": true,
+      "scope": "file-local"
+    },
+    {
+      "name": "aAct4OutdoorSceneryBaseByLevel",
+      "address": "006f22a4",
+      "dataType": "int[3]",
+      "size": 12,
+      "namespace": "D2Common::Drlg::Outdoors",
+      "isInitialized": true,
+      "xrefCount": 0,
+      "referencingFunctions": [],
+      "value": null,
+      "scope": "file-local"
+    },
+    {
+      "name": "aAct4OutdoorPresetBaseByLevel",
+      "address": "006f22b0",
+      "dataType": "int[3]",
+      "size": 12,
+      "namespace": "D2Common::Drlg::Outdoors",
+      "isInitialized": true,
+      "xrefCount": 0,
+      "referencingFunctions": [],
+      "value": null,
+      "scope": "file-local"
+    }
+  ],
+  "diagnosticTags": [
+    {
+      "type": "vc8form",
+      "data": "split(nPresetBaseB,int,nLastSceneryBase,add);ev=0000000000;bh=402-00000000;dh=b03c18de;ord=1"
+    }
+  ],
+  "rawBaseline": "// Spawns outdoor presets for Act4 City of Damned / Plains of Despair.\n// 1.14d: 0067e6a0\nstatic void DRLGOUTDOOR_SpawnAct4OutdoorPresets(D2DrlgLevelStrc * pLevel) {\n    if (pLevel->eD2LevelId == 0x6a) {\n      D2Common::Drlg::Outdoors::SpawnOutdoorLevelPreset(pLevel, 0x32b, -1, 0, '\\x0f');\n    }\n\n    int nPresetBaseA = aAct4OutdoorPresetBaseByLevel[pLevel->eD2LevelId - 104];\n    int nPresetBaseB = aAct4OutdoorSceneryBaseByLevel[pLevel->eD2LevelId - 104];\n    D2Common::Drlg::Outdoors::SpawnOutdoorLevelPreset(pLevel, nPresetBaseA, -1, 0, '\\x0f');\n    D2Common::Drlg::Outdoors::SpawnOutdoorLevelPreset(pLevel, nPresetBaseA + 1, -1, 0, '\\x0f');\n    D2Common::Drlg::Outdoors::SpawnOutdoorLevelPreset(pLevel, nPresetBaseA + 1, -1, 0, '\\x0f');\n    D2Common::Drlg::Outdoors::SpawnOutdoorLevelPreset(pLevel, nPresetBaseA + 2, -1, 0, '\\x0f');\n    D2Common::Drlg::Outdoors::SpawnOutdoorLevelPreset(pLevel, nPresetBaseA + 2, -1, 0, '\\x0f');\n    D2Common::Drlg::Outdoors::SpawnOutdoorLevelPreset(pLevel, nPresetBaseA + 3, -1, 0, '\\x0f');\n    D2Common::Drlg::Outdoors::SpawnOutdoorLevelPreset(pLevel, nPresetBaseA + 3, -1, 0, '\\x0f');\n    if (pLevel->eD2LevelId == 0x69) {\n      D2Common::Drlg::Outdoors::SpawnOutdoorLevelPreset(pLevel, 0x336, -1, 0, '\\x0f');\n    }\n\n    nPresetBaseA += 4;\n    D2Common::Drlg::Outdoors::SpawnOutdoorLevelPreset(pLevel, nPresetBaseA, -1, 0, '\\x0f');\n    D2Common::Drlg::Outdoors::SpawnOutdoorLevelPreset(pLevel, nPresetBaseA, -1, 0, '\\x0f');\n    D2Common::Drlg::Outdoors::SpawnOutdoorLevelPreset(pLevel, nPresetBaseA, -1, 0, '\\x0f');\n    D2Common::Drlg::Outdoors::SpawnOutdoorLevelPreset(pLevel, nPresetBaseA, -1, 0, '\\x0f');\n    D2Common::Drlg::Outdoors::SpawnOutdoorLevelPreset(pLevel, nPresetBaseB, -1, 0, '\\x0f');\n    D2Common::Drlg::Outdoors::SpawnOutdoorLevelPreset(pLevel, nPresetBaseB + 1, -1, 0, '\\x0f');\n    D2Common::Drlg::Outdoors::SpawnOutdoorLevelPreset(pLevel, nPresetBaseB + 1, -1, 0, '\\x0f');\n    D2Common::Drlg::Outdoors::SpawnOutdoorLevelPreset(pLevel, nPresetBaseB + 2, -1, 0, '\\x0f');\n    D2Common::Drlg::Outdoors::SpawnOutdoorLevelPreset(pLevel, nPresetBaseB + 2, -1, 0, '\\x0f');\n    nPresetBaseB += 3;\n    D2Common::Drlg::Outdoors::SpawnOutdoorLevelPreset(pLevel, nPresetBaseB, -1, 0, '\\x0f');\n    D2Common::Drlg::Outdoors::SpawnOutdoorLevelPreset(pLevel, nPresetBaseB, -1, 0, '\\x0f');\n    D2Common::Drlg::Outdoors::SpawnOutdoorLevelPreset(pLevel, nPresetBaseB, -1, 0, '\\x0f');\n    D2Common::Drlg::Outdoors::SpawnOutdoorLevelPreset(pLevel, nPresetBaseB, -1, 0, '\\x0f');\n}",
+  "rawCandidate": "// Spawns outdoor presets for Act4 City of Damned / Plains of Despair.\n// 1.14d: 0067e6a0\nstatic void DRLGOUTDOOR_SpawnAct4OutdoorPresets(D2DrlgLevelStrc * pLevel) {\n    if (pLevel->eD2LevelId == 0x6a) {\n      D2Common::Drlg::Outdoors::SpawnOutdoorLevelPreset(pLevel, 0x32b, -1, 0, '\\x0f');\n    }\n\n    int nPresetBaseA = aAct4OutdoorPresetBaseByLevel[pLevel->eD2LevelId - 104];\n    int nPresetBaseB = aAct4OutdoorSceneryBaseByLevel[pLevel->eD2LevelId - 104];\n    D2Common::Drlg::Outdoors::SpawnOutdoorLevelPreset(pLevel, nPresetBaseA, -1, 0, '\\x0f');\n    D2Common::Drlg::Outdoors::SpawnOutdoorLevelPreset(pLevel, nPresetBaseA + 1, -1, 0, '\\x0f');\n    D2Common::Drlg::Outdoors::SpawnOutdoorLevelPreset(pLevel, nPresetBaseA + 1, -1, 0, '\\x0f');\n    D2Common::Drlg::Outdoors::SpawnOutdoorLevelPreset(pLevel, nPresetBaseA + 2, -1, 0, '\\x0f');\n    D2Common::Drlg::Outdoors::SpawnOutdoorLevelPreset(pLevel, nPresetBaseA + 2, -1, 0, '\\x0f');\n    D2Common::Drlg::Outdoors::SpawnOutdoorLevelPreset(pLevel, nPresetBaseA + 3, -1, 0, '\\x0f');\n    D2Common::Drlg::Outdoors::SpawnOutdoorLevelPreset(pLevel, nPresetBaseA + 3, -1, 0, '\\x0f');\n    if (pLevel->eD2LevelId == 0x69) {\n      D2Common::Drlg::Outdoors::SpawnOutdoorLevelPreset(pLevel, 0x336, -1, 0, '\\x0f');\n    }\n\n    nPresetBaseA += 4;\n    D2Common::Drlg::Outdoors::SpawnOutdoorLevelPreset(pLevel, nPresetBaseA, -1, 0, '\\x0f');\n    D2Common::Drlg::Outdoors::SpawnOutdoorLevelPreset(pLevel, nPresetBaseA, -1, 0, '\\x0f');\n    D2Common::Drlg::Outdoors::SpawnOutdoorLevelPreset(pLevel, nPresetBaseA, -1, 0, '\\x0f');\n    D2Common::Drlg::Outdoors::SpawnOutdoorLevelPreset(pLevel, nPresetBaseA, -1, 0, '\\x0f');\n    D2Common::Drlg::Outdoors::SpawnOutdoorLevelPreset(pLevel, nPresetBaseB, -1, 0, '\\x0f');\n    D2Common::Drlg::Outdoors::SpawnOutdoorLevelPreset(pLevel, nPresetBaseB + 1, -1, 0, '\\x0f');\n    D2Common::Drlg::Outdoors::SpawnOutdoorLevelPreset(pLevel, nPresetBaseB + 1, -1, 0, '\\x0f');\n    D2Common::Drlg::Outdoors::SpawnOutdoorLevelPreset(pLevel, nPresetBaseB + 2, -1, 0, '\\x0f');\n    D2Common::Drlg::Outdoors::SpawnOutdoorLevelPreset(pLevel, nPresetBaseB + 2, -1, 0, '\\x0f');\n    int nLastSceneryBase = nPresetBaseB + 3;\n    D2Common::Drlg::Outdoors::SpawnOutdoorLevelPreset(pLevel, nLastSceneryBase, -1, 0, '\\x0f');\n    D2Common::Drlg::Outdoors::SpawnOutdoorLevelPreset(pLevel, nLastSceneryBase, -1, 0, '\\x0f');\n    D2Common::Drlg::Outdoors::SpawnOutdoorLevelPreset(pLevel, nLastSceneryBase, -1, 0, '\\x0f');\n    D2Common::Drlg::Outdoors::SpawnOutdoorLevelPreset(pLevel, nLastSceneryBase, -1, 0, '\\x0f');\n}",
+  "provenance": {
+    "source": "dd289669c82a03e993a928b2b0f2c724a1cc731d",
+    "generatorBase": "ad73d788be4614e8a294587afa868afeb5391eba",
+    "target": "0067e6a0",
+    "bytes": 402,
+    "instructions": 149,
+    "scope": "Full production function generation using actual function, callee and type/global metadata. Two folded displacement facts explicitly verified against fresh MCP READ refs and original native disassembly. Original internal/static declaration preserved. Bounded manually attested context, no owning export or database tag.",
+    "foldedOperandRefs": "Fresh READ references 0067e6ca->006f2110 and 0067e6d0->006f2104; encoded displacements 006f22b0 and 006f22a4 verified from original instructions."
+  }
+}

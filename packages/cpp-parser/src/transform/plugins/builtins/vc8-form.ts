@@ -1,5 +1,6 @@
 import { zeroRejectChoice } from './zero-reject-choice.js';
 import { builtinTruthSite } from './truth-form-safety.js';
+import { splitCompoundAdd } from './split-compound-add.js';
 /**
  * VC8 source forms recorded per function.
  *
@@ -227,6 +228,12 @@ import { builtinTruthSite } from './truth-form-safety.js';
  *                        them before a new store, or inside a loop. An addressed scalar
  *                        requires one outer-block zero reset, the same ordinary 32-bit
  *                        type, no earlier identity escape and all address uses afterward.
+ *   split(V,T,N,add)     an explicit final `V += K;` lifetime becomes `T N = V + K;`.
+ *                        Requires ordinary signed-int types (aliases need proof), a
+ *                        signed-int literal K, flat top-level int locals and only known
+ *                        primitive value calls after the update. Slot/address escapes,
+ *                        unknown/reference calls, shadowing and other control entries
+ *                        refuse. Three-argument split keeps its existing selection.
  *   zerolife(V)          `T V = F(...); if (V) return;` becomes
  *                        `if (F(...)) return; T V = 0;`: the continuing path's later
  *                        lifetime starts at zero. Both T and the declared call result
@@ -523,7 +530,7 @@ export type Vc8Form =
   | { op: 'select'; cond: string; index: number }
   | { op: 'decl'; name: string; before: string }
   | { op: 'unselect'; cond: string; index: number }
-  | { op: 'split'; name: string; type: string; rename: string }
+  | { op: 'split'; name: string; type: string; rename: string; add?: true }
   | { op: 'tsel'; cond: string; index: number }
   | { op: 'switch'; expr: string; index: number }
   | { op: 'nestcall'; name: string; index: number }
@@ -808,7 +815,8 @@ export function parseVc8Form(text: string): Vc8Form | undefined {
         ? { op: 'clamp', name: args[0], index: i } : undefined;
     }
     case 'decl': return args.length === 2 && !anchor ? { op: 'decl', name: args[0], before: args[1] } : undefined;
-    case 'split': return args.length === 3 && !anchor ? { op: 'split', name: args[0], type: args[1], rename: args[2] } : undefined;
+    case 'split': return !anchor && (args.length === 3 || (args.length === 4 && args[3] === 'add'))
+      ? { op: 'split', name: args[0], type: args[1], rename: args[2], ...(args.length === 4 ? { add: true as const } : {}) } : undefined;
     case 'dec': {
       if (args.length !== 2 || anchor || !/^[A-Za-z_]\w*$/.test(args[0]) || !/^[1-9]\d*$/.test(args[1])) return undefined;
       const amount = Number(args[1]);
@@ -3560,6 +3568,11 @@ function doSplitAddressed(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'split' }>
 }
 
 function doSplit(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'split' }>): void {
+  if (f.add) {
+    const why = splitCompoundAdd(fn, f.name, f.type, f.rename, selectTables);
+    if (why) refuse(why);
+    return;
+  }
   if (localNames(fn).has(f.rename)) refuse(`${f.rename} exists`);
   if (addressTaken(fn, f.name)) { doSplitAddressed(fn, f); return; }
   const parents = parentsOf(fn);

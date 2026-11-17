@@ -33,6 +33,10 @@ import { respellPlaceholderType } from '../../packages/reconstruct/src/codegen/p
 import { emittedMemberNames } from '../../packages/reconstruct/src/codegen/header.js';
 import { accessorTwins } from '../../packages/reconstruct/src/codegen/accessor-twins.js';
 import { registerEnumTypedefTargets } from '../../packages/reconstruct/src/codegen/enum-width.js';
+import { buildFuncPtrArgCastTables } from '../../packages/reconstruct/src/codegen/index.js';
+import { withResolvedType } from '../../packages/reconstruct/src/extract/functions.js';
+import { normalizePointerSizeSpelling } from '../../packages/reconstruct/src/codegen/pointer-size-spelling.js';
+import type { ExtractedFunction } from '../../packages/reconstruct/src/types.js';
 import type { Vc8Accessor } from '../../packages/cpp-parser/dist/index.js';
 
 type N = ASTNode & Record<string, any>;
@@ -68,6 +72,7 @@ let globals = new Map<string, string>();
 /** Typedef and enum names to the integer type the tree declares them as (castout reads a return type's width). */
 const typedefTargets: Record<string, string> = {};
 const ambiguousEnumValues = new Set<string>();
+let compoundParamTypes: Record<string, string[]> = {};
 
 /** The tables `acc` reads: the struct fields, the enumerators and the accessors (accessor-twins.ts). */
 const accTables: {
@@ -125,13 +130,25 @@ function loadTypes(path?: string) {
   }
 }
 
-/** The header inlines that read one field, from the snapshot's functions beside the types. */
+/** Header inlines and lean callable signatures, from the functions beside the types. */
 async function loadAccessors(typesPath?: string) {
   if (!typesPath) return;
-  const path = typesPath.replace(/dataTypes\.ndjson$/, 'functions.ndjson');
+  const path = typesPath.replace(/(^|[\\/])dataTypes\.ndjson$/, '$1functions.ndjson');
+  if (path === typesPath) return; // A custom types filename is not a callable-model sidecar.
   const hosts: any[] = [];
+  const functions: ExtractedFunction[] = [];
+  const signatureType = (t: string) => normalizeSignatureType(normalizePointerSizeSpelling(t));
   const rl = createInterface({ input: createReadStream(path) });
-  for await (const l of rl) if (l.includes('"inline-host"')) hosts.push(JSON.parse(l));
+  for await (const l of rl) if (l) {
+    const f = JSON.parse(l);
+    if (l.includes('"inline-host"')) hosts.push(f);
+    if (Array.isArray(f.parameters)) functions.push({ name: f.name, namespace: f.namespace, address: f.address, signature: f.signature,
+      returnType: signatureType(f.returnType ?? 'void'), callingConvention: f.callingConvention, isThunk: f.isThunk,
+      isExternal: f.isExternal, hasVarArgs: f.hasVarArgs, size: f.size, localVariables: [],
+      parameters: f.parameters.map((p: { dataType: string; resolvedType?: string }) => ({ ...p, dataType: signatureType(withResolvedType(p.dataType, p.resolvedType)) })),
+    } as ExtractedFunction);
+  }
+  compoundParamTypes = buildFuncPtrArgCastTables(functions, [], [], [], [], [], { writeEffects: false }).functionParamTypes ?? {};
   accTables.accessors = accessorTwins(hosts, accTables);
 }
 
@@ -322,7 +339,13 @@ function sites(c: Ctx, maxAnchors: number): string[] {
     out.add(`branchret(${v})`);
     out.add(`fold(${v})`);
     out.add(`ifsel(${v})`);
-    if (declarable(vars.get(v))) out.add(`split(${v},${vars.get(v)},${v}_2)`);
+    if (declarable(vars.get(v))) {
+      out.add(`split(${v},${vars.get(v)},${v}_2)`);
+      if (all.some(n => n.kind === NodeKind.AssignExpr && n.operator === '+='
+        && unparen(n.left).kind === NodeKind.Identifier && unparen(n.left).name === v)) {
+        out.add(`split(${v},${vars.get(v)},${v}_2,add)`);
+      }
+    }
     for (const t of casts.get(v) ?? []) {
       if (declarable(t) && !t.endsWith('*')) out.add(`width(${v},${t})`);
       // `live` only where own refuses a read initializer: listed after the plain form, a
@@ -725,7 +748,8 @@ function tryForm(tu: TranslationUnit, text: string): { text: string; form: Vc8Fo
   let prefix: string[] = [];
   let out: TranslationUnit;
   try {
-    out = applyVc8Forms(tu, [{ form }], s => { applied = s.applied; why = s.why; prefix = s.prefix ?? []; }, { ...tables(), ...accTables } as never);
+    out = applyVc8Forms(tu, [{ form }], s => { applied = s.applied; why = s.why; prefix = s.prefix ?? []; },
+      { ...tables(), ...accTables, ...(form.op === 'split' && form.add ? { functionParamTypes: compoundParamTypes } : {}) } as never);
   } catch (e) {
     // A form the pass cannot even attempt is no candidate; say which, it is a pass defect.
     process.stderr.write(`form ${text} threw: ${(e as Error).message.split('\n')[0]}\n`);
@@ -781,7 +805,7 @@ function applyMany(items: Array<{ id: string; text: string; forms: string[] }>) 
       const f = s.tag!.slice(0, s.tag!.lastIndexOf(';ev='));
       if (s.applied) applied.push(f); else refused.push({ form: f, why: s.why ?? '' });
       for (const d of s.prefix ?? []) if (!prefix.includes(d)) prefix.push(d);
-    }, { ...tables(), ...accTables } as never);
+    }, { ...tables(), ...accTables, ...(spec.forms.some(f => f.form.op === 'split' && f.form.add) ? { functionParamTypes: compoundParamTypes } : {}) } as never);
     // `ord` only where two forms share an op.
     for (const f of forms) if ((perOp.get(parseVc8Form(f)?.op ?? '?') ?? 0) < 2) delete ord[f];
     return { id, text: [...prefix, body(out)].join('\n\n'), applied, refused, ord, order: spec.forms.map(x => x.tag.slice(0, x.tag.lastIndexOf(';ev='))) };
