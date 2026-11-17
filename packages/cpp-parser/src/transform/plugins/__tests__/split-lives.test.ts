@@ -208,9 +208,28 @@ describe('split-lives', () => {
     }`;
     const both = { ...O, argReach: () => ({ lo: 0, hi: 4 }) as never, outParamWidth: () => 4, structFields: AIPARAM };
     const out = run(src, both);
-    // The stored value is read by g: its own life, not the call's in-value.
-    has(out, 'nAiParam2 = pAiParam->nDistanceToTarget; g(nAiParam2);');
+    // The stored value is read by g: its own life, not the call's in-value. Both lives are
+    // integers in a variable whose address the call is handed, so they stay one local: VC8
+    // keeps such a variable in its slot and stores every value of it there.
+    has(out, 'nAiParam = pAiParam->nDistanceToTarget; g(nAiParam);');
     has(out, 'Find(pUnit, (uint32_t *)&nAiParam); h(nAiParam);');
+  });
+
+  it('LinkPortal @0056cf40: the lives of one type around an out-parameter call stay one local', () => {
+    const src = `D2UnitStrc *f(D2GameStrc *pGame, int eLevel) {
+      eLevel = (int)SpawnUnit(pGame, eLevel);
+      if ((D2RoomStrc *)eLevel == 0) return 0;
+      IsPortalFromDuriel(pGame, (D2RoomStrc **)&eLevel);
+      eLevel = (int)GetFreeCoordinates((D2RoomStrc *)eLevel);
+      return CreateUnit(pGame, (D2RoomStrc *)eLevel);
+    }`;
+    const o = { ...O, argReach: () => ({ lo: 0, hi: 4 }) as never, outParamWidth: () => 4,
+      functionReturnTypes: { ...O.functionReturnTypes, SpawnUnit: 'D2RoomStrc *', GetFreeCoordinates: 'D2RoomStrc *' } };
+    const out = run(src, o);
+    // The original stores GetFreeCoordinates' room into the slot ([EBP+0xc]) as well: a local
+    // of its own would be a register value without that store.
+    has(out, 'IsPortalFromDuriel(pGame, (D2RoomStrc **)&pRoom); pRoom = GetFreeCoordinates(pRoom); return CreateUnit(pGame, pRoom);');
+    assert.ok(!/pRoom2/u.test(out), out);
   });
 
   it('AI_Fn1_EvilHole @005fb410: a store of the parameter\'s own type does not pull the out-parameter life back', () => {
