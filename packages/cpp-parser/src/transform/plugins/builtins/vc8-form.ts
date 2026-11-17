@@ -63,6 +63,12 @@ import { builtinTruthSite } from './truth-form-safety.js';
  *                        Refused when E or a name in E is stored in that range.
  *   cache(E,N)           N is an existing local stored from E: each E after that store
  *                        reads N, up to the next store to E or N.
+ *   fieldalias(A)        `T** A=&P->F; T* V=Make(); *A=V; if(!P->B)return;`
+ *                        becomes `P->F=Make(); T** A=&P->F; if(!P->B)return;`.
+ *                        The alias remains for later calls; only its pure address
+ *                        calculation moves. Requires unique stable bindings, exact
+ *                        nonvolatile pointer types and disjoint field layouts. A
+ *                        producer is folded only when it has one value use.
  *   own(V,T[,N])         V's initializer is a dead copy Ghidra merged into it: V is
  *                        declared as a T of its own (named N), without it; a cast of V or
  *                        &V to T or T* goes, and the declaration moves onto V's first
@@ -425,6 +431,7 @@ import type {
   TypeNode, UnaryExpr, VariableDecl,
 } from '../../../ast/nodes.js';
 import { parse } from '../../../parser/index.js';
+import { restoreFieldAliasStore } from './field-alias-store.js';
 import { emit } from '../../../emit/index.js';
 import { isKeywordString } from '../../../lexer/keywords.js';
 import { cloneNode } from '../../transformer.js';
@@ -453,6 +460,7 @@ export type Vc8Form =
   | { op: 'coalesce'; name: string; from?: string }
   | { op: 'recordwalk'; name: string; index: number }
   | { op: 'cache'; expr: string; name: string; type?: string; anchor?: string; count?: number; anchorIndex?: number }
+  | { op: 'fieldalias'; name: string }
   | { op: 'own'; name: string; type: string; rename?: string; live?: boolean }
   | { op: 'guards'; split: number; index: number }
   | { op: 'merge-guards'; index: number }
@@ -529,6 +537,7 @@ export interface Vc8Accessor {
 export type Vc8FormTables = SelectArgumentOptions & RecordWalkTables & {
   /** Parameter types supplied by the producer of wrappers emitted in this body. */
   macroSignatures?: Record<string, AllocMacroSignature>;
+  aggregateSizes?: Record<string, number>;
   accessors?: Vc8Accessor[];
   /**
    * Bytes a callee stores through argument `index` (a non-null `&local`) on every path
@@ -559,7 +568,7 @@ export interface Vc8FormOptions {
   selectTables?: Vc8FormTables;
 }
 
-const OPS = new Set(['zerolife', 'nullfault32', 'swdefault', 'seq', 'fold', 'join', 'coalesce', 'recordwalk', 'cache', 'own', 'guards', 'merge-guards', 'retval', 'branchret', 'width', 'boolflag', 'retwiden', 'arms',
+const OPS = new Set(['fieldalias', 'zerolife', 'nullfault32', 'swdefault', 'seq', 'fold', 'join', 'coalesce', 'recordwalk', 'cache', 'own', 'guards', 'merge-guards', 'retval', 'branchret', 'width', 'boolflag', 'retwiden', 'arms',
   'nest', 'merge-tail', 'tailguard', 'tailcopy', 'continue', 'dup', 'tarms', 'zero', 'nonzero', 'bool', 'cmp', 'swap', 'ifsel', 'clamp', 'split', 'select', 'decl', 'unselect', 'tsel', 'hoist',
   'nestcall', 'fill', 'elems', 'copy', 'shift', 'ptrwalk', 'rowptr', 'acc', 'retvar', 'onecall', 'roundup', 'swmerge', 'switch', 'dec', 'opas', 'range', 'castout', 'signbit', 'nullfield', 'zinit', 'znew', 'swclamp', 'retbase', 'postdec']);
 
@@ -616,6 +625,8 @@ export function parseVc8Form(text: string): Vc8Form | undefined {
         ? { op: 'nullfield', expr: args[0], struct: args[1], field: args[2] } : undefined;
     case 'join': return args.length === 2 && !anchor && args.every(a => /^[A-Za-z_]\w*$/.test(a)) && args[0] !== args[1]
       ? { op: 'join', into: args[0], from: args[1] } : undefined;
+    case 'fieldalias': return !anchor && args.length === 1 && /^[A-Za-z_]\w*$/.test(args[0])
+      ? { op: 'fieldalias', name: args[0] } : undefined;
     case 'cache':
       if (args.length === 2 && !anchor) return { op: 'cache', expr: args[0], name: args[1] };
       if (args.length === 3) return { op: 'cache', expr: args[0], name: args[1], type: args[2], anchor };
@@ -5235,6 +5246,7 @@ function doRetbase(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'retbase' }>): vo
 }
 
 const APPLY: { [K in Vc8Form['op']]: (fn: FunctionDecl, f: Extract<Vc8Form, { op: K }>) => void } = {
+  fieldalias: (fn, f) => { if (!restoreFieldAliasStore(fn, f.name, selectTables)) refuse(`no proved field-address store for ${f.name}`); },
   zerolife: doZeroLife,
   nullfault32: doNullfault32,
   swdefault: (fn, f) => { const why = restoreSwitchDefault(fn, f.expr, f.values, f.index, selectTables); if (why) refuse(why); },
