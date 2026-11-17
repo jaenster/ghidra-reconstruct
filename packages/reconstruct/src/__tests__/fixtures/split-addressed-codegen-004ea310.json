@@ -1,0 +1,713 @@
+{
+  "source": "dd289669c82a03e993a928b2b0f2c724a1cc731d",
+  "generatorMain": "ad73d788be4614e8a294587afa868afeb5391eba",
+  "ghidraVersion": 2109,
+  "fn": {
+    "name": "SKILLDESC_DrawSkillDmgType3",
+    "address": "004ea310",
+    "entryPoint": "004ea310",
+    "returnType": "void",
+    "callingConvention": "__fastcall",
+    "size": 311,
+    "hasVarArgs": false,
+    "namespace": "D2Client::UI::SkillDesc",
+    "parameters": [
+      {
+        "name": "pUnit",
+        "dataType": "D2UnitStrc *",
+        "size": 4,
+        "ordinal": 0,
+        "storage": "ECX:4",
+        "stackOffset": null,
+        "resolvedType": null
+      },
+      {
+        "name": "pSkill",
+        "dataType": "D2SkillStrc *",
+        "size": 4,
+        "ordinal": 1,
+        "storage": "EDX:4",
+        "stackOffset": null,
+        "resolvedType": null
+      },
+      {
+        "name": "pSkillsTxt",
+        "dataType": "D2SkillsTxt *",
+        "size": 4,
+        "ordinal": 2,
+        "storage": "Stack[0x4]:4",
+        "stackOffset": 4,
+        "resolvedType": null
+      },
+      {
+        "name": "nSkillLevel",
+        "dataType": "int32_t",
+        "size": 4,
+        "ordinal": 3,
+        "storage": "Stack[0x8]:4",
+        "stackOffset": 8,
+        "resolvedType": null
+      },
+      {
+        "name": "nXLeft",
+        "dataType": "int32_t",
+        "size": 4,
+        "ordinal": 4,
+        "storage": "Stack[0xc]:4",
+        "stackOffset": 12,
+        "resolvedType": null
+      },
+      {
+        "name": "nY",
+        "dataType": "int32_t",
+        "size": 4,
+        "ordinal": 5,
+        "storage": "Stack[0x10]:4",
+        "stackOffset": 16,
+        "resolvedType": null
+      },
+      {
+        "name": "nXRight",
+        "dataType": "int32_t",
+        "size": 4,
+        "ordinal": 6,
+        "storage": "Stack[0x14]:4",
+        "stackOffset": 20,
+        "resolvedType": null
+      }
+    ],
+    "tags": null,
+    "decompiled": "\n/* WARNING: Enum \"eCollisionFlags\": Some values do not have unique names */\n/* WARNING: Enum \"eD2TimerType\": Some values do not have unique names */\n/* WARNING: Enum \"eD2TimerTypeDWORD\": Some values do not have unique names */\n/* @function SKILLDESC_DrawSkillDmgType3\n   @address Game.exe.ram:004ea310\n   @date 2026.06.07\n   @calling __fastcall\n   @description Diablo 2 1.14d reverse team\n   https://blizzhackers.dev\n   @sourcefile .\\UI\\SkillDesc.cpp\n   @sourcefile-basis Blizzard __FILE__ literal referenced from inside this function's body (4 sites:\n   004ea355, 004ea374, 004ea3c8, 004ea3f3). First-party 1.14d evidence, not inferred and not from\n   D2R. */\n\nvoid __fastcall\nD2Client::UI::SkillDesc::SKILLDESC_DrawSkillDmgType3\n          (D2UnitStrc *pUnit,D2SkillStrc *pSkill,D2SkillsTxt *pSkillsTxt,int32_t nSkillLevel,\n          int32_t nXLeft,int32_t nY,int32_t nXRight)\n\n{\n  D2SkillDescTxt *pSkillDescTxt;\n  BOOL bCanDualWield;\n  eD2Skills eSkillId;\n  uint32_t pDamCalc2;\n  uint32_t uDamCalc2;\n  uint32_t nMinDamage;\n  int nMaxDamage;\n  int32_t nSkillLevelTmp;\n  \n  if (((pSkill != (D2SkillStrc *)0x0) && (pSkillsTxt != (D2SkillsTxt *)0x0)) &&\n     (pSkillDescTxt = D2Common::Skills::Skills::GetSkillDescription((int)pSkillsTxt->skill),\n     pSkillDescTxt != (D2SkillDescTxt *)0x0)) {\n    bCanDualWield = D2Common::Units::Units::CanDualWield(pUnit);\n    if (bCanDualWield != 0) {\n      nSkillLevelTmp = nSkillLevel;\n      eSkillId = D2Common::Skills::Skills::GetSkillId(pSkill,\".\\\\UI\\\\SkillDesc.cpp\",0xa02);\n      nMinDamage = D2Common::Skills::Skills::SKILLS_EvalDescCalcBytecode\n                             (pUnit,pSkillDescTxt->ddamCalc1,eSkillId,nSkillLevelTmp);\n      nSkillLevelTmp = nSkillLevel;\n      eSkillId = D2Common::Skills::Skills::GetSkillId(pSkill,\".\\\\UI\\\\SkillDesc.cpp\",0xa03);\n      pDamCalc2 = D2Common::Skills::Skills::SKILLS_EvalDescCalcBytecode\n                            (pUnit,pSkillDescTxt->ddamCalc2,eSkillId,nSkillLevelTmp);\n      D2Client::UI::SkillDesc::SKILLDESC_DrawSkillDmgPhysical\n                (pUnit,pSkill,pSkillsTxt,nSkillLevel,\n                 D2Client::UI::SkillDesc::SKILLDESC_DrawDamageWithRange,nMinDamage,pDamCalc2,nXLeft,\n                 nY,nXRight,1);\n      return;\n    }\n    nMinDamage = 0;\n    nMaxDamage = 0;\n    pSkillsTxt = (D2SkillsTxt *)0x0;\n    nSkillLevelTmp = nSkillLevel;\n    eSkillId = D2Common::Skills::Skills::GetSkillId(pSkill,\".\\\\UI\\\\SkillDesc.cpp\",0xa0c);\n    pDamCalc2 = D2Common::Skills::Skills::SKILLS_EvalDescCalcBytecode\n                          (pUnit,pSkillDescTxt->ddamCalc1,eSkillId,nSkillLevelTmp);\n    nSkillLevelTmp = nSkillLevel;\n    eSkillId = D2Common::Skills::Skills::GetSkillId(pSkill,\".\\\\UI\\\\SkillDesc.cpp\",0xa0d);\n    uDamCalc2 = D2Common::Skills::Skills::SKILLS_EvalDescCalcBytecode\n                          (pUnit,pSkillDescTxt->ddamCalc2,eSkillId,nSkillLevelTmp);\n    D2Client::UI::SkillDesc::SKILLDESC_DrawDamageWithRange\n              (pUnit,(int *)&nMinDamage,&nMaxDamage,(int32_t *)&pSkillsTxt,pDamCalc2,uDamCalc2,\n               pSkill,0,(D2UnitStrc *)0x0);\n    D2Client::UI::SkillDesc::SKILLDESC_DrawDamageNumbers\n              (nMinDamage,nMaxDamage,(int32_t)pSkillsTxt,nXLeft,nY,nXRight);\n  }\n  return;\n}\n\n",
+    "localVariables": [
+      {
+        "name": "pSkillDescTxt",
+        "dataType": "D2SkillDescTxt *",
+        "size": 4,
+        "storage": "EAX:4",
+        "stackOffset": null,
+        "resolvedType": "D2SkillDescTxt *"
+      },
+      {
+        "name": "bCanDualWield",
+        "dataType": "BOOL",
+        "size": 4,
+        "storage": "EAX:4",
+        "stackOffset": null,
+        "resolvedType": "BOOL"
+      },
+      {
+        "name": "eSkillId",
+        "dataType": "eD2Skills",
+        "size": 4,
+        "storage": "EAX:4",
+        "stackOffset": null,
+        "resolvedType": "eD2Skills"
+      },
+      {
+        "name": "pDamCalc2",
+        "dataType": "uint32_t",
+        "size": 4,
+        "storage": "EAX:4",
+        "stackOffset": null,
+        "resolvedType": "uint32_t"
+      },
+      {
+        "name": "uDamCalc1",
+        "dataType": "uint32_t",
+        "size": 4,
+        "storage": "EAX:4",
+        "stackOffset": null,
+        "resolvedType": "uint32_t"
+      },
+      {
+        "name": "uDamCalc2",
+        "dataType": "uint32_t",
+        "size": 4,
+        "storage": "EAX:4",
+        "stackOffset": null,
+        "resolvedType": "uint32_t"
+      },
+      {
+        "name": "nMaxDamage",
+        "dataType": "int",
+        "size": 4,
+        "storage": "Stack[-0x8]:4",
+        "stackOffset": -8,
+        "resolvedType": "int"
+      },
+      {
+        "name": "nMinDamage",
+        "dataType": "uint32_t",
+        "size": 4,
+        "storage": "Stack[-0xc]:4",
+        "stackOffset": -12,
+        "resolvedType": "uint32_t"
+      },
+      {
+        "name": "local_10",
+        "dataType": "uint32_t",
+        "size": 4,
+        "storage": "Stack[-0x10]:4",
+        "stackOffset": -16,
+        "resolvedType": null
+      },
+      {
+        "name": "nSkillLevelTmp",
+        "dataType": "int32_t",
+        "size": 4,
+        "storage": "HASH:7bfc5995079:4",
+        "stackOffset": null,
+        "resolvedType": "int32_t"
+      }
+    ]
+  },
+  "callees": [
+    {
+      "name": "SKILLDESC_DrawSkillDmgPhysical",
+      "address": "004e99f0",
+      "entryPoint": "004e99f0",
+      "returnType": "void",
+      "callingConvention": "__stdcall",
+      "size": 808,
+      "hasVarArgs": false,
+      "namespace": "D2Client::UI::SkillDesc",
+      "parameters": [
+        {
+          "name": "pUnit",
+          "dataType": "D2UnitStrc *",
+          "size": 4,
+          "ordinal": 0,
+          "storage": "Stack[0x4]:4",
+          "stackOffset": 4,
+          "resolvedType": null
+        },
+        {
+          "name": "pSkillRecord",
+          "dataType": "D2SkillStrc *",
+          "size": 4,
+          "ordinal": 1,
+          "storage": "ECX:4",
+          "stackOffset": null,
+          "resolvedType": null
+        },
+        {
+          "name": "pSkillsTxt",
+          "dataType": "D2SkillsTxt *",
+          "size": 4,
+          "ordinal": 2,
+          "storage": "EAX:4",
+          "stackOffset": null,
+          "resolvedType": null
+        },
+        {
+          "name": "nItemClassId",
+          "dataType": "int32_t",
+          "size": 4,
+          "ordinal": 3,
+          "storage": "Stack[0x8]:4",
+          "stackOffset": 8,
+          "resolvedType": null
+        },
+        {
+          "name": "pfnCalcWeaponDmg",
+          "dataType": "pfnSkillDescWeaponDmgCalc *",
+          "size": 4,
+          "ordinal": 4,
+          "storage": "Stack[0xc]:4",
+          "stackOffset": 12,
+          "resolvedType": null
+        },
+        {
+          "name": "nExtraFlags",
+          "dataType": "int32_t",
+          "size": 4,
+          "ordinal": 5,
+          "storage": "Stack[0x10]:4",
+          "stackOffset": 16,
+          "resolvedType": null
+        },
+        {
+          "name": "pCompareUnit",
+          "dataType": "int",
+          "size": 4,
+          "ordinal": 6,
+          "storage": "Stack[0x14]:4",
+          "stackOffset": 20,
+          "resolvedType": null
+        },
+        {
+          "name": "nScreenX",
+          "dataType": "int32_t",
+          "size": 4,
+          "ordinal": 7,
+          "storage": "Stack[0x18]:4",
+          "stackOffset": 24,
+          "resolvedType": null
+        },
+        {
+          "name": "nScreenY",
+          "dataType": "int32_t",
+          "size": 4,
+          "ordinal": 8,
+          "storage": "Stack[0x1c]:4",
+          "stackOffset": 28,
+          "resolvedType": null
+        },
+        {
+          "name": "nScreenZ",
+          "dataType": "int32_t",
+          "size": 4,
+          "ordinal": 9,
+          "storage": "Stack[0x20]:4",
+          "stackOffset": 32,
+          "resolvedType": null
+        },
+        {
+          "name": "nElemDmg",
+          "dataType": "int32_t",
+          "size": 4,
+          "ordinal": 10,
+          "storage": "Stack[0x24]:4",
+          "stackOffset": 36,
+          "resolvedType": null
+        }
+      ],
+      "tags": [
+        {
+          "type": "round5"
+        },
+        {
+          "type": "llm-artifact-fix"
+        },
+        {
+          "type": "contrib-nugwa628"
+        },
+        {
+          "type": "x64-typing"
+        }
+      ]
+    },
+    {
+      "name": "SKILLDESC_DrawDamageWithRange",
+      "address": "004e9610",
+      "entryPoint": "004e9610",
+      "returnType": "void",
+      "callingConvention": "__fastcall",
+      "size": 70,
+      "hasVarArgs": false,
+      "namespace": "D2Client::UI::SkillDesc",
+      "parameters": [
+        {
+          "name": "pUnit",
+          "dataType": "D2UnitStrc *",
+          "size": 4,
+          "ordinal": 0,
+          "storage": "ECX:4",
+          "stackOffset": null,
+          "resolvedType": null
+        },
+        {
+          "name": "pnMinDamage",
+          "dataType": "int *",
+          "size": 4,
+          "ordinal": 1,
+          "storage": "EDX:4",
+          "stackOffset": null,
+          "resolvedType": null
+        },
+        {
+          "name": "pnMaxDamage",
+          "dataType": "int *",
+          "size": 4,
+          "ordinal": 2,
+          "storage": "Stack[0x4]:4",
+          "stackOffset": 4,
+          "resolvedType": null
+        },
+        {
+          "name": "pnColor",
+          "dataType": "int32_t *",
+          "size": 4,
+          "ordinal": 3,
+          "storage": "Stack[0x8]:4",
+          "stackOffset": 8,
+          "resolvedType": null
+        },
+        {
+          "name": "nDamagePctBonus",
+          "dataType": "int32_t",
+          "size": 4,
+          "ordinal": 4,
+          "storage": "Stack[0xc]:4",
+          "stackOffset": 12,
+          "resolvedType": null
+        },
+        {
+          "name": "nFlatDamageBonus",
+          "dataType": "int32_t",
+          "size": 4,
+          "ordinal": 5,
+          "storage": "Stack[0x10]:4",
+          "stackOffset": 16,
+          "resolvedType": null
+        },
+        {
+          "name": "pSkill",
+          "dataType": "D2SkillStrc *",
+          "size": 4,
+          "ordinal": 6,
+          "storage": "Stack[0x14]:4",
+          "stackOffset": 20,
+          "resolvedType": null
+        },
+        {
+          "name": "nSrcDamage",
+          "dataType": "uint32_t",
+          "size": 4,
+          "ordinal": 7,
+          "storage": "Stack[0x18]:4",
+          "stackOffset": 24,
+          "resolvedType": null
+        },
+        {
+          "name": "pUnit2",
+          "dataType": "D2UnitStrc *",
+          "size": 4,
+          "ordinal": 8,
+          "storage": "Stack[0x1c]:4",
+          "stackOffset": 28,
+          "resolvedType": null
+        }
+      ],
+      "tags": [
+        {
+          "type": "llm-named"
+        },
+        {
+          "type": "x64-typing"
+        }
+      ],
+      "decompiled": "\n/* WARNING: Enum \"eCollisionFlags\": Some values do not have unique names */\n/* WARNING: Enum \"eD2TimerType\": Some values do not have unique names */\n/* WARNING: Enum \"eD2TimerTypeDWORD\": Some values do not have unique names */\n/* @function SKILLDESC_DrawDamageWithRange\n   @address Game.exe.ram:004e9610\n   @date 2026.02.26\n   @calling __fastcall\n   @description Diablo 2 1.14d reverse team\n   https://blizzhackers.dev */\n\nvoid __fastcall\nD2Client::UI::SkillDesc::SKILLDESC_DrawDamageWithRange\n          (D2UnitStrc *pUnit,int *pnMinDamage,int *pnMaxDamage,int32_t *pnColor,\n          int32_t nDamagePctBonus,int32_t nFlatDamageBonus,D2SkillStrc *pSkill,uint32_t nSrcDamage,\n          D2UnitStrc *pUnit2)\n\n{\n  D2Client::UI::SkillDesc::SKILLDESC_CalcWeaponDamageRange\n            (pUnit,pnMinDamage,pnMaxDamage,pnColor,nFlatDamageBonus,pSkill,nSrcDamage,pUnit2,0,\n             nDamagePctBonus);\n  D2Client::UI::SkillDesc::SKILLDESC_CalcElemDamageRange\n            (pUnit,pnMinDamage,pnMaxDamage,pnColor,pSkill);\n  return;\n}\n\n"
+    },
+    {
+      "name": "SKILLDESC_CalcWeaponDamageRange",
+      "address": "004e86f0",
+      "entryPoint": "004e86f0",
+      "returnType": "void",
+      "callingConvention": "__stdcall",
+      "size": 675,
+      "hasVarArgs": false,
+      "namespace": "D2Client::UI::SkillDesc",
+      "parameters": [
+        {
+          "name": "pUnit",
+          "dataType": "D2UnitStrc *",
+          "size": 4,
+          "ordinal": 0,
+          "storage": "ECX:4",
+          "stackOffset": null,
+          "resolvedType": null
+        },
+        {
+          "name": "pnMinDamage",
+          "dataType": "int *",
+          "size": 4,
+          "ordinal": 1,
+          "storage": "Stack[0x4]:4",
+          "stackOffset": 4,
+          "resolvedType": null
+        },
+        {
+          "name": "pnMaxDamage",
+          "dataType": "int *",
+          "size": 4,
+          "ordinal": 2,
+          "storage": "Stack[0x8]:4",
+          "stackOffset": 8,
+          "resolvedType": null
+        },
+        {
+          "name": "pnColor",
+          "dataType": "int32_t *",
+          "size": 4,
+          "ordinal": 3,
+          "storage": "Stack[0xc]:4",
+          "stackOffset": 12,
+          "resolvedType": null
+        },
+        {
+          "name": "nFlatDamageBonus",
+          "dataType": "int32_t",
+          "size": 4,
+          "ordinal": 4,
+          "storage": "Stack[0x10]:4",
+          "stackOffset": 16,
+          "resolvedType": null
+        },
+        {
+          "name": "pSkill",
+          "dataType": "D2SkillStrc *",
+          "size": 4,
+          "ordinal": 5,
+          "storage": "Stack[0x14]:4",
+          "stackOffset": 20,
+          "resolvedType": null
+        },
+        {
+          "name": "nSrcDamage",
+          "dataType": "uint32_t",
+          "size": 4,
+          "ordinal": 6,
+          "storage": "Stack[0x18]:4",
+          "stackOffset": 24,
+          "resolvedType": null
+        },
+        {
+          "name": "pUnit2",
+          "dataType": "D2UnitStrc *",
+          "size": 4,
+          "ordinal": 7,
+          "storage": "Stack[0x1c]:4",
+          "stackOffset": 28,
+          "resolvedType": null
+        },
+        {
+          "name": "bUseWeaponStatList",
+          "dataType": "int32_t",
+          "size": 4,
+          "ordinal": 8,
+          "storage": "Stack[0x20]:4",
+          "stackOffset": 32,
+          "resolvedType": null
+        },
+        {
+          "name": "nDamagePctBonus",
+          "dataType": "int32_t",
+          "size": 4,
+          "ordinal": 9,
+          "storage": "EAX:4",
+          "stackOffset": null,
+          "resolvedType": null
+        }
+      ],
+      "tags": [
+        {
+          "type": "llm-named"
+        },
+        {
+          "type": "vc8form",
+          "data": "join(nTotalDmgBonus,nDamagePctBonus);ev=fd67c2aa8c;bh=675-ac700374;dh=931bf11d"
+        },
+        {
+          "type": "llm-artifact-fix"
+        },
+        {
+          "type": "llm-type-fix"
+        }
+      ],
+      "decompiled": "\n/* WARNING: Enum \"eCollisionFlags\": Some values do not have unique names */\n/* WARNING: Enum \"eD2TimerType\": Some values do not have unique names */\n/* WARNING: Enum \"eD2TimerTypeDWORD\": Some values do not have unique names */\n/* @function SKILLDESC_CalcWeaponDamageRange\n   @address Game.exe.ram:004e86f0\n   @date 2026.06.12\n   @params\n     pUnit: ECX:4 (D2UnitStrc *)\n     pnParam1: Stack[0x4]:4 (int *)\n     pnParam2: Stack[0x8]:4 (int *)\n     pdwParam: Stack[0xc]:4 (int32_t *)\n     nParam1: Stack[0x10]:4 (int32_t)\n     pSkill: Stack[0x14]:4 (D2SkillStrc *)\n     nParam: Stack[0x18]:4 (uint32_t)\n     pUnit2: Stack[0x1c]:4 (D2UnitStrc *)\n     nParam2: Stack[0x20]:4 (int32_t)\n     nParam3: EAX:4 (int32_t)\n   @description Diablo 2 1.14d reverse team\n   https://blizzhackers.dev\n   \n   Function uses custom registers for function arguments!\n   [D2UnitStrc * pUnit@ECX:4]\n   [int * pnParam1@Stack[0x4]:4]\n   [int * pnParam2@Stack[0x8]:4]\n   [int32_t * pdwParam@Stack[0xc]:4]\n   [int32_t nParam1@Stack[0x10]:4]\n   [D2SkillStrc * pSkill@Stack[0x14]:4]\n   [uint32_t nParam@Stack[0x18]:4]\n   [D2UnitStrc * pUnit2@Stack[0x1c]:4]\n   [int32_t nParam2@Stack[0x20]:4]\n   [int32_t nParam3@EAX:4] */\n\nvoid D2Client::UI::SkillDesc::SKILLDESC_CalcWeaponDamageRange\n               (D2UnitStrc *pUnit,int *pnMinDamage,int *pnMaxDamage,int32_t *pnColor,\n               int32_t nFlatDamageBonus,D2SkillStrc *pSkill,uint32_t nSrcDamage,D2UnitStrc *pUnit2,\n               int32_t bUseWeaponStatList,int32_t nDamagePctBonus)\n\n{\n  int16_t sAttrBonus;\n  D2SkillsTxt *pSkillsTxt;\n  int nMinDmg;\n  int nMaxDmg;\n  int32_t nItemBonusMin;\n  int nAttrStat;\n  BOOL bHasAttackSpeedState;\n  int nTotalDmgBonus;\n  D2InventoryStrc *pInventory;\n  \n  if (((pSkill != (D2SkillStrc *)0x0) &&\n      (pSkillsTxt = D2Common::Skills::Skills::GetSkillsTxt(pSkill), pSkillsTxt != (D2SkillsTxt *)0x0\n      )) && (pInventory = pUnit->pInventory, pInventory != (D2InventoryStrc *)0x0)) {\n    if ((pUnit2 == (D2UnitStrc *)0x0) &&\n       (pUnit2 = D2Common::INVENTORY::Inventory::GetEquipedWeapon(pInventory),\n       pUnit2 == (D2UnitStrc *)0x0)) {\n      nMinDmg = D2Common::Stats::StatsEx::STATSEX_GetCurrentStat(pUnit,UNITSTAT_mindamage,0);\n      nMinDmg = nMinDmg + 1;\n      nMaxDmg = D2Common::Stats::StatsEx::STATSEX_GetCurrentStat(pUnit,UNITSTAT_maxdamage,0);\n      nMaxDmg = nMaxDmg + 2;\n    }\n    else {\n      D2Common::DATATBLS::ItemTbls::TXT_Items_GetLine(pUnit2->nClassId);\n      if (bUseWeaponStatList == 0) {\n        nMinDmg = D2Common::INVENTORY::Inventory::INVENTORY_GetWeaponHandedness(pUnit,pInventory);\n        if (nMinDmg == 2) {\n          nMinDmg = D2Common::Stats::StatsEx::STATSEX_GetCurrentStat\n                              (pUnit,UNITSTAT_secondary_mindamage,0);\n          nMaxDmg = D2Common::Stats::StatsEx::STATSEX_GetCurrentStat\n                              (pUnit,UNITSTAT_secondary_maxdamage,0);\n        }\n        else {\n          nMinDmg = D2Common::Stats::StatsEx::STATSEX_GetCurrentStat(pUnit,UNITSTAT_mindamage,0);\n          nMaxDmg = D2Common::Stats::StatsEx::STATSEX_GetCurrentStat(pUnit,UNITSTAT_maxdamage,0);\n        }\n      }\n      else {\n        nMinDmg = D2Common::Stats::StatsEx::STATLIST_GetStatForDamageCalc\n                            (pUnit,pUnit2,UNITSTAT_mindamage);\n        nMaxDmg = D2Common::Stats::StatsEx::STATLIST_GetStatForDamageCalc\n                            (pUnit,pUnit2,UNITSTAT_maxdamage);\n      }\n    }\n    if (nSrcDamage == 0) {\n      nSrcDamage = (uint32_t)pSkillsTxt->SrcDam;\n    }\n    if (nSrcDamage != 0x80) {\n      nMinDmg = (int)(nMinDmg * nSrcDamage + ((int)(nMinDmg * nSrcDamage) >> 0x1f & 0x7fU)) >> 7;\n      nMaxDmg = (int)(nMaxDmg * nSrcDamage + ((int)(nMaxDmg * nSrcDamage) >> 0x1f & 0x7fU)) >> 7;\n    }\n    if (nSrcDamage != 0) {\n      if (nMinDmg < 1) {\n        nMinDmg = 1;\n      }\n      *pnMinDamage = *pnMinDamage + nMinDmg;\n      if (nMaxDmg < 2) {\n        nMaxDmg = 2;\n      }\n      *pnMaxDamage = *pnMaxDamage + nMaxDmg;\n    }\n    nMinDmg = D2Common::Stats::StatsEx::STATSEX_GetCurrentStat(pUnit,UNITSTAT_damagepercent,0);\n    nItemBonusMin = D2Common::Skills::Skills::SKILLS_GetItemBonusDamage(pUnit,pUnit2,pSkill,1);\n    nTotalDmgBonus = nDamagePctBonus + nMinDmg + nItemBonusMin;\n    nMinDmg = D2Common::Stats::StatsEx::STATSEX_GetCurrentStat\n                        (pUnit,UNITSTAT_item_mindamage_percent,0);\n    nMaxDmg = D2Common::Stats::StatsEx::STATSEX_GetCurrentStat\n                        (pUnit,UNITSTAT_item_maxdamage_percent,0);\n    if (((pSkillsTxt->field_0x4 & (byte)Fog::BitBuffer::gadwBitMasks[3]) != 0) &&\n       (nItemBonusMin = D2Client::UI::SkillDesc::SKILLDESC_GetAuraBonusDamage(), nItemBonusMin != 0)\n       ) {\n      nTotalDmgBonus = nTotalDmgBonus + nItemBonusMin;\n      *pnColor = 3;\n    }\n    nItemBonusMin = 0;\n    if (pUnit2 == (D2UnitStrc *)0x0) {\n      nAttrStat = D2Common::Stats::StatsEx::STATSEX_GetCurrentStat(pUnit,UNITSTAT_strength,0);\n      nTotalDmgBonus = nTotalDmgBonus + nAttrStat;\n    }\n    else {\n      sAttrBonus = D2Common::ITEMS::Items::ITEM_GetItemsTxt_wStrBonus(pUnit2);\n      if (sAttrBonus != 0) {\n        nAttrStat = D2Common::Stats::StatsEx::STATSEX_GetCurrentStat(pUnit,UNITSTAT_strength,0);\n        nTotalDmgBonus = nTotalDmgBonus + (nAttrStat * sAttrBonus) / 100;\n      }\n      sAttrBonus = D2Common::ITEMS::Items::ITEM_GetItemsTxt_wDexBonus(pUnit2);\n      if (sAttrBonus != 0) {\n        nAttrStat = D2Common::Stats::StatsEx::STATSEX_GetCurrentStat(pUnit,UNITSTAT_dexterity,0);\n        nTotalDmgBonus = nTotalDmgBonus + (nAttrStat * sAttrBonus) / 100;\n      }\n      nItemBonusMin =\n           D2Common::Stats::StatsEx::STATLIST_UnitGetStatValueUnchecked\n                     (pUnit2,UNITSTAT_item_normaldamage,0);\n    }\n    bHasAttackSpeedState = D2Common::DATATBLS::ItemStats::STATES_HasDamBlueFlagState(pUnit);\n    if (bHasAttackSpeedState != 0) {\n      *pnColor = 3;\n    }\n    bHasAttackSpeedState = D2Common::DATATBLS::ItemStats::STATES_HasDamRedFlagState(pUnit);\n    if (bHasAttackSpeedState != 0) {\n      *pnColor = 1;\n    }\n    if (nTotalDmgBonus < -0x59) {\n      nTotalDmgBonus = -0x5a;\n    }\n    *pnMinDamage = ((nMinDmg + 100 + nTotalDmgBonus) * *pnMinDamage) / 100 + nItemBonusMin +\n                   nFlatDamageBonus;\n    *pnMaxDamage = ((nMaxDmg + 100 + nTotalDmgBonus) * *pnMaxDamage) / 100 + nItemBonusMin +\n                   nFlatDamageBonus;\n    return;\n  }\n  return;\n}\n\n"
+    },
+    {
+      "name": "SKILLDESC_CalcElemDamageRange",
+      "address": "004e89a0",
+      "entryPoint": "004e89a0",
+      "returnType": "int",
+      "callingConvention": "__stdcall",
+      "size": 1000,
+      "hasVarArgs": false,
+      "namespace": "D2Client::UI::SkillDesc",
+      "parameters": [
+        {
+          "name": "pUnit",
+          "dataType": "D2UnitStrc *",
+          "size": 4,
+          "ordinal": 0,
+          "storage": "Stack[0x4]:4",
+          "stackOffset": 4,
+          "resolvedType": null
+        },
+        {
+          "name": "pnMinDamage",
+          "dataType": "int *",
+          "size": 4,
+          "ordinal": 1,
+          "storage": "Stack[0x8]:4",
+          "stackOffset": 8,
+          "resolvedType": null
+        },
+        {
+          "name": "pnMaxDamage",
+          "dataType": "int *",
+          "size": 4,
+          "ordinal": 2,
+          "storage": "Stack[0xc]:4",
+          "stackOffset": 12,
+          "resolvedType": null
+        },
+        {
+          "name": "pnColor",
+          "dataType": "uint32_t *",
+          "size": 4,
+          "ordinal": 3,
+          "storage": "Stack[0x10]:4",
+          "stackOffset": 16,
+          "resolvedType": null
+        },
+        {
+          "name": "pSkill",
+          "dataType": "D2SkillStrc *",
+          "size": 4,
+          "ordinal": 4,
+          "storage": "Stack[0x14]:4",
+          "stackOffset": 20,
+          "resolvedType": null
+        }
+      ],
+      "tags": [
+        {
+          "type": "llm-named"
+        },
+        {
+          "type": "vc8form",
+          "data": "seq(pElemStatTable,pElemDmgTypeTable,@2);ev=ac704038b6;bh=1000-d098c9cc;dh=039f4dd2"
+        },
+        {
+          "type": "lost-arg"
+        }
+      ],
+      "decompiled": "\n/* WARNING: Enum \"eCollisionFlags\": Some values do not have unique names */\n/* WARNING: Enum \"eD2TimerType\": Some values do not have unique names */\n/* WARNING: Enum \"eD2TimerTypeDWORD\": Some values do not have unique names */\n/* @function SKILLDESC_CalcElemDamageRange\n   @address Game.exe.ram:004e89a0\n   @date 2026.06.07\n   @calling __stdcall\n   @description Diablo 2 1.14d reverse team\n   https://blizzhackers.dev */\n\nint D2Client::UI::SkillDesc::SKILLDESC_CalcElemDamageRange\n              (D2UnitStrc *pUnit,int *pnMinDamage,int *pnMaxDamage,undefined4 *pnColor,\n              D2SkillStrc *pSkill)\n\n{\n  uint nElemMinDmg;\n  uint nElemMaxDmg;\n  uint nMasteryPct;\n  int nMasteryBonus;\n  int nPoisonLength;\n  D2SkillsTxt *pSkillsTxt;\n  BOOL bHasAttackSpeedState;\n  longlong nDivResult;\n  int *pElemDmgTypeTable;\n  int *pElemStatTable;\n  \n  pElemDmgTypeTable = gaSkillElemDamageTypeIds;\n  pElemStatTable = &gaSkillElemDamageStatTriples[0].nMasteryStat;\n  do {\n    nElemMinDmg = D2Common::Stats::StatsEx::STATSEX_GetCurrentStat\n                            (pUnit,((D2ElemDmgStatTripleStrc *)(pElemStatTable + -2))->\n                                   nMinDamageStat,0);\n    nElemMaxDmg = D2Common::Stats::StatsEx::STATSEX_GetCurrentStat(pUnit,pElemStatTable[-1],0);\n    if ((*pElemStatTable != ~UNITSTAT_strength) &&\n       (nMasteryPct = D2Common::Stats::StatsEx::STATSEX_GetCurrentStat(pUnit,*pElemStatTable,0),\n       nMasteryPct != 0)) {\n      if ((int)nElemMinDmg < 0x100001) {\n        if ((int)nMasteryPct < 0x10001) {\n          nMasteryBonus = (int)(nMasteryPct * nElemMinDmg) / 100;\n        }\n        else if ((int)(nMasteryPct & 0xfffffff0) < 0x640) {\n          nDivResult = compiler::_alldiv((uint)((longlong)(int)nMasteryPct *\n                                               (longlong)(int)nElemMinDmg),\n                                         (uint)((ulonglong)\n                                                ((longlong)(int)nMasteryPct *\n                                                (longlong)(int)nElemMinDmg) >> 0x20),100,0);\n          nMasteryBonus = (int)nDivResult;\n        }\n        else {\n          nMasteryBonus = ((int)nMasteryPct / 100) * nElemMinDmg;\n        }\n      }\n      else if ((int)(nElemMinDmg & 0xfffffff0) < 0x640) {\n        nDivResult = compiler::_alldiv((uint)((longlong)(int)nMasteryPct *\n                                             (longlong)(int)nElemMinDmg),\n                                       (uint)((ulonglong)\n                                              ((longlong)(int)nMasteryPct *\n                                              (longlong)(int)nElemMinDmg) >> 0x20),100,0);\n        nMasteryBonus = (int)nDivResult;\n      }\n      else {\n        nMasteryBonus = ((int)nElemMinDmg / 100) * nMasteryPct;\n      }\n      nElemMinDmg = nElemMinDmg + nMasteryBonus;\n      if ((int)nElemMaxDmg < 0x100001) {\n        if ((int)nMasteryPct < 0x10001) {\n          nMasteryBonus = (int)(nMasteryPct * nElemMaxDmg) / 100;\n        }\n        else if ((int)(nMasteryPct & 0xfffffff0) < 0x640) {\n          nDivResult = compiler::_alldiv((uint)((longlong)(int)nMasteryPct *\n                                               (longlong)(int)nElemMaxDmg),\n                                         (uint)((ulonglong)\n                                                ((longlong)(int)nMasteryPct *\n                                                (longlong)(int)nElemMaxDmg) >> 0x20),100,0);\n          nMasteryBonus = (int)nDivResult;\n        }\n        else {\n          nMasteryBonus = ((int)nMasteryPct / 100) * nElemMaxDmg;\n        }\n      }\n      else if ((int)(nElemMaxDmg & 0xfffffff0) < 0x640) {\n        nDivResult = compiler::_alldiv((uint)((longlong)(int)nMasteryPct *\n                                             (longlong)(int)nElemMaxDmg),\n                                       (uint)((ulonglong)\n                                              ((longlong)(int)nMasteryPct *\n                                              (longlong)(int)nElemMaxDmg) >> 0x20),100,0);\n        nMasteryBonus = (int)nDivResult;\n      }\n      else {\n        nMasteryBonus = ((int)nElemMaxDmg / 100) * nMasteryPct;\n      }\n      nElemMaxDmg = nElemMaxDmg + nMasteryBonus;\n    }\n    if ((int)nElemMaxDmg <= (int)nElemMinDmg) {\n      nElemMinDmg = nElemMaxDmg;\n    }\n    *pnMinDamage = *pnMinDamage + nElemMinDmg;\n    *pnMaxDamage = *pnMaxDamage + nElemMaxDmg;\n    if ((nElemMinDmg != 0) || (nElemMaxDmg != 0)) {\n      *pnColor = *pElemDmgTypeTable;\n    }\n    pElemDmgTypeTable = pElemDmgTypeTable + 1;\n    pElemStatTable = pElemStatTable + 3;\n  } while ((int)pElemStatTable < 0x6dbf2c);\n  nElemMinDmg = D2Common::Stats::StatsEx::STATSEX_GetCurrentStat(pUnit,UNITSTAT_poisonmindam,0);\n  nElemMaxDmg = D2Common::Stats::StatsEx::STATSEX_GetCurrentStat(pUnit,UNITSTAT_poisonmaxdam,0);\n  if (nElemMaxDmg != 0) {\n    nMasteryPct = D2Common::Stats::StatsEx::STATSEX_GetCurrentStat\n                            (pUnit,UNITSTAT_passive_pois_mastery,0);\n    if (nMasteryPct != 0) {\n      if ((int)nElemMinDmg < 0x100001) {\n        if ((int)nMasteryPct < 0x10001) {\n          nMasteryBonus = (int)(nMasteryPct * nElemMinDmg) / 100;\n        }\n        else if ((int)(nMasteryPct & 0xfffffff0) < 0x640) {\n          nDivResult = compiler::_alldiv((uint)((longlong)(int)nMasteryPct *\n                                               (longlong)(int)nElemMinDmg),\n                                         (uint)((ulonglong)\n                                                ((longlong)(int)nMasteryPct *\n                                                (longlong)(int)nElemMinDmg) >> 0x20),100,0);\n          nMasteryBonus = (int)nDivResult;\n        }\n        else {\n          nMasteryBonus = ((int)nMasteryPct / 100) * nElemMinDmg;\n        }\n      }\n      else if ((int)(nElemMinDmg & 0xfffffff0) < 0x640) {\n        nDivResult = compiler::_alldiv((uint)((longlong)(int)nMasteryPct *\n                                             (longlong)(int)nElemMinDmg),\n                                       (uint)((ulonglong)\n                                              ((longlong)(int)nMasteryPct *\n                                              (longlong)(int)nElemMinDmg) >> 0x20),100,0);\n        nMasteryBonus = (int)nDivResult;\n      }\n      else {\n        nMasteryBonus = ((int)nElemMinDmg / 100) * nMasteryPct;\n      }\n      nElemMinDmg = nElemMinDmg + nMasteryBonus;\n      if ((int)nElemMaxDmg < 0x100001) {\n        if ((int)nMasteryPct < 0x10001) {\n          nMasteryBonus = (int)(nMasteryPct * nElemMaxDmg) / 100;\n        }\n        else if ((int)(nMasteryPct & 0xfffffff0) < 0x640) {\n          nDivResult = compiler::_alldiv((uint)((longlong)(int)nMasteryPct *\n                                               (longlong)(int)nElemMaxDmg),\n                                         (uint)((ulonglong)\n                                                ((longlong)(int)nMasteryPct *\n                                                (longlong)(int)nElemMaxDmg) >> 0x20),100,0);\n          nMasteryBonus = (int)nDivResult;\n        }\n        else {\n          nMasteryBonus = ((int)nMasteryPct / 100) * nElemMaxDmg;\n        }\n      }\n      else if ((int)(nElemMaxDmg & 0xfffffff0) < 0x640) {\n        nDivResult = compiler::_alldiv((uint)((longlong)(int)nMasteryPct *\n                                             (longlong)(int)nElemMaxDmg),\n                                       (uint)((ulonglong)\n                                              ((longlong)(int)nMasteryPct *\n                                              (longlong)(int)nElemMaxDmg) >> 0x20),100,0);\n        nMasteryBonus = (int)nDivResult;\n      }\n      else {\n        nMasteryBonus = ((int)nElemMaxDmg / 100) * nMasteryPct;\n      }\n      nElemMaxDmg = nElemMaxDmg + nMasteryBonus;\n    }\n    nMasteryBonus =\n         D2Common::Stats::StatsEx::STATSEX_GetCurrentStat\n                   (pUnit,UNITSTAT_skill_poison_override_length,0);\n    if (nMasteryBonus < 1) {\n      nPoisonLength =\n           D2Common::Stats::StatsEx::STATSEX_GetCurrentStat(pUnit,UNITSTAT_poison_count,0);\n      if (nPoisonLength < 2) {\n        nPoisonLength = 1;\n      }\n      nMasteryBonus =\n           D2Common::Stats::StatsEx::STATSEX_GetCurrentStat(pUnit,UNITSTAT_poisonlength,0);\n      nMasteryBonus = nMasteryBonus / nPoisonLength;\n    }\n    *pnColor = 2;\n    *pnMinDamage = *pnMinDamage + ((int)(nMasteryBonus * nElemMinDmg) >> 8);\n    *pnMaxDamage = *pnMaxDamage + ((int)(nMasteryBonus * nElemMaxDmg) >> 8);\n  }\n  if (0 < *pnMaxDamage) {\n    nMasteryBonus = *pnMinDamage;\n    if (nMasteryBonus < 1) {\n      nMasteryBonus = 1;\n    }\n    *pnMinDamage = nMasteryBonus;\n    nPoisonLength = nMasteryBonus + 1;\n    if (nMasteryBonus + 1 <= *pnMaxDamage) {\n      nPoisonLength = *pnMaxDamage;\n    }\n    *pnMaxDamage = nPoisonLength;\n  }\n  if (((pSkill != (D2SkillStrc *)0x0) &&\n      (pSkillsTxt = D2Common::Skills::Skills::GetSkillsTxt(pSkill), pSkillsTxt != (D2SkillsTxt *)0x0\n      )) && ((pSkillsTxt->field_0x4 & (byte)Fog::BitBuffer::gadwBitMasks[3]) != 0)) {\n    D2Client::UI::SkillDesc::SKILLDESC_AccumulateAuraBonusDmg(pUnit,pnMinDamage,pnMaxDamage,pnColor)\n    ;\n  }\n  bHasAttackSpeedState = D2Common::DATATBLS::ItemStats::STATES_HasDamBlueFlagState(pUnit);\n  if (bHasAttackSpeedState != 0) {\n    *pnColor = 3;\n  }\n  bHasAttackSpeedState = D2Common::DATATBLS::ItemStats::STATES_HasDamRedFlagState(pUnit);\n  if (bHasAttackSpeedState != 0) {\n    *pnColor = 1;\n  }\n  return 1;\n}\n\n"
+    },
+    {
+      "name": "SKILLDESC_AccumulateAuraBonusDmg",
+      "address": "004e7120",
+      "entryPoint": "004e7120",
+      "returnType": "int",
+      "callingConvention": "__stdcall",
+      "size": 429,
+      "hasVarArgs": false,
+      "namespace": "D2Client::UI::SkillDesc",
+      "parameters": [
+        {
+          "name": "pUnit",
+          "dataType": "D2UnitStrc *",
+          "size": 4,
+          "ordinal": 0,
+          "storage": "Stack[0x4]:4",
+          "stackOffset": 4,
+          "resolvedType": null
+        },
+        {
+          "name": "pnMinDmgAcc",
+          "dataType": "int *",
+          "size": 4,
+          "ordinal": 1,
+          "storage": "Stack[0x8]:4",
+          "stackOffset": 8,
+          "resolvedType": null
+        },
+        {
+          "name": "pnMaxDmgAcc",
+          "dataType": "int *",
+          "size": 4,
+          "ordinal": 2,
+          "storage": "Stack[0xc]:4",
+          "stackOffset": 12,
+          "resolvedType": null
+        },
+        {
+          "name": "pdwElemColorOut",
+          "dataType": "uint32_t *",
+          "size": 4,
+          "ordinal": 3,
+          "storage": "Stack[0x10]:4",
+          "stackOffset": 16,
+          "resolvedType": null
+        }
+      ],
+      "tags": [
+        {
+          "type": "llm-type-fix"
+        },
+        {
+          "type": "asm-signature"
+        }
+      ],
+      "decompiled": "\n/* WARNING: Enum \"eCollisionFlags\": Some values do not have unique names */\n/* WARNING: Enum \"eD2TimerType\": Some values do not have unique names */\n/* WARNING: Enum \"eD2TimerTypeDWORD\": Some values do not have unique names */\n/* @function SKILLDESC_AccumulateAuraBonusDmg\n   @address Game.exe.ram:004e7120\n   @date 2026.06.12\n   @calling __stdcall\n   @description Diablo 2 1.14d reverse team\n   https://blizzhackers.dev */\n\nint D2Client::UI::SkillDesc::SKILLDESC_AccumulateAuraBonusDmg\n              (D2UnitStrc *pUnit,int *pnMinDmgAcc,int *pnMaxDmgAcc,undefined4 *pdwElemColorOut)\n\n{\n  BOOL eState;\n  D2StatListExStrc *pStatList;\n  eD2Skills eSkill;\n  int nSkillLevel;\n  int nAuraStatValue;\n  D2SkillDescTxt *pSkillDesc;\n  int32_t nCalcMin;\n  uint32_t nCalcResult;\n  int nStateIdx;\n  byte byElemType;\n  short nAuraStat;\n  D2SkillsTxt *pSkillsTxt;\n  \n  nStateIdx = 0;\n  if (0 < (short)D2Common::ITEMS::Items::sgptDataTable->nAllStatesDataTblFlag0x04Size) {\n    do {\n      eState = D2Common::DATATBLS::ItemStats::UNIT_GetUnitState\n                         (pUnit,(int)D2Common::ITEMS::Items::sgptDataTable->\n                                     pAllStatesDataTblFlag0x04[nStateIdx].nStateId);\n      if ((((((eState != 0) &&\n             (pStatList = D2Common::Stats::StatsEx::GetStatsByState\n                                    (pUnit,(int)D2Common::ITEMS::Items::sgptDataTable->\n                                                pAllStatesDataTblFlag0x04[nStateIdx].nStateId),\n             pStatList != (D2StatListExStrc *)0x0)) &&\n            (eSkill = D2Common::Stats::StatsEx::STATLIST_GetBaseStatValue\n                                (pStatList,UNITSTAT_modifierlist_skill,0), 0 < (int)eSkill)) &&\n           (((int)eSkill < D2Common::ITEMS::Items::sgptDataTable->nTxtSkillsCount &&\n            (pSkillsTxt = D2Common::ITEMS::Items::sgptDataTable->pTxtSkills,\n            pSkillsTxt + eSkill != (D2SkillsTxt *)0x0)))) &&\n          ((nSkillLevel = D2Common::Stats::StatsEx::STATLIST_GetBaseStatValue\n                                    (pStatList,UNITSTAT_modifierlist_level,0), 0 < nSkillLevel &&\n           ((nAuraStat = pSkillsTxt[eSkill].aurastat[0], -1 < nAuraStat &&\n            ((int)nAuraStat < D2Common::ITEMS::Items::sgptDataTable->nTxtItemStatCostSize)))))) &&\n         (nAuraStatValue =\n               D2Common::Stats::StatsEx::STATLIST_GetBaseStatValue(pStatList,(int)nAuraStat,0),\n         0 < nAuraStatValue)) {\n        pSkillDesc = D2Common::Skills::Skills::GetSkillDescription(eSkill);\n        if (pSkillDesc == (D2SkillDescTxt *)0x0) {\n          nCalcMin = D2Common::Skills::Skills::SERVER_MinDamage(pUnit,eSkill,nSkillLevel,1);\n          *pnMinDmgAcc = *pnMinDmgAcc + (nCalcMin >> 8);\n          nCalcMin = D2Common::Skills::Skills::SERVER_MaxDamage(pUnit,eSkill,nSkillLevel,1);\n          *pnMaxDmgAcc = *pnMaxDmgAcc + (nCalcMin >> 8);\n        }\n        else {\n          if (nAuraStatValue < 2) {\n            nAuraStatValue = 1;\n          }\n          else if (2 < nAuraStatValue) {\n            nAuraStatValue = 3;\n          }\n          nCalcResult = D2Common::Skills::Skills::SKILLS_EvalDescCalcBytecode\n                                  (pUnit,*(uint32_t *)(pSkillDesc->dmelem + nAuraStatValue * 4),\n                                   eSkill,nSkillLevel);\n          *pnMinDmgAcc = *pnMinDmgAcc + nCalcResult;\n          nCalcResult = D2Common::Skills::Skills::SKILLS_EvalDescCalcBytecode\n                                  (pUnit,pSkillDesc->dmmin[nAuraStatValue + 2],eSkill,nSkillLevel);\n          *pnMaxDmgAcc = *pnMaxDmgAcc + nCalcResult;\n          byElemType = pSkillDesc->dmelem[nAuraStatValue + -1];\n          if ((byElemType != 0) && (byElemType < 0xd)) {\n            nCalcResult = D2Client::UI::SkillDesc::SKILLDESC_ElemTypeToColorIndex((uint)byElemType);\n            *pdwElemColorOut = nCalcResult;\n          }\n        }\n      }\n      nStateIdx = nStateIdx + 1;\n    } while (nStateIdx < (short)D2Common::ITEMS::Items::sgptDataTable->nAllStatesDataTblFlag0x04Size\n            );\n  }\n  return 1;\n}\n\n"
+    }
+  ],
+  "callbackType": {
+    "name": "pfnSkillDescWeaponDmgCalc",
+    "category": "/D2Client/UI/SkillDesc",
+    "size": -1,
+    "description": "Function Signature Data Type",
+    "alignment": 1,
+    "type": "function",
+    "fields": null,
+    "values": null,
+    "underlyingType": null,
+    "returnType": "void",
+    "parameters": [
+      {
+        "name": "pUnit",
+        "dataType": "D2UnitStrc *",
+        "ordinal": 0
+      },
+      {
+        "name": "pnParam",
+        "dataType": "int *",
+        "ordinal": 1
+      },
+      {
+        "name": "pnOut1",
+        "dataType": "uint32_t *",
+        "ordinal": 2
+      },
+      {
+        "name": "dwParam0",
+        "dataType": "int32_t *",
+        "ordinal": 3
+      },
+      {
+        "name": "dwParam1",
+        "dataType": "uint32_t",
+        "ordinal": 4
+      },
+      {
+        "name": "nParam",
+        "dataType": "int32_t",
+        "ordinal": 5
+      },
+      {
+        "name": "pSkill",
+        "dataType": "D2SkillStrc *",
+        "ordinal": 6
+      },
+      {
+        "name": "dwParam2",
+        "dataType": "uint32_t",
+        "ordinal": 7
+      },
+      {
+        "name": "pUnit2",
+        "dataType": "D2UnitStrc *",
+        "ordinal": 8
+      }
+    ],
+    "callingConvention": "__fastcall",
+    "effectiveCallingConvention": "__fastcall",
+    "hasUnknownCallingConvention": false,
+    "hasVarArgs": false,
+    "kind": "FUNCTION_DEFINITION"
+  },
+  "options": {
+    "outputDir": "./out",
+    "format": "cpp",
+    "organization": "namespace",
+    "generateCMake": false,
+    "generateSourceMaps": false,
+    "transformPreset": "full",
+    "includeAddressComments": false,
+    "promoteStaticGlobals": false
+  },
+  "tag": "split(nMinDamage,uint32_t,nMinDamageLocal);ev=0000000000;bh=311-20e44e96;dh=d3448606"
+}
