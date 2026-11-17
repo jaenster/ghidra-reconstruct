@@ -28,6 +28,14 @@ import { builtinTruthSite } from './truth-form-safety.js';
  *                        Refused when one statement mentions what another stores, or
  *                        when a statement that stores through memory shares the run with
  *                        a call.
+ *   bounds(LX,LY,HX,HY)  four adjacent global int stores of private int coordinates
+ *                        X-Kx, Y-Ky, X+Kx, Y+Ky reuse LX+2*Kx and LY+2*Ky for the
+ *                        maxima. Each minimum must precede its maximum. Requires four
+ *                        distinct known nonvolatile builtin signed-int globals and plain
+ *                        int locals/parameters, with positive literal extents whose double
+ *                        fits int. Refuses aliases, casts, effects, shadowing and unknown
+ *                        types. On the original joint defined domain both rewritten sums
+ *                        stay representable; it does not assume signed overflow wraps.
  *   fold(V)              each value stored to local V is written into its uses up to the
  *                        next store to V, and the store goes; `*V` of a stored `&X` is X.
  *                        V's declaration goes once nothing names V. A compound store
@@ -445,6 +453,7 @@ export type Vc8Form =
   | { op: 'nullfault32' }
   | { op: 'swdefault'; expr: string; values: string[]; index?: number }
   | { op: 'seq'; targets: string[]; index?: number }
+  | { op: 'bounds'; targets: [string, string, string, string] }
   | { op: 'fold'; name: string }
   | { op: 'join'; into: string; from: string }
   | { op: 'coalesce'; name: string; from?: string }
@@ -533,6 +542,9 @@ export type Vc8FormTables = SelectArgumentOptions & RecordWalkTables & {
   /** Bytes a value of the spelled type occupies, or null. */
   typeSize?: (spelling: string) => number | null;
   structFieldOffsets?: Record<string, Record<string, number>>;
+  /** Original storage ranges, needed by bounds to reject aliases/overlapping globals. */
+  globalAddresses?: Record<string, number>;
+  globalSizes?: Record<string, number>;
   targetLanguageId?: string;
   targetPointerSize?: number;
 };
@@ -554,7 +566,7 @@ export interface Vc8FormOptions {
   selectTables?: Vc8FormTables;
 }
 
-const OPS = new Set(['zerolife', 'nullfault32', 'swdefault', 'seq', 'fold', 'join', 'coalesce', 'recordwalk', 'cache', 'own', 'guards', 'merge-guards', 'retval', 'branchret', 'width', 'boolflag', 'retwiden', 'arms',
+const OPS = new Set(['zerolife', 'nullfault32', 'swdefault', 'seq', 'bounds', 'fold', 'join', 'coalesce', 'recordwalk', 'cache', 'own', 'guards', 'merge-guards', 'retval', 'branchret', 'width', 'boolflag', 'retwiden', 'arms',
   'nest', 'merge-tail', 'tailguard', 'tailcopy', 'continue', 'dup', 'tarms', 'zero', 'nonzero', 'bool', 'cmp', 'swap', 'ifsel', 'clamp', 'split', 'select', 'decl', 'unselect', 'tsel', 'hoist',
   'nestcall', 'fill', 'elems', 'copy', 'shift', 'ptrwalk', 'rowptr', 'acc', 'retvar', 'onecall', 'roundup', 'swmerge', 'switch', 'dec', 'opas', 'range', 'castout', 'signbit', 'nullfield', 'zinit', 'znew', 'swclamp', 'retbase', 'postdec']);
 
@@ -602,6 +614,9 @@ export function parseVc8Form(text: string): Vc8Form | undefined {
       const n = anchor === undefined ? 0 : /^\d+$/.test(anchor) ? Number(anchor) : NaN;
       return args.length >= 2 && (n === 0 || n >= 1) ? { op: 'seq', targets: args, ...(n ? { index: n } : {}) } : undefined;
     }
+    case 'bounds':
+      return args.length === 4 && !anchor && args.every(a => /^(?:::)?[A-Za-z_]\w*(?:::[A-Za-z_]\w*)*$/.test(a))
+        && new Set(args).size === 4 ? { op: 'bounds', targets: args as [string, string, string, string] } : undefined;
     case 'fold': return args.length === 1 && !anchor ? { op: 'fold', name: args[0] } : undefined;
     case 'coalesce': return (args.length === 1 || args.length === 2) && !anchor && /^[A-Za-z_]\w*$/.test(args[0])
       && (args.length === 1 || /^[A-Za-z_]\w*(?:->[A-Za-z_]\w*)?$/.test(norm(args[1])))
@@ -1071,6 +1086,68 @@ function doSeq(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'seq' }>): void {
       const byTarget = new Map(run.map((s, k) => [got[k]!, s]));
       st.splice(i, want.length, ...want.map(w => byTarget.get(w)!));
     }
+  }
+}
+
+/** Reuse a stored minimum without widening the original signed-int defined domain. */
+function doBounds(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'bounds' }>): void {
+  const targets = f.targets.map(norm), locals = localNames(fn);
+  const signedInt = (t: string | undefined) => !!t && ['int', 'signed', 'signedint'].includes(norm(t));
+  if (!/^x86:LE:(?:32|64):/.test(selectTables?.targetLanguageId ?? '')
+    || ![4, 8].includes(selectTables?.targetPointerSize ?? 0)) refuse('bounds needs an x86 model with 32-bit int');
+  if (new Set(targets).size !== 4 || targets.some(t => locals.has(t) || !signedInt(selectTables?.globalTypes?.[t])))
+    refuse('bounds targets must be distinct known nonvolatile builtin int globals, without local shadowing');
+  const addresses = targets.map(t => selectTables?.globalAddresses?.[t]);
+  if (addresses.some((a, i) => !Number.isSafeInteger(a) || a! < 0 || a! > Number.MAX_SAFE_INTEGER - 4
+    || selectTables?.globalSizes?.[targets[i]] !== 4)) refuse('bounds needs each global four-byte storage range');
+  for (let a = 0; a < 4; a++) for (let b = a + 1; b < 4; b++)
+    if (Math.abs(addresses[a]! - addresses[b]!) < 4) refuse('bounds globals alias or overlap');
+  const privateInt = (name: string) => {
+    const parameters = fn.parameters.filter(p => (p as unknown as { name?: Identifier }).name?.name === name);
+    const declarations = [...walk(fn.body!)].filter(n => n.node.kind === NodeKind.VariableDecl
+      && (n.node as VariableDecl).name.name === name).map(n => n.node as VariableDecl);
+    return parameters.length + declarations.length === 1 && signedInt(declaredType(fn, name))
+      && declarations.every(d => d.specifiers.length === 0);
+  };
+  const extent = (e: Expression): bigint | undefined => {
+    const v = unparen(e), s = text(v);
+    if (v.kind !== NodeKind.IntegerLiteral || !/^(?:[1-9][0-9]*|0[xX][0-9a-fA-F]+)$/.test(s)) return undefined;
+    const n = BigInt(s);
+    return n > 0n && n * 2n <= 2147483647n ? n : undefined;
+  };
+  type Pair = { low: AssignExpr; high: AssignExpr; twice: bigint };
+  const hits: Pair[][] = [];
+  for (const b of blocks(fn)) {
+    for (let i = 0; i + 4 <= b.statements.length; i++) {
+      const run = b.statements.slice(i, i + 4).map(storeOf);
+      if (!run.every((s): s is AssignExpr => !!s && s.operator === '=')) continue;
+      const names = run.map(s => text(s.left));
+      if (new Set(names).size !== 4 || names.some(n => !targets.includes(n))) continue;
+      const pairs: Pair[] = [];
+      for (const [l, h] of [[0, 2], [1, 3]]) {
+        const lowIndex = names.indexOf(targets[l]), highIndex = names.indexOf(targets[h]);
+        if (lowIndex > highIndex) break;
+        const low = run[lowIndex], high = run[highIndex], a = unparen(low.right), z = unparen(high.right);
+        if (a.kind !== NodeKind.BinaryExpr || z.kind !== NodeKind.BinaryExpr) break;
+        const sub = a as BinaryExpr, add = z as BinaryExpr, source = unparen(sub.left);
+        if (sub.operator !== '-' || add.operator !== '+' || !isId(source)
+          || !isId(unparen(add.left), source.name) || !privateInt(source.name)) break;
+        const k = extent(sub.right);
+        if (k === undefined || extent(add.right) !== k) break;
+        pairs.push({ low, high, twice: k * 2n });
+      }
+      if (pairs.length === 2) hits.push(pairs);
+    }
+  }
+  if (hits.length !== 1) refuse(`${hits.length} adjacent signed-int bound pairs`);
+  // A defined original has INT_MIN+K <= X <= INT_MAX-K. Thus X-K+2*K
+  // is representable and equals X+K. The four complete global objects are
+  // distinct, and their RHSs only read private scalar values: no write can
+  // change either coordinate or the minimum reused by its own maximum.
+  for (const p of hits[0]) {
+    const sum = parseExpr(`__vc8_bounds_min + ${p.twice}`) as BinaryExpr;
+    sum.left = cloneNode(p.low.left);
+    p.high.right = sum;
   }
 }
 
@@ -5107,7 +5184,7 @@ const APPLY: { [K in Vc8Form['op']]: (fn: FunctionDecl, f: Extract<Vc8Form, { op
   zerolife: doZeroLife,
   nullfault32: doNullfault32,
   swdefault: (fn, f) => { const why = restoreSwitchDefault(fn, f.expr, f.values, f.index, selectTables); if (why) refuse(why); },
-  seq: doSeq, fold: doFold, join: doJoin, coalesce: doCoalesce, recordwalk: doRecordwalk, cache: doCache, own: doOwn, guards: doGuards, 'merge-guards': doMergeGuards,
+  seq: doSeq, bounds: doBounds, fold: doFold, join: doJoin, coalesce: doCoalesce, recordwalk: doRecordwalk, cache: doCache, own: doOwn, guards: doGuards, 'merge-guards': doMergeGuards,
   retval: doRetval, branchret: doBranchret, width: doWidth, boolflag: doBoolflag, retwiden: doRetwiden, arms: doArms,
   nest: doNest, 'merge-tail': doMergeTail, tailguard: doTailguard, tailcopy: doTailcopy, continue: doContinue, dup: doDup, tarms: doTarms, zero: doZero, nonzero: doNonzero,
   bool: doBool,

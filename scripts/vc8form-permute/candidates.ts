@@ -33,6 +33,8 @@ import { respellPlaceholderType } from '../../packages/reconstruct/src/codegen/p
 import { emittedMemberNames } from '../../packages/reconstruct/src/codegen/header.js';
 import { accessorTwins } from '../../packages/reconstruct/src/codegen/accessor-twins.js';
 import { registerEnumTypedefTargets } from '../../packages/reconstruct/src/codegen/enum-width.js';
+import { buildGlobalAddressExtentTables } from '../../packages/reconstruct/src/codegen/index.js';
+import type { AnalyzedDataSymbol } from '../../packages/reconstruct/src/types.js';
 import type { Vc8Accessor } from '../../packages/cpp-parser/dist/index.js';
 
 type N = ASTNode & Record<string, any>;
@@ -65,6 +67,7 @@ const body = (tu: TranslationUnit) => emit(tu as never).trimEnd();
 interface Field { name: string; dataType: string; offset: number; size: number; bitSize?: number }
 let structs = new Map<string, { kind: string; fields?: Field[]; typedefOf?: string }>();
 let globals = new Map<string, string>();
+const globalStorage: AnalyzedDataSymbol[] = [];
 /** Typedef and enum names to the integer type the tree declares them as (castout reads a return type's width). */
 const typedefTargets: Record<string, string> = {};
 const ambiguousEnumValues = new Set<string>();
@@ -142,6 +145,9 @@ async function loadGlobals(path?: string) {
     if (!l) continue;
     const g = JSON.parse(l);
     if (g.name && g.dataType && !globals.has(g.name)) globals.set(g.name, g.dataType);
+    if (g.name && g.dataType && g.address) globalStorage.push({ name: g.name, suggestedName: g.suggestedName, address: g.address,
+      dataType: g.dataType, suggestedType: g.suggestedType, size: g.size, namespace: g.namespace, scope: g.scope ?? 'global',
+      ownerFunction: g.ownerFunction, isInitialized: !!g.isInitialized, xrefCount: g.xrefCount ?? 0 });
   }
 }
 
@@ -149,8 +155,20 @@ async function loadGlobals(path?: string) {
 /** `--ops a,b`: only the forms of those ops are proposed. */
 let onlyOps: Set<string> | undefined;
 
-let tablesMemo: { globalTypes: Record<string, string>; typedefTargets: Record<string, string> } | undefined;
-const tables = () => (tablesMemo ??= { globalTypes: Object.fromEntries([...globals].map(([k, v]) => [k, tidy(v)])), typedefTargets });
+let tablesMemo: { globalTypes: Record<string, string>; typedefTargets: Record<string, string>;
+  globalAddresses: Record<string, number>; globalSizes: Record<string, number> } | undefined;
+const tables = () => {
+  if (tablesMemo) return tablesMemo;
+  const globalTypes = Object.fromEntries([...globals].map(([k, v]) => [k, tidy(v)]));
+  const storage = buildGlobalAddressExtentTables(globalStorage);
+  // The existing discovery type table keeps its first spelling. Bounds also
+  // needs every record for that storage name to agree with the emitted type.
+  for (const g of globalStorage) {
+    const name = g.suggestedName || g.name;
+    if (globalTypes[name] !== tidy(g.suggestedType || g.dataType)) delete storage.globalAddresses[name];
+  }
+  return tablesMemo = { globalTypes, typedefTargets, ...storage };
+};
 
 const tidy = (t: string) => t.replace(/\bstruct\s+|\bunion\s+|\benum\s+/g, '').replace(/\s*\*/g, '*').replace(/\s+/g, ' ').trim();
 
@@ -240,6 +258,22 @@ function sites(c: Ctx, maxAnchors: number): string[] {
   const { fn, vars, locals } = c;
   const all = [...walk(fn.body!)];
   const blocks = all.filter(n => n.kind === NodeKind.CompoundStmt);
+  // bounds: nominate paired +/- literal stores; the form proves scalar types,
+  // storage disjointness, order and the original signed defined domain.
+  for (const b of blocks) for (let i = 0; i + 4 <= b.statements.length; i++) {
+    const stores = b.statements.slice(i, i + 4).map((s: N) => s.kind === NodeKind.ExprStmt ? unparen(s.expression) : null);
+    if (!stores.every((s: N | null) => s?.kind === NodeKind.AssignExpr && s.operator === '=')) continue;
+    const parts = stores.map((s: N) => ({ left: s.left, right: unparen(s.right) }));
+    const lows = parts.filter((s: { right: N }) => s.right.kind === NodeKind.BinaryExpr && s.right.operator === '-');
+    const highs = parts.filter((s: { right: N }) => s.right.kind === NodeKind.BinaryExpr && s.right.operator === '+');
+    if (lows.length !== 2 || highs.length !== 2) continue;
+    const matches = lows.map((lo: { right: N }) => highs.filter((hi: { right: N }) =>
+      pr(unparen(lo.right.left)) === pr(unparen(hi.right.left))
+      && unparen(lo.right.right).kind === NodeKind.IntegerLiteral && unparen(hi.right.right).kind === NodeKind.IntegerLiteral
+      && unparen(lo.right.right).value === unparen(hi.right.right).value));
+    if (matches.every((m: N[]) => m.length === 1) && matches[0][0] !== matches[1][0])
+      out.add(`bounds(${[lows[0].left, lows[1].left, matches[0][0].left, matches[1][0].left].map(pr).join(',')})`);
+  }
   // nullfault32: the form checks the sole volatile byte store and its null address.
   if (pr(fn.returnType) === 'void' && fn.parameters.length === 0 && !fn.isVariadic
       && fn.body!.statements.length <= 2) out.add('nullfault32()');
