@@ -433,6 +433,7 @@ import { shapeOfNode, shapeOfSpelling, sameShape } from './call-arg-cast.js';
 import { isPure } from './pseudo-op-lower.js';
 import { localTypesOf } from './compare-form.js';
 import { calleeName, scopedLookup } from './call-arg-cast.js';
+import type { AllocMacroSignature } from './alloc-macros.js';
 import { coalesceLocal } from './copy-coalesce.js';
 import { initializerIsDead } from './store-liveness.js';
 import { recordWalk, type RecordWalkTables } from './record-walk.js';
@@ -524,6 +525,8 @@ export interface Vc8Accessor {
 
 /** The tables vc8-form reads: select-argument's, and the accessors `acc` writes. */
 export type Vc8FormTables = SelectArgumentOptions & RecordWalkTables & {
+  /** Parameter types supplied by the producer of wrappers emitted in this body. */
+  macroSignatures?: Record<string, AllocMacroSignature>;
   accessors?: Vc8Accessor[];
   /**
    * Bytes a callee stores through argument `index` (a non-null `&local`) on every path
@@ -1355,13 +1358,10 @@ function doFieldCoalesce(fn: FunctionDecl, name: string, target: string): void {
     if (e.kind !== NodeKind.CallExpr) return read(e);
     const call = e as CallExpr, callee = calleeName(call.callee);
     if (!callee || types.has(callee) || !call.arguments.every(read)) return false;
-    let params = scopedLookup(selectTables?.functionParamTypes ?? {}, callee, selectTables?.enclosingSegments ?? []);
-    // alloc-macros writes this five-argument wrapper of the six-argument Fog call.
-    if (!params && callee === 'D2_REALLOC_POOL_AT') {
-      const original = selectTables?.functionParamTypes?.['Fog::Memory::ReAllocServerMemory'];
-      if (original?.length === 6) params = original.slice(0, 5);
-    }
-    return !!params && params.length === call.arguments.length && params.every(scalar);
+    const params = scopedLookup(selectTables?.functionParamTypes ?? {}, callee, selectTables?.enclosingSegments ?? [])
+      ?? selectTables?.macroSignatures?.[callee]?.parameterTypes;
+    return !!params && params.length === call.arguments.length && params.every(scalar)
+      && (selectTables?.macroSignatures?.[callee]?.implicitParameterTypes.every(scalar) ?? true);
   };
   for (const { node } of walk(fn.body!)) {
     if ([NodeKind.GotoStmt, NodeKind.LabelStmt, NodeKind.CaseStmt, NodeKind.DefaultStmt,

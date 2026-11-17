@@ -54,6 +54,13 @@ import { traverseAST } from '../../../ast/visitor.js';
 import { createTransformer, type Transformer } from '../../transformer.js';
 import type { TransformPlugin, PluginOptions, InjectionContext } from '../types.js';
 import { createMacroCall } from './boilerplate-cleanup.js';
+import { scopedLookup } from './call-arg-cast.js';
+
+export interface AllocMacroSignature {
+  parameterTypes: string[];
+  /** Implicit macro arguments still perform their declared parameter conversions. */
+  implicitParameterTypes: string[];
+}
 
 export interface AllocMacrosOptions extends PluginOptions {
   /** Fold allocation calls into the D2_* macros (default: true). */
@@ -64,6 +71,11 @@ export interface AllocMacrosOptions extends PluginOptions {
   unionNames?: readonly string[];
   /** Typedef name -> its target spelling, to see through `typedef struct X X_t`. */
   typedefTargets?: Record<string, string>;
+  /** Actual callee parameter types, before the allocator is folded. */
+  functionParamTypes?: Record<string, string[]>;
+  enclosingSegments?: string[];
+  /** Per-body output: signatures of wrappers this pass actually emitted. */
+  wrapperSignatures?: Record<string, AllocMacroSignature>;
 }
 
 type AllocMacro =
@@ -291,6 +303,14 @@ function createAllocTransformer(opts: AllocMacrosOptions, use: AllocMacroUse): T
           return undefined;
         }
         use.callees.set(callee.macro, spelling);
+        const paramTypes = scopedLookup(opts.functionParamTypes ?? {}, spelling, opts.enclosingSegments ?? []);
+        if (opts.wrapperSignatures && paramTypes?.length === callee.kept + 3) {
+          // This producer owns the argument mapping: only its trailing literal 0 goes.
+          opts.wrapperSignatures[callee.macro] = {
+            parameterTypes: paramTypes.slice(0, -1),
+            implicitParameterTypes: paramTypes.slice(-1),
+          };
+        }
         bump(callee.macro);
         const file = args[callee.kept];
         const line = args[callee.kept + 1];
@@ -425,13 +445,17 @@ export const allocMacrosPlugin: TransformPlugin = {
 
   createTransformer(options?: AllocMacrosOptions) {
     const opts = options ?? {};
-    if (opts.allocationMacros === false) return (node: ASTNode) => node;
-    return createAllocTransformer(opts, new AllocMacroUse());
+    return (node: ASTNode) => {
+      if (opts.wrapperSignatures) for (const name of Object.keys(opts.wrapperSignatures)) delete opts.wrapperSignatures[name];
+      if (opts.allocationMacros === false) return node;
+      return createAllocTransformer(opts, new AllocMacroUse())(node);
+    };
   },
 
   createInjectionTransformer(options?: AllocMacrosOptions) {
     const opts = options ?? {};
     return (node: ASTNode, context: InjectionContext) => {
+      if (opts.wrapperSignatures) for (const name of Object.keys(opts.wrapperSignatures)) delete opts.wrapperSignatures[name];
       if (opts.allocationMacros === false) return node;
       const use = new AllocMacroUse();
       const result = createAllocTransformer(opts, use)(node);

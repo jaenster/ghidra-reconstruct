@@ -32,6 +32,53 @@ function run(body: string, options: AllocMacrosOptions = SIZES): { output: strin
 describe('alloc-macros', () => {
   beforeEach(() => resetAllocMacroStats());
 
+  it('publishes real parameter contracts only for wrappers it emitted', () => {
+    const wrapperSignatures: NonNullable<AllocMacrosOptions['wrapperSignatures']> = {};
+    const original = ['void*', 'void*', 'unsigned int', 'char*', 'int', 'FlagWithConversion'];
+    const options: AllocMacrosOptions = {
+      functionParamTypes: { 'Fog::Memory::ReAllocServerMemory': original },
+      wrapperSignatures,
+    };
+    const { output } = run(`
+      p = Fog::Memory::ReAllocServerMemory(pPool, p, n, "file", 4, 0);
+      p = Fog::Memory::AllocClientMemory(n, "file", 4, 1);
+      Fog::Memory::FreeServerMemory(pPool, p, "file", 4, 0);
+    `, options);
+    assert.match(output, /D2_REALLOC_POOL_AT/);
+    assert.deepStrictEqual(Object.keys(wrapperSignatures), ['D2_REALLOC_POOL_AT']);
+    assert.deepStrictEqual(wrapperSignatures.D2_REALLOC_POOL_AT, {
+      parameterTypes: original.slice(0, -1),
+      implicitParameterTypes: ['FlagWithConversion'],
+    });
+    assert.strictEqual(options.functionParamTypes!['Fog::Memory::ReAllocServerMemory'], original);
+    assert.strictEqual(original.length, 6);
+  });
+
+  it('resolves the allocator in its actual enclosing scope', () => {
+    const wrapperSignatures: NonNullable<AllocMacrosOptions['wrapperSignatures']> = {};
+    run('p = ReAllocServerMemory(pPool, p, n, "file", 4, 0);', {
+      functionParamTypes: { 'Fog::Memory::ReAllocServerMemory': ['void*', 'void*', 'unsigned int', 'char*', 'int', 'int'] },
+      enclosingSegments: ['Fog', 'Memory'], wrapperSignatures,
+    });
+    assert.deepStrictEqual(wrapperSignatures.D2_REALLOC_POOL_AT?.parameterTypes,
+      ['void*', 'void*', 'unsigned int', 'char*', 'int']);
+  });
+
+  it('does not carry a previous body contract into an unknown or disabled fold', () => {
+    const wrapperSignatures: NonNullable<AllocMacrosOptions['wrapperSignatures']> = {};
+    const options: AllocMacrosOptions = {
+      functionParamTypes: { 'Fog::Memory::ReAllocServerMemory': ['void*', 'void*', 'unsigned int', 'char*', 'int', 'int'] },
+      wrapperSignatures,
+    };
+    run('p = Fog::Memory::ReAllocServerMemory(pPool, p, n, "file", 4, 0);', options);
+    assert.strictEqual(Object.keys(wrapperSignatures).length, 1);
+    run('p = D2_REALLOC_POOL_AT(pPool, p, n, "file", 4);', options);
+    assert.deepStrictEqual(wrapperSignatures, {});
+    run('p = Fog::Memory::ReAllocServerMemory(pPool, p, n, "file", 4, 0);', options);
+    run('p = Fog::Memory::ReAllocServerMemory(pPool, p, n, "file", 4, 0);', { ...options, allocationMacros: false });
+    assert.deepStrictEqual(wrapperSignatures, {});
+  });
+
   it('folds each allocator into its macro', () => {
     const { output, preamble } = run(`
       p = Fog::Memory::AllocClientMemory(n + 4, ".\\\\BnSend.cpp", 0x3bb, 0);

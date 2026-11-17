@@ -2,8 +2,10 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { parse } from '../../../parser/index.js';
 import { emit } from '../../../emit/index.js';
-import type { AnyNode, TranslationUnit } from '../../../ast/nodes.js';
+import type { AnyNode, ASTNode, TranslationUnit } from '../../../ast/nodes.js';
 import { applyVc8Forms, parseVc8Form, type Vc8FormSite, type Vc8FormTables } from '../builtins/vc8-form.js';
+import { allocMacrosPlugin, type AllocMacroSignature } from '../builtins/alloc-macros.js';
+import { InjectionCollector } from '../injection.js';
 import { compileAndRun, hasNativeGpp } from '../../../testing/native-cpp.js';
 
 const tables = (): Vc8FormTables => ({
@@ -16,8 +18,14 @@ const tag = 'coalesce(value,p->capacity)';
 const flat = (s: string) => s.replace(/\s+/g, ' ').trim();
 function run(input = source, facts = tables(), formText = tag) {
   const form = parseVc8Form(formText); assert.ok(form);
-  const ast = parse(input) as TranslationUnit, sites: Vc8FormSite[] = [];
-  const out = applyVc8Forms(ast, [{ form }], s => sites.push(s), facts);
+  const macroSignatures: Record<string, AllocMacroSignature> = {};
+  const ast = allocMacrosPlugin.createInjectionTransformer!({
+    functionParamTypes: facts.functionParamTypes,
+    enclosingSegments: facts.enclosingSegments,
+    wrapperSignatures: macroSignatures,
+  })(parse(input) as ASTNode, new InjectionCollector()) as TranslationUnit;
+  const sites: Vc8FormSite[] = [];
+  const out = applyVc8Forms(ast, [{ form }], s => sites.push(s), { ...facts, macroSignatures });
   return { code: emit(out as AnyNode), before: emit(ast as AnyNode), site: sites[0] };
 }
 function refused(input = source, facts = tables()) {
@@ -49,8 +57,25 @@ describe('vc8-form: coalesce a stored local into a field', () => {
     assert.match(r.code, /p->capacity\+\+/);
   });
   it('supports the allocation macro using its actual Fog parameter types', () => {
-    const r = run(source.replace('return Consume(p, value * 8);', 'void* q = (void*)D2_REALLOC_POOL_AT(p, p, value * 8, "file", 4); return q != 0;'));
+    const r = run(source.replace('return Consume(p, value * 8);', 'void* q = (void*)Fog::Memory::ReAllocServerMemory(p, p, value * 8, "file", 4, 0); return q != 0;'));
     assert.ok(r.site.applied, r.site.why); assert.doesNotMatch(r.code, /\bvalue\b/);
+    assert.match(r.code, /D2_REALLOC_POOL_AT/);
+  });
+  it('does not infer a wrapper contract just from its macro name', () => {
+    refused(source.replace('return Consume(p, value * 8);', 'void* q = (void*)D2_REALLOC_POOL_AT(p, p, value * 8, "file", 4); return q != 0;'));
+  });
+  it('rejects hidden conversions in either explicit or implicit macro arguments', () => {
+    const input = source.replace('return Consume(p, value * 8);', 'void* q = (void*)Fog::Memory::ReAllocServerMemory(p, p, value * 8, "file", 4, 0); return q != 0;');
+    for (const index of [2, 5]) {
+      const t = tables();
+      t.functionParamTypes!['Fog::Memory::ReAllocServerMemory'][index] = 'ConversionWithEffects';
+      refused(input, t);
+    }
+  });
+  it('refuses a wrapper whose underlying signature is missing or has the wrong arity', () => {
+    const input = source.replace('return Consume(p, value * 8);', 'void* q = (void*)Fog::Memory::ReAllocServerMemory(p, p, value * 8, "file", 4, 0); return q != 0;');
+    const missing = tables(); delete missing.functionParamTypes!['Fog::Memory::ReAllocServerMemory']; refused(input, missing);
+    const arity = tables(); arity.functionParamTypes!['Fog::Memory::ReAllocServerMemory'].pop(); refused(input, arity);
   });
   it('does not treat a same-spelled member as a local read', () => {
     const t = tables(); t.structFields!.S.value = 'short'; t.structLayouts!.S = [...t.structLayouts!.S, { name: 'value', type: 'short', offset: 4, size: 2 }];
