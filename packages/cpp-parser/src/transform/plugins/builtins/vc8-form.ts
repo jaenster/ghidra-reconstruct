@@ -61,6 +61,20 @@ import { builtinTruthSite } from './truth-form-safety.js';
  *                        Refused when E or a name in E is stored in that range.
  *   cache(E,N)           N is an existing local stored from E: each E after that store
  *                        reads N, up to the next store to E or N.
+ *   pairvia(G1,G2,T)     the adjacent stores `G1 = E1; G2 = E2;` to two globals go through a
+ *                        fresh private T: `T sPair; sPair.a = E1; sPair.b = E2; G1 = sPair.a;
+ *                        G2 = sPair.b;` with a and b T's two members in layout order. VC8
+ *                        then loads both values before storing either, as the original does
+ *                        (UI_HandleCursorMouseUp 00467fa0: both MOVZX before the MouseX and
+ *                        MouseY stores). T must be a struct of the type tables, no union,
+ *                        of exactly two plain 4-byte integer members at 0 and 4. Refused
+ *                        unless only E2's evaluation moves, across G1's store, and that
+ *                        changes nothing: E1 and E2 call, store and declare nothing and
+ *                        are not volatile; E2 does not name G1, and every object E2 loads
+ *                        through memory has a known type that cannot be G1's (a pointer, or
+ *                        an integer of another width, not a character type); G1 and G2 are
+ *                        distinct nonvolatile integer globals; each value lies within its
+ *                        member's range, so the detour converts nothing.
  *   own(V,T[,N])         V's initializer is a dead copy Ghidra merged into it: V is
  *                        declared as a T of its own (named N), without it; a cast of V or
  *                        &V to T or T* goes, and the declaration moves onto V's first
@@ -450,6 +464,7 @@ export type Vc8Form =
   | { op: 'coalesce'; name: string; from?: string }
   | { op: 'recordwalk'; name: string; index: number }
   | { op: 'cache'; expr: string; name: string; type?: string; anchor?: string; count?: number }
+  | { op: 'pairvia'; first: string; second: string; type: string }
   | { op: 'own'; name: string; type: string; rename?: string; live?: boolean }
   | { op: 'guards'; split: number; index: number }
   | { op: 'merge-guards'; index: number }
@@ -554,7 +569,7 @@ export interface Vc8FormOptions {
   selectTables?: Vc8FormTables;
 }
 
-const OPS = new Set(['zerolife', 'nullfault32', 'swdefault', 'seq', 'fold', 'join', 'coalesce', 'recordwalk', 'cache', 'own', 'guards', 'merge-guards', 'retval', 'branchret', 'width', 'boolflag', 'retwiden', 'arms',
+const OPS = new Set(['zerolife', 'nullfault32', 'swdefault', 'seq', 'fold', 'join', 'coalesce', 'recordwalk', 'cache', 'pairvia', 'own', 'guards', 'merge-guards', 'retval', 'branchret', 'width', 'boolflag', 'retwiden', 'arms',
   'nest', 'merge-tail', 'tailguard', 'tailcopy', 'continue', 'dup', 'tarms', 'zero', 'nonzero', 'bool', 'cmp', 'swap', 'ifsel', 'clamp', 'split', 'select', 'decl', 'unselect', 'tsel', 'hoist',
   'nestcall', 'fill', 'elems', 'copy', 'shift', 'ptrwalk', 'rowptr', 'acc', 'retvar', 'onecall', 'roundup', 'swmerge', 'switch', 'dec', 'opas', 'range', 'castout', 'signbit', 'nullfield', 'zinit', 'znew', 'swclamp', 'retbase', 'postdec']);
 
@@ -611,6 +626,8 @@ export function parseVc8Form(text: string): Vc8Form | undefined {
         ? { op: 'nullfield', expr: args[0], struct: args[1], field: args[2] } : undefined;
     case 'join': return args.length === 2 && !anchor && args.every(a => /^[A-Za-z_]\w*$/.test(a)) && args[0] !== args[1]
       ? { op: 'join', into: args[0], from: args[1] } : undefined;
+    case 'pairvia': return args.length === 3 && !anchor && args.every(a => /^(?:[A-Za-z_]\w*::)*[A-Za-z_]\w*$/.test(a)) && norm(args[0]) !== norm(args[1])
+      && /^[A-Za-z_]\w*$/.test(args[2]) ? { op: 'pairvia', first: args[0], second: args[1], type: args[2] } : undefined;
     case 'cache':
       if (args.length === 2 && !anchor) return { op: 'cache', expr: args[0], name: args[1] };
       if (args.length === 3) return { op: 'cache', expr: args[0], name: args[1], type: args[2], anchor };
@@ -3944,6 +3961,148 @@ function doNullfield(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'nullfield' }>)
 }
 
 // ---------------------------------------------------------------------------------------
+// pairvia: two global stores through a private two-member struct
+
+/** The struct a type spelling names through the typedef table, or undefined. */
+function pairStructOf(t: string): string | undefined {
+  let s = norm(t).replace(/^(?:struct|class)(?=[A-Za-z_])/, '');
+  for (let i = 0; i < 8; i++) {
+    if (selectTables?.structLayouts?.[s]) return s;
+    const next = selectTables?.typedefTargets?.[s];
+    if (!next) return undefined;
+    s = norm(next).replace(/^(?:struct|class)(?=[A-Za-z_])/, '');
+  }
+  return undefined;
+}
+
+const PAIR_CHARLIKE = new Set(['char', 'signedchar', 'unsignedchar', 'int8_t', 'uint8_t', 'BYTE', 'byte', 'CHAR', 'UCHAR', 'uchar', 'undefined1', 'void', 'std::byte']);
+
+/**
+ * Every object e loads through memory (`p->m`, `*p`, `p[i]`, and what a `.` chain on one
+ * of those reaches) has a known type that cannot be an object of integer type `g`
+ * ([basic.lval]): a pointer, or an integer of another width that is no character type.
+ */
+function loadsMiss(e: Expression, g: { w: number }, shapeOf: (x: Expression) => { base: string; stars: number } | null,
+  parents: Map<ASTNode, ASTNode>): string | undefined {
+  const viaMemory = (n: ASTNode): boolean => {
+    for (const { node } of walk(n)) {
+      if (node.kind === NodeKind.MemberExpr && (node as MemberExpr).isArrow) return true;
+      if (node.kind === NodeKind.UnaryExpr && (node as UnaryExpr).operator === '*') return true;
+      if (node.kind === NodeKind.SubscriptExpr) return true;
+    }
+    return false;
+  };
+  for (const { node } of walk(e)) {
+    const k = node.kind;
+    const lvalue = (k === NodeKind.MemberExpr) || (k === NodeKind.UnaryExpr && (node as UnaryExpr).operator === '*') || k === NodeKind.SubscriptExpr;
+    if (!lvalue || !viaMemory(node)) continue;
+    // Only the outermost lvalue of a `.` chain is loaded; `&lv` and `sizeof` load nothing.
+    let up: ASTNode = node;
+    let p = parents.get(up);
+    while (p && p.kind === NodeKind.ParenExpr) { up = p; p = parents.get(up); }
+    if (p && p.kind === NodeKind.MemberExpr && !(p as MemberExpr).isArrow && (p as MemberExpr).object === up) continue;
+    if (p && p.kind === NodeKind.UnaryExpr && (p as UnaryExpr).operator === '&') return `${text(node)} has its address taken`;
+    for (let q = p; q; q = parents.get(q)) if (q.kind === NodeKind.SizeofExpr) return `${text(node)} is under sizeof`;
+    const s = shapeOf(node as Expression);
+    if (!s) return `the type of ${text(node)} is unknown`;
+    if (s.stars > 0) continue;
+    const base = norm(s.base);
+    if (/\[/.test(base)) return `${text(node)} is an array`;
+    if (PAIR_CHARLIKE.has(base)) return `${text(node)} is a character type`;
+    const t = intType(base, false);
+    if (!t) return `${text(node)} is no integer or pointer`;
+    if (t.w === g.w) return `${text(node)} is as wide as the global`;
+  }
+  return undefined;
+}
+
+function doPairvia(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'pairvia' }>): void {
+  const tables = selectTables;
+  // T: a struct of the type tables with exactly two plain 4-byte integer members.
+  const struct = pairStructOf(f.type) ?? refuse(`${f.type} is not a struct of the type tables`);
+  if (tables?.unionNames?.includes(struct)) refuse(`${f.type} is a union`);
+  const layout = tables!.structLayouts![struct]!;
+  if (layout.length !== 2) refuse(`${f.type} has ${layout.length} members, not two`);
+  const members = [...layout].sort((a, b) => a.offset - b.offset);
+  if (members[0].offset !== 0 || members[1].offset !== 4) refuse(`${f.type}'s members are not at 0 and 4`);
+  const fields = members.map(m => {
+    if (m.bitSize != null) refuse(`${f.type}.${m.name} is a bit-field`);
+    if (m.size !== 4) refuse(`${f.type}.${m.name} is ${m.size} bytes, not 4`);
+    if (/\bvolatile\b/.test(m.type)) refuse(`${f.type}.${m.name} is volatile`);
+    const t = intType(m.type, false);
+    if (!t || t.w !== 4) refuse(`${f.type}.${m.name} is ${m.type}, no 4-byte integer`);
+    return { name: m.name, range: t!.r };
+  });
+  const size = tables?.typeSize?.(f.type);
+  if (size != null && size !== 8) refuse(`${f.type} is ${size} bytes, not 8`);
+
+  // The two adjacent plain stores, once in the function.
+  const g1 = norm(f.first), g2 = norm(f.second);
+  const hits: Array<{ b: CompoundStmt; k: number }> = [];
+  for (const b of blocks(fn)) b.statements.forEach((s, k) => {
+    const a = storeOf(s), c = b.statements[k + 1] && storeOf(b.statements[k + 1]);
+    if (a && c && a.operator === '=' && c.operator === '=' && text(a.left) === g1 && text(c.left) === g2) hits.push({ b, k });
+  });
+  if (hits.length !== 1) refuse(`${hits.length} adjacent stores of ${f.first} then ${f.second}`);
+  const { b, k } = hits[0];
+  const s1 = storeOf(b.statements[k])!, s2 = storeOf(b.statements[k + 1])!;
+
+  // G1 and G2: two globals, by name distinct objects, of a nonvolatile integer type.
+  const locals = localNames(fn);
+  const shapeOf = createExprShape(localTypesOf(fn), {
+    globalTypes: tables?.globalTypes ?? {}, enclosingVarTypes: tables?.enclosingVarTypes ?? {},
+    structFields: tables?.structFields ?? {}, fieldTypes: tables?.fieldTypes ?? {},
+    returnTypes: tables?.functionReturnTypes ?? {}, resolve: (n: string) => tables?.typedefTargets?.[n],
+  });
+  const globalType = (lhs: Expression, name: string) => {
+    const l = unparen(lhs);
+    if (l.kind !== NodeKind.Identifier && l.kind !== NodeKind.QualifiedId) refuse(`${name} is not a plain variable`);
+    const bare = name.replace(/^.*::/, '');
+    if (locals.has(bare)) refuse(`${name} is a local or parameter`);
+    const spelled = tables?.globalTypes?.[bare] ?? tables?.globalTypes?.[name] ?? tables?.enclosingVarTypes?.[bare];
+    if (spelled && /\bvolatile\b/.test(spelled)) refuse(`${name} is volatile`);
+    const s = shapeOf(l);
+    if (!s || s.stars !== 0) refuse(`${name}'s type is not known to be an integer`);
+    if (/\bvolatile\b/.test(s!.base)) refuse(`${name} is volatile`);
+    return intType(s!.base, false) ?? refuse(`${name} is ${s!.base}, no integer`);
+  };
+  const t1 = globalType(s1.left, g1);
+  globalType(s2.left, g2);
+
+  // E2 is now evaluated before G1's store: it must not read G1, by name or through memory.
+  const e2 = s2.right;
+  for (const { node } of walk(e2)) {
+    if ((node.kind === NodeKind.Identifier || node.kind === NodeKind.QualifiedId) && text(node) === g1) refuse(`the value stored to ${g2} reads ${g1}`);
+  }
+  // Each value: no call, store or declaration, not volatile, and within its member.
+  for (const [v, fld, g] of [[s1.right, fields[0], g1], [s2.right, fields[1], g2]] as const) {
+    if (hasCall(v) || storedNames(v).size > 0) refuse(`the value stored to ${g} calls or stores`);
+    for (const { node } of walk(v)) {
+      if (node.kind === NodeKind.CommaExpr || node.kind === NodeKind.LambdaExpr || node.kind === NodeKind.PostfixExpr) refuse(`the value stored to ${g} has an effect`);
+    }
+    if (/\bvolatile\b/.test(emit(v as never))) refuse(`the value stored to ${g} is volatile`);
+    const r = rangeOf(v, shapeOf);
+    if (!r) refuse(`the range of the value stored to ${g} is unknown`);
+    if (!within(r!, fld.range)) refuse(`the value stored to ${g} does not fit ${f.type}.${fld.name}`);
+  }
+  const parents = parentsOf(fn);
+  const why = loadsMiss(e2, t1, shapeOf, parents);
+  if (why) refuse(`the value stored to ${g2} may read ${g1}: ${why}`);
+
+  // A fresh name for the private struct.
+  const taken = (n: string) => locals.has(n) || mentions(fn.body!, n);
+  let name = 'sPair';
+  for (let i = 2; taken(name); i++) name = `sPair${i}`;
+  const [fa, fb] = [fields[0].name, fields[1].name];
+  const out = parseStmts(`${f.type} ${name}; ${name}.${fa} = 0; ${name}.${fb} = 0; __g1 = ${name}.${fa}; __g2 = ${name}.${fb};`);
+  (storeOf(out[1])!).right = s1.right;
+  (storeOf(out[2])!).right = s2.right;
+  (storeOf(out[3])!).left = s1.left;
+  (storeOf(out[4])!).left = s2.left;
+  b.statements.splice(k, 2, ...out);
+}
+
+// ---------------------------------------------------------------------------------------
 // retvar, onecall: a value VC8 held in a register, written as a variable of its own
 
 /** Statements parsed from text, in a function of their own. */
@@ -5107,7 +5266,7 @@ const APPLY: { [K in Vc8Form['op']]: (fn: FunctionDecl, f: Extract<Vc8Form, { op
   zerolife: doZeroLife,
   nullfault32: doNullfault32,
   swdefault: (fn, f) => { const why = restoreSwitchDefault(fn, f.expr, f.values, f.index, selectTables); if (why) refuse(why); },
-  seq: doSeq, fold: doFold, join: doJoin, coalesce: doCoalesce, recordwalk: doRecordwalk, cache: doCache, own: doOwn, guards: doGuards, 'merge-guards': doMergeGuards,
+  seq: doSeq, fold: doFold, join: doJoin, coalesce: doCoalesce, recordwalk: doRecordwalk, cache: doCache, pairvia: doPairvia, own: doOwn, guards: doGuards, 'merge-guards': doMergeGuards,
   retval: doRetval, branchret: doBranchret, width: doWidth, boolflag: doBoolflag, retwiden: doRetwiden, arms: doArms,
   nest: doNest, 'merge-tail': doMergeTail, tailguard: doTailguard, tailcopy: doTailcopy, continue: doContinue, dup: doDup, tarms: doTarms, zero: doZero, nonzero: doNonzero,
   bool: doBool,
