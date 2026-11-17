@@ -4612,6 +4612,8 @@ function transformDecompiledCode(
             typeSize: (spelling: string) => context.funcPtrArgCasts!.outParams!.typeSize(spelling),
           } : {}),
           structFieldOffsets: context?.funcPtrArgCasts?.structFieldOffsets,
+          globalAddresses: context?.funcPtrArgCasts?.globalAddresses,
+          globalSizes: context?.funcPtrArgCasts?.globalSizes,
           targetLanguageId: context?.targetLanguageId,
           targetPointerSize: context?.targetPointerSize,
         },
