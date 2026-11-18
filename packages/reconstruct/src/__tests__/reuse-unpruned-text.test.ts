@@ -21,7 +21,7 @@ import { quotedIncludePath } from '../codegen/path-case.js';
 const dir = mkdtempSync(join(tmpdir(), 'reuse-unpruned-'));
 const cachePath = join(dir, 'unit-identifiers.json');
 process.env.RECON_UNIT_IDENT_CACHE = cachePath;
-const { generateProject, configureIncrementalEmit } = await import('../codegen/index.js');
+const { generateProject, configureIncrementalEmit, unitTextPath } = await import('../codegen/index.js');
 
 const programInfo: ProgramInfo = {
   name: 'T.exe', path: '/tmp/T.exe', format: 'PE', architecture: 'x86', compiler: 'msvc',
@@ -68,7 +68,7 @@ describe('reuse reads the unit text the unit loop emitted', () => {
   it('keeps each emitted unit as it was before stage 2 rewrote it', () => {
     assert.strictEqual(units.length, 2, [...full.keys()].join(', '));
     for (const p of units) {
-      const kept = join(`${cachePath}.units`, p);
+      const kept = unitTextPath(p)!;
       assert.ok(existsSync(kept), `${p} has no kept text`);
       assert.strictEqual(readFileSync(kept, 'utf-8'), unpruned.get(p), p);
     }
@@ -86,7 +86,7 @@ describe('reuse reads the unit text the unit loop emitted', () => {
       const incremental = generate();
       for (const [p, content] of full) assert.strictEqual(incremental.get(p), content, p);
       // And it was reused, not emitted again: a mark in the kept text reaches the output.
-      const kept = join(`${cachePath}.units`, units[0]);
+      const kept = unitTextPath(units[0])!;
       const original = readFileSync(kept, 'utf-8');
       writeFileSync(kept, `${original}\n// kept-text mark\n`);
       try {

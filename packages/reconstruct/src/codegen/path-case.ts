@@ -19,16 +19,24 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 
-/** Throw when two emitted files differ only in case. */
-export function assertNoCaseCollidingFiles(paths: Iterable<string>): void {
+/**
+ * Throw when two emitted files differ only in case. `sourceOf` names what produced a
+ * file (its namespace), so the error says which two sources to tell apart.
+ */
+export function assertNoCaseCollidingFiles(paths: Iterable<string>, sourceOf?: (p: string) => string | undefined): void {
   const byFolded = new Map<string, string>();
   const collisions: string[] = [];
+  const named = (p: string, norm: string): string => {
+    const source = sourceOf?.(p);
+    return source ? `${norm} (${source})` : norm;
+  };
+  const original = new Map<string, string>();
   for (const p of paths) {
     const norm = p.split(path.sep).join('/');
     const folded = norm.toLowerCase();
     const prior = byFolded.get(folded);
-    if (prior !== undefined && prior !== norm) collisions.push(`${prior} <-> ${norm}`);
-    else byFolded.set(folded, norm);
+    if (prior !== undefined && prior !== norm) collisions.push(`${named(original.get(prior)!, prior)} <-> ${named(p, norm)}`);
+    else if (prior === undefined) { byFolded.set(folded, norm); original.set(norm, p); }
   }
   if (collisions.length > 0) {
     throw new Error(

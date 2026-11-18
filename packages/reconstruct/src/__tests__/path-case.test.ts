@@ -42,4 +42,12 @@ describe('path case', () => {
     assert.throws(() => assertNoCaseCollidingFiles(['A/x.h', 'a/X.h']), /only in case/);
     assert.doesNotThrow(() => assertNoCaseCollidingFiles(['A/x.h', 'a/y.h', 'A/x.h']));
   });
+
+  it('names the source of each of the two files', () => {
+    const ns = new Map([['D2gfx/D2gfx.cpp', 'D2gfx'], ['D2gfx/D2GFX.cpp', 'D2gfx::D2GFX']]);
+    assert.throws(
+      () => assertNoCaseCollidingFiles(['D2gfx/D2gfx.cpp', 'D2gfx/D2GFX.cpp'], p => ns.get(p)),
+      (e: Error) => e.message.includes('D2gfx/D2gfx.cpp (D2gfx) <-> D2gfx/D2GFX.cpp (D2gfx::D2GFX)'),
+    );
+  });
 });

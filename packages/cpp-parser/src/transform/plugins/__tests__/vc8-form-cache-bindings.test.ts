@@ -73,7 +73,19 @@ const refusals:Array<[string,string,string]>=[
  ['increment of cached value','int f(int value) { return value++; }','cache(value,cached,int)'],
  ['dependency increment within first read','int f(int* p) { return (p++,*p); }','cache(*p,cached,int)'],
  ['dependency changed before the final read','int f(int* p) { use(*p); p++; return *p; }','cache(*p,cached,int)'],
+ ['dependency stored inside the right operand','int f(int* p) { int v; v=(p++,*p); return v; }','cache(*p,cached,int)'],
+ ['read in the left operand of a dependency store','int f(int** q,int* p) { q[*p]=(p=g()); return *p; }','cache(*p,cached,int)'],
+ ['read after the dependency store','int f(Node* p) { p=next(p->link); return p->link; }','cache(p->link,cached,Node*)'],
 ];
+it('caches a read in the right operand of its own dependency store',()=>{
+ const r=apply('Node* f(Node* p) { p=next(p->link); return p; }','cache(p->link,pLink,Node*)');
+ assert.ok(r.site.applied,r.site.why);assert.match(r.after,/Node\* pLink = p->link;\s*p = next\(pLink\);/);
+ assert.match(r.after,/return p;/);
+});
+it('caches a read in a compound store to its dependency',()=>{
+ const r=apply('int f(int* p,int n) { n+=p[n]; return n; }','cache(p[n],cached,int)');
+ assert.ok(r.site.applied,r.site.why);assert.match(r.after,/int cached = p\[n\];\s*n \+= cached;/);
+});
 for(const[name,code,tag]of refusals)it('refuses '+name+' without mutation',()=>{
  const r=apply(code,tag);assert.equal(r.site.applied,false,r.after);assert.equal(r.after,r.before);
 });
@@ -83,12 +95,13 @@ it('preserves values and initializer effects in optimized native code',{skip:!ha
   [scalar,'cache(value,cached,int)'],
   ['int f(unsigned value) { Box b; b.value=2; return value+b.value+N::value; }','cache(value,cached,unsigned)'],
   [typedObject,'cache(&frame,pFrame,Frame*)',decltypeFrame],
+  ['int f(unsigned x) { int* p=table+(x&7); p=pick(*p); return (int)(p-table); }','cache(*p,cached,int)'],
  ];
- let prelude='struct Frame { int value; }; struct Box { int value; }; namespace N { int value=5; } unsigned calls; int make(unsigned x) { ++calls; return (int)(x&0x7fff); } void init(Frame* p,unsigned x) { ++calls; p->value=make(x); }\n';
+ let prelude='struct Frame { int value; }; struct Box { int value; }; namespace N { int value=5; } unsigned calls; int make(unsigned x) { ++calls; return (int)(x&0x7fff); } void init(Frame* p,unsigned x) { ++calls; p->value=make(x); } int table[8]={3,1,4,1,5,9,2,6}; int* pick(int v) { ++calls; return table+((v+1)&7); }\n';
  for(const[i,[code,tag,prepare]]of cases.entries()){
   const r=apply(code,tag,prepare);assert.ok(r.site.applied,r.site.why);prelude+=`namespace reference${i} { ${r.before} } namespace candidate${i} { ${r.after} }\n`;
  }
  let body='unsigned cases=0;';
  for(let i=0;i<cases.length;i++)body+=`for(unsigned x=0;x<65536;++x) { calls=0; int a=reference${i}::f(x); unsigned ca=calls; calls=0; int b=candidate${i}::f(x); if(a!=b || ca!=calls) return ${i+1}; ++cases; }\n`;
- body+='printf("%u\\n",cases);';assert.equal(compileAndRun(prelude,body,{optimize:true}).trim(),'262144');
+ body+='printf("%u\\n",cases);';assert.equal(compileAndRun(prelude,body,{optimize:true}).trim(),'327680');
 });
