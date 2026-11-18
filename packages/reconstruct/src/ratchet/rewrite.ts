@@ -16,6 +16,7 @@ import { isIdentity, matchParams, paramIds, type ParamId } from './params.js';
 import { bindingKey, typeRefString, type Binding, type SiteScan } from './refs.js';
 import { sameResolved, type Resolved, type SymbolIndex } from './symbol-index.js';
 import { misparsedTypes } from './scan.js';
+import { neutralFieldRetype } from './neutral.js';
 
 export interface RewriteContext {
   index: SymbolIndex;
@@ -120,7 +121,7 @@ export function rewriteBody(text: string, scan: SiteScan, bindings: Array<Bindin
         if (r.error) { errors.push(r.error); return; }
         spelled = r.name;
         const now = typeRefString(index.structs.get(b.s)?.fields.find(f => f.offset === b.o && f.name === r.name)?.type);
-        if (b.t && now && now !== b.t) { errors.push(`field ${b.s}::${site.parts[0]} retyped: ${b.t} -> ${now}`); return; }
+        if (b.t && now && now !== b.t && !neutralFieldRetype(scan, bindings, b.s, b.o, b.t, now)) { errors.push(`field ${b.s}::${site.parts[0]} retyped: ${b.t} -> ${now}`); return; }
         break;
       }
       case 'fdc': {
