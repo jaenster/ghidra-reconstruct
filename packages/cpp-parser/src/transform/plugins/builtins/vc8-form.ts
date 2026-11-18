@@ -1862,8 +1862,13 @@ function doCache(fn: FunctionDecl, f: Extract<Vc8Form, { op: 'cache' }>): void {
       // cannot read a value saved before p advanced. A later statement in
       // the final loop body is different: existing measured tags deliberately
       // cache its first read across the loop (TEXT_CalculateTextHeight).
-      for (let p = parents.get(node); p && isExpression(p.kind); p = parents.get(p))
-        if (changesDependency(p)) refuse(`${f.expr} changes within a cached read`);
+      // An assignment stores only after its right operand is evaluated, so
+      // `p = f(p->field)` reads p first: for a read in the right operand only
+      // that operand counts. A read in the left operand sees the whole store.
+      for (let child: ASTNode = node, p = parents.get(node); p && isExpression(p.kind); child = p, p = parents.get(p)) {
+        const valueOnly = p.kind === NodeKind.AssignExpr && (p as AssignExpr).right === child;
+        if (changesDependency(valueOnly ? child : p)) refuse(`${f.expr} changes within a cached read`);
+      }
       const id = { kind: NodeKind.Identifier, name: f.name } as Identifier;
       if (!byAddress) put(slot, id);
       else if (owner && owner.kind === NodeKind.MemberExpr && slot.key === 'object' && !(owner as unknown as { isArrow: boolean }).isArrow) {
