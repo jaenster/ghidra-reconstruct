@@ -42,6 +42,7 @@ import { isMainThread } from 'worker_threads';
 import * as fs from 'node:fs/promises';
 import * as nodeFs from 'node:fs';
 import * as path from 'node:path';
+import { createHash } from 'node:crypto';
 
 import type {
   ReconstructedProject,
@@ -488,7 +489,7 @@ export function unitStaticsHold(previous: readonly string[], now: readonly strin
 
 /**
  * Where a unit's text is kept as the unit loop emitted it, beside the identifier cache:
- * `<cache>.units/<path>`.
+ * `<cache>.units/<path>@<hash>`, the hash of the exact unit path.
  *
  * The tree on disk is not that text. Stage 2 rewrites every file after the units are
  * emitted - the include pass drops what a file does not use under the placement of THIS
@@ -496,9 +497,18 @@ export function unitStaticsHold(previous: readonly string[], now: readonly strin
  * where a type or a function has moved to another header, and could never reach the new
  * home. Reuse reads this copy instead and every run prunes it afresh, so an incremental
  * run hands stage 2 exactly what a full one does.
+ *
+ * The unit paths here are the namespace paths, before the module layout moves them, and
+ * two of them can differ only in case: a function in a module's root namespace makes the
+ * unit `D2gfx/D2gfx.cpp` beside `D2gfx/D2GFX.cpp`, which the layout later writes as
+ * `D2gfxRoot.cpp`. On a case-insensitive disk the bare path made them one cache file, so
+ * the root unit's text replaced D2GFX's and the next incremental run reused it for D2GFX.
+ * The hash keeps every unit path its own file.
  */
-function unitTextPath(filePath: string): string | null {
-  return unitIdentCachePath ? path.join(`${unitIdentCachePath}.units`, filePath) : null;
+export function unitTextPath(filePath: string): string | null {
+  if (!unitIdentCachePath) return null;
+  const tag = createHash('sha256').update(filePath).digest('hex').slice(0, 8);
+  return path.join(`${unitIdentCachePath}.units`, `${filePath}@${tag}`);
 }
 
 function recordUnitText(filePath: string, content: string): void {
@@ -5577,7 +5587,10 @@ export async function writeProject(
   // spelling on a case-insensitive disk would otherwise keep its name, and the includes,
   // which use the project's spelling, would not resolve on a case-sensitive checkout.
   const emittedPaths = [...project.files.keys(), ...project.sourceMaps.keys()];
-  assertNoCaseCollidingFiles(emittedPaths);
+  assertNoCaseCollidingFiles(emittedPaths, p => {
+    const ns = project.files.get(p)?.namespace ?? project.files.get(project.sourceMaps.get(p)?.file ?? '')?.namespace;
+    return ns ? `namespace ${ns}` : undefined;
+  });
   const caseRenames = await alignPathCase(outputDir, emittedPaths);
   if (caseRenames.length > 0) {
     console.log(`Renamed ${caseRenames.length} existing path(s) to the emitted spelling:`);
