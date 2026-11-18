@@ -4545,6 +4545,31 @@ function loopFirst(s: Statement, v: string): 'read' | 'store' | 'none' | undefin
 }
 
 /**
+ * Whether a path may leave s other than by falling off its end (or returning): a goto or a
+ * label anywhere in it, or a break, continue, case or default whose loop or switch is not
+ * inside s. A switch or loop whose cases and breaks all stay inside s goes on to what
+ * follows s, like any statement without jumps (OBJMODE_CreateRedPortal 00581410).
+ */
+function jumpsOutOf(fn: FunctionDecl, s: Statement): boolean {
+  const parents = parentsOf(fn);
+  const LOOPS: string[] = [NodeKind.WhileStmt, NodeKind.ForStmt, NodeKind.DoWhileStmt];
+  for (const { node } of walk(s)) {
+    if (!LIFE_JUMPS.has(node.kind)) continue;
+    if (node.kind === NodeKind.GotoStmt || node.kind === NodeKind.LabelStmt) return true;
+    const target = (p: ASTNode) => node.kind === NodeKind.ContinueStmt ? LOOPS.includes(p.kind)
+      : node.kind === NodeKind.BreakStmt ? LOOPS.includes(p.kind) || p.kind === NodeKind.SwitchStmt
+      : p.kind === NodeKind.SwitchStmt;
+    let inside = false;
+    for (let p = parents.get(node); p; p = parents.get(p)) {
+      if (target(p)) { inside = true; break; }
+      if (p === s) break;
+    }
+    if (!inside) return true;
+  }
+  return false;
+}
+
+/**
  * Whether V is dead after statement k+1 of b: its next mention stores it first, or there is
  * none and nothing after b reads it. With labelsEnter, a label or case after b, in an
  * enclosing block, is passed (ENTRIES); a jump out still ends the proof. One in b itself
@@ -4554,7 +4579,7 @@ function loopFirst(s: Statement, v: string): 'read' | 'store' | 'none' | undefin
 function deadAfter(fn: FunctionDecl, b: CompoundStmt, k: number, last: number, v: string, labelsEnter = false): boolean {
   for (const s of b.statements.slice(last + 1)) {
     if (!mentions(s, v)) {
-      for (const { node } of walk(s)) if (LIFE_JUMPS.has(node.kind)) return false;
+      if (jumpsOutOf(fn, s)) return false;
       continue;
     }
     const r = loopFirst(s, v) ?? readFirst(s, v);
