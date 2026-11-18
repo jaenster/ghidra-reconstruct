@@ -672,6 +672,12 @@ export {
 } from './builtins/join-store-temp.js';
 
 export {
+  callTargetHoldPlugin,
+  createCallTargetHoldTransformer,
+  type CallTargetHoldOptions,
+} from './builtins/call-target-hold.js';
+
+export {
   stormTagWordPlugin,
   createStormTagWordTransformer,
   type StormTagWordOptions,
@@ -1069,6 +1075,7 @@ import { derefWalkLoopPlugin } from './builtins/deref-walk-loop.js';
 import { shiftDefPlugin } from './builtins/shift-def.js';
 import { paramSlotLocalPlugin } from './builtins/param-slot-local.js';
 import { joinStoreTempPlugin } from './builtins/join-store-temp.js';
+import { callTargetHoldPlugin } from './builtins/call-target-hold.js';
 import { stormNextLinkPlugin } from './builtins/storm-next-link.js';
 import { stormTagWordPlugin } from './builtins/storm-tag-word.js';
 import { paramCheckBlockPlugin } from './builtins/param-check-block.js';
@@ -1329,6 +1336,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   shiftDefPlugin,             // Matching: a call result every read shifts by one constant is shifted once, where it is stored (priority 62.8)
   paramSlotLocalPlugin,       // Matching: a local packed into a loaded parameter's slot gets its own variable back (priority 940)
   joinStoreTempPlugin,        // Matching: a member every arm stores into is stored once after the join, through a temporary (priority 970)
+  callTargetHoldPlugin,       // Matching: a table handler tested and then called is held in a local, read once (priority 970.5)
   pointeeClearMemsetPlugin,   // Matching: zero stores to every member of *P the original makes from one register become the memset (priority 975)
   memberCopyAssignPlugin,     // Matching: piecewise copies of every byte of *P into a same-typed object are the struct assignment (priority 975.5)
   stormNextLinkPlugin,        // Matching: a flattened inline TSLink::NextLink(-1) becomes a call to the inline helper (priority 975)
