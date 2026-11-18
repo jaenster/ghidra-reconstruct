@@ -3554,6 +3554,16 @@ function transformDecompiledCode(
         functionReturnTypes: context.funcPtrArgCasts.functionReturnTypes,
         enclosingVarTypes,
       };
+      perPluginOptions['call-target-hold'] = {
+        globalTypes: context.funcPtrArgCasts.globalTypes,
+        funcdefNames: Object.keys(context.funcPtrArgCasts.funcdefSignatures ?? {}),
+        fieldTypes: context.funcPtrArgCasts.fieldTypes,
+        structFields: context.funcPtrArgCasts.structFields,
+        functionReturnTypes: context.funcPtrArgCasts.functionReturnTypes,
+        enclosingVarTypes,
+        onSite: (e: { line: number; target: string }) =>
+          console.warn(`[call-target-hold] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.target}`),
+      };
       perPluginOptions['storm-tag-word'] = {
         globalTypes: context.funcPtrArgCasts.globalTypes,
         fieldTypes: context.funcPtrArgCasts.fieldTypes,
