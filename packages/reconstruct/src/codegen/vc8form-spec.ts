@@ -171,7 +171,7 @@ export function vc8FormSpec(func: Pick<ExtractedFunction, 'tags' | 'size' | 'dec
   // change a declaration go first, the moves last, and equal ops by their `ord`, then by
   // their text. dup goes before fold: the copy it writes into each arm is what fold then
   // folds the arm's temporary into (LOADER_CheckForInsertedDiscs 0045fc60).
-  forms.sort((a, b) => FORM_ORDER.indexOf(a.form.op) - FORM_ORDER.indexOf(b.form.op) || a.order - b.order || (a.tag < b.tag ? -1 : a.tag > b.tag ? 1 : 0));
+  forms.sort((a, b) => FORM_RANK.get(a.form.op)! - FORM_RANK.get(b.form.op)! || a.order - b.order || (a.tag < b.tag ? -1 : a.tag > b.tag ? 1 : 0));
   out.forms = forms.map(({ form, tag }) => ({ form, tag }));
   return out;
 }
@@ -195,4 +195,8 @@ export function vc8formHashRecord(func: Pick<ExtractedFunction, 'address' | 'nam
   return { address: String(func.address), name: String(func.name ?? ''), size: Number(func.size), form: vc8formBodyHash(d), legacy: vc8formLegacyBodyHash(d), tags: tags.sort() };
 }
 
-const FORM_ORDER: Array<Vc8Form['op']> = ['nullfault32', 'width', 'boolflag', 'retwiden', 'own', 'split', 'zerolife', 'join', 'coalesce', 'dup', 'guardchoice', 'fold', 'nestcall', 'fill', 'elems', 'copy', 'rowptr', 'ptrwalk', 'recordwalk', 'fieldalias', 'postdec', 'cache', 'pairvia', 'ifsel', 'clamp', 'guards', 'merge-guards', 'retval', 'branchret', 'select', 'tsel', 'merge-tail', 'tailguard', 'tailcopy', 'swtail', 'andguard', 'sel', 'retvar', 'onecall', 'roundup', 'switch', 'swmerge', 'nest', 'continue', 'arms', 'tarms', 'unselect', 'zero', 'nonzero', 'bool', 'shift', 'range', 'castout', 'signbit', 'cmp', 'swap', 'hoist', 'opas', 'dec', 'uncoalesce', 'sinkvia', 'lift', 'decl', 'initbefore', 'seq', 'movestore', 'sinkstore', 'nullfield', 'acc', 'swdefault'];
+export const FORM_ORDER = ['nullfault32', 'width', 'boolflag', 'retwiden', 'own', 'split', 'zerolife', 'join', 'coalesce', 'dup', 'guardchoice', 'fold', 'nestcall', 'fill', 'elems', 'copy', 'rowptr', 'ptrwalk', 'recordwalk', 'fieldalias', 'postdec', 'cache', 'pairvia', 'ifsel', 'clamp', 'guards', 'merge-guards', 'retval', 'branchret', 'retbase', 'select', 'tsel', 'merge-tail', 'tailguard', 'tailcopy', 'swtail', 'andguard', 'sel', 'retvar', 'onecall', 'roundup', 'switch', 'swclamp', 'swmerge', 'nest', 'continue', 'arms', 'tarms', 'unselect', 'zero', 'nonzero', 'bool', 'shift', 'range', 'castout', 'signbit', 'cmp', 'swap', 'hoist', 'opas', 'dec', 'uncoalesce', 'sinkvia', 'lift', 'decl', 'initbefore', 'zinit', 'znew', 'seq', 'nullinit', 'movestore', 'sinkstore', 'nullfield', 'acc', 'swdefault'] as const satisfies ReadonlyArray<Vc8Form['op']>;
+// Every op needs a slot: the build fails on an op without one.
+const _everyFormHasASlot: Exclude<Vc8Form['op'], typeof FORM_ORDER[number]> extends never ? true : never = true;
+void _everyFormHasASlot;
+const FORM_RANK = new Map<Vc8Form['op'], number>(FORM_ORDER.map((op, i) => [op, i]));

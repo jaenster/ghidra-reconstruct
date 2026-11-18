@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
-import { parseVc8FormTag, vc8FormSpec, vc8formBodyForm, vc8formBodyHash, vc8formHashRecord, vc8formLegacyBodyHash } from './vc8form-spec.js';
+import { FORM_ORDER, parseVc8FormTag, vc8FormSpec, vc8formBodyForm, vc8formBodyHash, vc8formHashRecord, vc8formLegacyBodyHash } from './vc8form-spec.js';
 import { planRehash, rehashJava, rowsChecksum } from './vc8form-rehash.js';
 import { applyVc8Forms, emit, parse, type TranslationUnit } from '@ghidra-mcp/cpp-parser';
 
@@ -47,6 +47,16 @@ describe('vc8form-spec', () => {
   it('orders the shape forms: declarations, then control flow, then expressions, then moves', () => {
     const spec = vc8FormSpec({ size: 16, decompiled: BODY, tags: [tag('seq(b,a)'), tag('cmp(a < 4,lit)'), tag('dup(g(a))'), tag('nest(a)'), tag('split(v,int,w)')] });
     assert.deepStrictEqual(spec?.forms.map(f => f.form.op), ['split', 'dup', 'nest', 'cmp', 'seq']);
+  });
+
+  it('slots nullinit after seq and the declaration forms, not ahead of width and split', () => {
+    const spec = vc8FormSpec({ size: 16, decompiled: BODY, tags: [tag('nullinit(p,@g)'), tag('seq(b,a)'), tag('split(v,int,w)'), tag('width(a,int)')] });
+    assert.deepStrictEqual(spec?.forms.map(f => f.form.op), ['width', 'split', 'seq', 'nullinit']);
+  });
+
+  it('gives every op a slot', () => {
+    assert.strictEqual(new Set(FORM_ORDER).size, FORM_ORDER.length);
+    for (const op of ['nullinit', 'zinit', 'znew', 'swclamp', 'retbase'] as const) assert.ok(FORM_ORDER.includes(op), op);
   });
 
   it('reads the ord field, and rejects one that is not a positive integer', () => {
