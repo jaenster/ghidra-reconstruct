@@ -15,7 +15,12 @@
  *    mention is the whole right-hand side of a plain `=` into a 4-byte integer field or
  *    local: a word is copied the same way whatever its sign;
  *  - a return type retyped between 4-byte integer types, where every `return` returns an
- *    integer literal: the constant loaded into EAX has the same bits either way.
+ *    integer literal: the constant loaded into EAX has the same bits either way;
+ *  - a struct field retyped between two pointer types, where every mention of it is tested
+ *    for null (the whole condition of an `if`/`while`/`for`/`?:`, an operand of `!`, `&&` or
+ *    `||`, or compared `==`/`!=` with `0`/`nullptr`) or stored `= 0`/`= nullptr`: a word is
+ *    tested and cleared the same way whatever it points to (deploy 1179: D2UnitStrc::pAnimSeq
+ *    typed `D2MonSeqTxt *` instead of `D2AnimSeqStrc *`).
  *
  * Anything else (a comparison, a shift, a division, a widening, a pointer becoming an
  * integer the body uses) stays refused.
@@ -128,4 +133,58 @@ export function neutralReturnRetype(scan: SiteScan, was: string, now: string): b
     if (n.kind === NodeKind.ReturnStmt && !isIntegerLiteral(n.value)) ok = false;
   });
   return ok;
+}
+
+function isNullConstant(n: AnyNode | null | undefined): boolean {
+  if (!n) return false;
+  const x = unparen(n);
+  if (x.kind === NodeKind.NullptrLiteral) return true;
+  if (x.kind === NodeKind.IntegerLiteral) return Number(x.value) === 0;
+  return x.kind === NodeKind.Identifier && x.name === 'NULL';
+}
+
+/**
+ * Whether the stored body compiles the same with the field at (`struct`, `offset`) retyped
+ * `was` -> `now`, both pointer types: every mention of the field is a null test or a null store.
+ */
+export function neutralFieldRetype(scan: SiteScan, bindings: ReadonlyArray<Binding | undefined>, struct: string, offset: number, was: string, now: string): boolean {
+  if (!isPointer(was) || !isPointer(now)) return false;
+  const mentions = new Set<number>();
+  scan.sites.forEach((s, i) => {
+    const b = bindings[i];
+    if (b && b.k === 'fd' && b.s === struct && b.o === offset) mentions.add(s.start);
+  });
+  if (mentions.size === 0) return true;
+  let seen = 0;
+  let ok = true;
+  walk(scan.root as AnyNode, (n, parents) => {
+    if (!ok || n.kind !== NodeKind.MemberExpr) return;
+    const o = offsetOf(n.member as AnyNode);
+    if (o === undefined || !mentions.has(o)) return;
+    seen++;
+    let i = parents.length - 1;
+    let child: AnyNode = n;
+    while (i >= 0 && parents[i].kind === NodeKind.ParenExpr) { child = parents[i]; i--; }
+    const p = i >= 0 ? parents[i] : undefined;
+    if (!p) { ok = false; return; }
+    switch (p.kind) {
+      case NodeKind.IfStmt: case NodeKind.WhileStmt: case NodeKind.DoWhileStmt: case NodeKind.ForStmt: case NodeKind.ConditionalExpr:
+        if (p.condition === child) return;
+        break;
+      case NodeKind.UnaryExpr:
+        if (p.operator === '!') return;
+        break;
+      case NodeKind.BinaryExpr:
+        if (p.operator === '&&' || p.operator === '||') return;
+        if ((p.operator === '==' || p.operator === '!=') && isNullConstant(p.left === child ? p.right : p.left)) return;
+        break;
+      case NodeKind.AssignExpr:
+        if (p.operator === '=' && p.left === child && isNullConstant(p.right)) return;
+        break;
+      default:
+        break;
+    }
+    ok = false;
+  });
+  return ok && seen === mentions.size;
 }

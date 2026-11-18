@@ -545,4 +545,52 @@ int __fastcall ChangePassword(char * szPassword, int nLen) {
       assert.ok(body(same, out, '00401100').includes('XSHA1(&__frame0.dwTickCount.sHash, szPassword, nLen);'));
     });
   });
+  describe('a pointer field retyped to another pointer', () => {
+    // InitAnimFrame 005533d0 / SKILLSSOR_CltCreateInfernoMissile 004e31c0 (deploy 1179): the
+    // stored bodies only clear D2UnitStrc::pAnimSeq and test it for null, so retyping it from
+    // D2AnimSeqStrc * to D2MonSeqTxt * leaves every instruction where it was.
+    const header = (seq: string) => `#pragma once
+struct SeqA { /* 0x00 */ uint16_t wMode; };
+struct SeqB { /* 0x00 */ uint8_t nMode; /* 0x01 */ uint8_t nFrame; };
+struct Unit {
+    /* 0x00 */ uint32_t dwType;
+    /* 0x04 */ ${seq} * pSeq;
+};
+namespace G {
+int __fastcall Reset(Unit * pUnit); // 1.14d: 00401100
+}
+`;
+    const unit = (use: string, tail = '') => `#include "Unit.h"
+namespace G {
+
+// 1.14d: 00401100
+int __fastcall Reset(Unit * pUnit) {
+    ${use}
+    return 1${tail};
+}
+
+}
+`;
+    const nullUses = 'if (pUnit->pSeq) {\n      pUnit->pSeq = 0;\n    }\n    if (!(pUnit->pSeq) && pUnit->pSeq != nullptr) {\n      pUnit->dwType = 2;\n    }';
+
+    it('keeps a stored body that only tests and clears the field', () => {
+      const out = applyRecords(tree(header('SeqB'), unit(nullUses, ' + 0')), [record(tree(header('SeqA'), unit(nullUses)), '00401100')]);
+      const r = row(out.rows, '00401100');
+      assert.strictEqual(r.status, 'kept', r.detail);
+    });
+
+    it('refuses a stored body that reads through the field', () => {
+      const deref = 'if (pUnit->pSeq) {\n      pUnit->dwType = pUnit->pSeq->wMode;\n    }';
+      const out = applyRecords(tree(header('SeqB'), unit('pUnit->dwType = 3;', ' + 0')), [record(tree(header('SeqA'), unit(deref)), '00401100')]);
+      const r = row(out.rows, '00401100');
+      assert.strictEqual(r.status, 'unresolved', r.detail);
+      assert.match(r.detail, /field Unit::pSeq retyped: SeqA\* -> SeqB\*/u);
+    });
+
+    it('refuses a stored body that stores a value other than null into it', () => {
+      const store = 'pUnit->pSeq = (SeqA *)pUnit;';
+      const out = applyRecords(tree(header('SeqB'), unit('pUnit->dwType = 3;', ' + 0')), [record(tree(header('SeqA'), unit(store)), '00401100')]);
+      assert.strictEqual(row(out.rows, '00401100').status, 'unresolved', row(out.rows, '00401100').detail);
+    });
+  });
 });
