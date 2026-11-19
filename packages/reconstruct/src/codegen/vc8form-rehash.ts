@@ -6,7 +6,7 @@
 import { createHash } from 'node:crypto';
 import { parseVc8FormTag, type Vc8FormHashRecord } from './vc8form-spec.js';
 
-export interface RehashRow { address: string; name: string; old: string; new: string; reason: 'current' | 'moved' }
+export interface RehashRow { address: string; name: string; old: string; new: string; reason: 'current' | 'moved' | 'staged' }
 export interface RehashPlan { rows: RehashRow[]; kept: number; stale: Array<{ address: string; name: string; tag: string; why: string }>; checksum: string }
 
 export function planRehash(now: Map<string, Vc8FormHashRecord>, before?: Map<string, Vc8FormHashRecord>): RehashPlan {
@@ -21,6 +21,7 @@ export function planRehash(now: Map<string, Vc8FormHashRecord>, before?: Map<str
       if (tag.body === r.form) { kept++; continue; }
       let reason: RehashRow['reason'] | undefined;
       if (tag.body === r.legacy) reason = 'current';
+      else if (r.staged !== undefined && tag.body === r.staged) reason = 'staged';
       else {
         const b = before?.get(address);
         if (b && b.size === r.size && b.legacy === tag.body && b.form === r.form) reason = 'moved';

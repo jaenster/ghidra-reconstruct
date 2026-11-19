@@ -137,6 +137,8 @@ export const FUNCTION_HASH_FIELDS = {
   // Ghidra's source-file annotation of the function: no generator code reads it.
   sourceFile: 'excluded',
   sourceLine: 'excluded',
+  // A copy of `decompiled` taken at the start of generation, never in a snapshot.
+  ghidraDecompiled: 'excluded',
 } as const satisfies Record<keyof ExtractedFunction, 'hashed' | 'excluded'>;
 
 const FUNCTION_HASH_EXCLUDED: ReadonlySet<string> = new Set(

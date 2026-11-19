@@ -34,7 +34,7 @@
  */
 
 import type { AnalyzedDataSymbol, ExtractedFunction } from '../types.js';
-import { vc8formBodyHash } from './vc8form-spec.js';
+import { DecompileHash } from './vc8form-spec.js';
 import { noteGlobalScopeReason } from './global-scope-trace.js';
 
 export const VC8_DATA_LINKAGE_TAG = 'vc8datalinkage';
@@ -85,19 +85,18 @@ export interface Vc8DataLinkage {
 }
 
 /** The measured data linkage every function's fresh `vc8datalinkage` tags record. */
-export function vc8DataLinkage(functions: ReadonlyArray<Pick<ExtractedFunction, 'name' | 'tags' | 'size' | 'decompiled'>>): Vc8DataLinkage {
+export function vc8DataLinkage(functions: ReadonlyArray<Pick<ExtractedFunction, 'name' | 'tags' | 'size' | 'decompiled' | 'ghidraDecompiled'>>): Vc8DataLinkage {
   const out: Vc8DataLinkage = { external: new Map(), defined: new Map(), stale: [] };
   for (const func of functions) {
     const tags = (func.tags ?? []).filter(t => t.type === VC8_DATA_LINKAGE_TAG);
     if (tags.length === 0) continue;
-    let body: string | undefined;
+    const body = new DecompileHash(func);
     for (const t of tags) {
       const raw = t.data ?? '';
       const tag = parseVc8DataLinkageTag(raw);
       if (!tag) { out.stale.push({ func: func.name, tag: raw, why: 'not a vc8datalinkage record' }); continue; }
       if (Number(func.size) !== tag.size) { out.stale.push({ func: func.name, tag: raw, why: `size ${func.size}, the tag measured ${tag.size}` }); continue; }
-      body ??= vc8formBodyHash(func.decompiled ?? '');
-      if (body !== tag.body) { out.stale.push({ func: func.name, tag: raw, why: `decompile ${body}, the tag measured ${tag.body}` }); continue; }
+      if (!body.matches(tag.body)) { out.stale.push({ func: func.name, tag: raw, why: `decompile ${body.dh}, the tag measured ${tag.body}` }); continue; }
       const into = tag.kind === 'extern' ? out.external : out.defined;
       for (const a of tag.addresses) {
         const list = into.get(a) ?? [];

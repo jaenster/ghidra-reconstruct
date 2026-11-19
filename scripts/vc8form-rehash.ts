@@ -1,6 +1,7 @@
 /**
  * Rewrite the `dh` of every vc8form tag to the hash the generator checks now
- * (`vc8formBodyHash`, over the namespace-free token form of the decompile).
+ * (`vc8formBodyHash` of Ghidra's decompile, over its namespace-free token form:
+ * packages/reconstruct/src/codegen/vc8form-dh.ts).
  *
  * Input is what the generator itself saw: a codegen run with
  * `GHIDRA_VC8FORM_HASHES=<file>` writes one record per tagged function (address, size,
@@ -8,6 +9,9 @@
  * rewritten only when it is proven against that decompile:
  *
  *   current  its dh is the whitespace-only hash of the decompile now
+ *   staged   its dh is the hash of the decompile as the generator had rewritten it
+ *            (template names respelled), which the generator checked before dh was
+ *            defined over Ghidra's text; accepted meanwhile, so rehashing changes nothing
  *   moved    its dh is the whitespace-only hash of the decompile in --before (a run on
  *            the model the tag was measured on), and that decompile and today's have one
  *            namespace-free form: only qualifiers and line breaks moved
@@ -46,6 +50,6 @@ function load(path: string): Map<string, Vc8FormHashRecord> {
   writeFileSync(out, JSON.stringify(plan, null, 1) + '\n');
   if (java) writeFileSync(java, rehashJava(plan, arg('--tx') ?? 'vc8form tags: dh over the namespace-free form'));
   const by = (k: string) => plan.rows.filter(r => r.reason === k).length;
-  console.log(`rows=${plan.rows.length} (current=${by('current')} moved=${by('moved')}) kept=${plan.kept} stale=${plan.stale.length} checksum=${plan.checksum}`);
+  console.log(`rows=${plan.rows.length} (current=${by('current')} moved=${by('moved')} staged=${by('staged')}) kept=${plan.kept} stale=${plan.stale.length} checksum=${plan.checksum}`);
   for (const s of plan.stale) console.log(`stale ${s.address} ${s.name}: ${s.tag} (${s.why})`);
 }

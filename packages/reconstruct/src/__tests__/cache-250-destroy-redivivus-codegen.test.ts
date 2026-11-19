@@ -37,7 +37,9 @@ TSHashTable<SGAMEDATA,HASHKEY_NONE>::Destroy(TSHashTable<SGAMEDATA,HASHKEY_NONE>
 
 const form = 'cache(&pThis->tSlotListArray,pArray,TSGrowableArray<TSExplicitList<SGAMEDATA, -572662307>>*)';
 // Raw Ghidra text and generator-stage text have different hashes: registered
-// template names are respelled before tags are checked. Values reread at v2109.
+// template names are respelled during generation. dh is defined over the raw text
+// (vc8form-dh.ts); the generator-stage hash is still accepted until the rehash.
+// Values reread at v2109.
 const rawBodyHash = '211b70bd';
 const bodyHash = '2f2508ac';
 const probeTag = { type: 'vc8form', data: `${form};ev=84b29b6c15;bh=40-8561c9a1;dh=${bodyHash}` };
@@ -131,10 +133,13 @@ function emitted(tags: ExtractedFunction['tags']): string {
 }
 
 describe('Redivivus issue #250 live Destroy cache with template context', () => {
-  it('does not mistake the raw hash for the generator-stage tag hash', () => {
+  it('hashes Ghidra\'s text, not the generator-stage text', () => {
     assert.equal(vc8formBodyHash(decompiled), rawBodyHash);
     assert.notEqual(rawBodyHash, bodyHash);
+    // Without generation nothing is respelled, so only the raw hash is current.
     assert.equal(vc8FormSpec({ ...base, tags: [probeTag] })?.forms.length, 0);
+    const raw = { ...probeTag, data: probeTag.data.replace(`dh=${bodyHash}`, `dh=${rawBodyHash}`) };
+    assert.equal(vc8FormSpec({ ...base, tags: [raw] })?.forms.length, 1);
   });
 
   it('emits the address cache and preserves member calls in template context', () => {
@@ -143,8 +148,9 @@ describe('Redivivus issue #250 live Destroy cache with template context', () => 
     const staleTag = { ...probeTag, data: probeTag.data.replace(`dh=${bodyHash}`, 'dh=ffffffff') };
     const stale = emitted([...(base.tags ?? []), staleTag]);
     assert.equal(stale, absent);
+    // The raw hash is the canonical dh; the generator-stage one is accepted alike.
     assert.equal(emitted([...(base.tags ?? []), { ...probeTag,
-      data: probeTag.data.replace(`dh=${bodyHash}`, `dh=${rawBodyHash}`) }]), absent);
+      data: probeTag.data.replace(`dh=${bodyHash}`, `dh=${rawBodyHash}`) }]), tagged);
     assert.equal(emitted([...(base.tags ?? []), { ...probeTag,
       data: probeTag.data.replace(form, form.replace('&pThis->', '&this->').replace(/\)$/, ',@call)')) }]), absent);
     assert.notEqual(tagged, absent);
