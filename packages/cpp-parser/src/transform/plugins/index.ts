@@ -641,6 +641,10 @@ export {
   loopStepMergePlugin,
   createLoopStepMergeTransformer,
 } from './builtins/loop-step-merge.js';
+export {
+  countdownIndexForPlugin,
+  createCountdownIndexForTransformer,
+} from './builtins/countdown-index-for.js';
 
 export {
   derefWalkLoopPlugin,
@@ -1072,6 +1076,7 @@ import { fieldPointerFoldPlugin } from './builtins/field-pointer-fold.js';
 import { newResultTempPlugin } from './builtins/new-result-temp.js';
 import { loopCopySinkPlugin } from './builtins/loop-copy-sink.js';
 import { loopStepMergePlugin } from './builtins/loop-step-merge.js';
+import { countdownIndexForPlugin } from './builtins/countdown-index-for.js';
 import { derefWalkLoopPlugin } from './builtins/deref-walk-loop.js';
 import { shiftDefPlugin } from './builtins/shift-def.js';
 import { paramSlotLocalPlugin } from './builtins/param-slot-local.js';
@@ -1331,6 +1336,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   newResultTempPlugin,        // Matching: an allocation constructed in place gets a temporary; the result assigned after (priority 62.6)
   loopCopySinkPlugin,         // Matching: a loop-carried copy placed mid-body moves to the end of the body (priority 62.7)
   loopStepMergePlugin,        // Matching: a running loop variable split into a copy and a step from it is one variable (priority 62.72)
+  countdownIndexForPlugin,    // Matching: a do-while counting an unread counter down from n >= 1 is a for loop up to n (priority 62.74)
   derefWalkLoopPlugin,        // Matching: a tail-link walk tests *pp, not a copy reloaded each round (priority 62.77)
   shiftDefPlugin,             // Matching: a call result every read shifts by one constant is shifted once, where it is stored (priority 62.8)
   paramSlotLocalPlugin,       // Matching: a local packed into a loaded parameter's slot gets its own variable back (priority 940)
