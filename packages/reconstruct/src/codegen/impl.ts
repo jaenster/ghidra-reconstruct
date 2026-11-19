@@ -655,6 +655,8 @@ export interface ImplGenContext {
   accessorTwins?: Vc8Accessor[];
   /** Getters the callers expanded in place, with the forced-inline twins sites call (getter-twins.ts). */
   getterTwins?: GetterTwinDef[];
+  /** Header inlines the callers expanded in place, with their forced-inline twins (host-twins.ts). */
+  hostTwins?: import('./host-twins.js').HostTwinDef[];
   _fnPrefix?: string[];
   /**
    * Internal: the namespace block the current impl file's bodies are emitted
@@ -4318,6 +4320,25 @@ function transformDecompiledCode(
         branchLayout: layout ?? null,
         onSite: (e: { call: string; held: string | null }) =>
           console.warn(`[getter-twin] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.call}${e.held ? ` (held in ${e.held})` : ''}`),
+      };
+    }
+
+    // A header inline the callers expanded in place calls its forced-inline twin (host-twin-fold.ts).
+    if (context?.hostTwins && context.hostTwins.length > 0) {
+      perPluginOptions['host-twin-fold'] = {
+        twins: context.hostTwins,
+        enumValues: context.funcPtrArgCasts?.enumValues,
+        typedefTargets: context.funcPtrArgCasts?.typedefTargets,
+        globalTypes: context.funcPtrArgCasts?.globalTypes,
+        fieldTypes: context.funcPtrArgCasts?.fieldTypes,
+        structFields: context.funcPtrArgCasts?.structFields,
+        functionReturnTypes: context.funcPtrArgCasts?.functionReturnTypes,
+        enclosingVarTypes,
+        onSite: (e: { call: string; arg: string; form: string }) =>
+          console.warn(`[host-twin] ${funcAddress ?? '???'} ${funcName ?? '<unknown>'}: ${e.form} ${e.call}(${e.arg})`),
+        onReject: process.env.D2_HOST_TWIN_DEBUG
+          ? (e: { call: string; why: string }) => console.warn(`[host-twin] ${funcAddress ?? '???'} left ${e.call}: ${e.why}`)
+          : undefined,
       };
     }
 

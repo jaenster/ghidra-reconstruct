@@ -114,6 +114,7 @@ import { EXTERN_ENTRY_SUFFIX, fileStaticKey, readForeignSourcesAt, selectFileSta
 import { inlineHostHeaderPath, inlineHostKey, isInlineHost, refusedInlineHosts } from './inline-hosts.js';
 import { accessorTwins } from './accessor-twins.js';
 import { getterTwins, getterTwinDefinition, pointee } from './getter-twins.js';
+import { hostTwins, hostTwinDefinition, hostTwinHeaderPath } from './host-twins.js';
 import { planInlinedCalls, planGuardedCalls, type InlinedCallPlan, type GuardedCallPlan } from './inlined-calls.js';
 import { nullGetterDefaults } from './null-getters.js';
 import { placeTemplateMembers } from './templates/placement.js';
@@ -4482,6 +4483,11 @@ function generateFilesForFunctions(
   const getterTwinDefs = getterTwins(functions);
   const getterTwinByAddress = new Map(getterTwinDefs.map(t => [t.address, t]));
   const getterTwinHeader = new Map<string, string>();
+  // Header inlines the callers expanded in place: each twin is defined after its host in the
+  // host's unit's inline header (host-twins.ts).
+  const hostTwinDefs = hostTwins(functions);
+  const hostTwinByAddress = new Map(hostTwinDefs.map(t => [t.address, t]));
+  const hostTwinHeader = new Map<string, string>();
   const platformHeaders = new Set<string>(); // headers that contain ONLY platform-guarded functions
   for (const [unitName, unitFunctions] of organized) {
     const headerPath = unitHeaderPaths.get(unitName)!;
@@ -4497,6 +4503,8 @@ function generateFilesForFunctions(
       funcNameToHeaderPath.set(func.name, headerPath);
       const twin = getterTwinByAddress.get(func.address);
       if (twin) getterTwinHeader.set(twin.name, inlineHostHeaderPath(headerPath));
+      const hostTwin = hostTwinByAddress.get(func.address);
+      if (hostTwin && isInlineHost(func)) hostTwinHeader.set(hostTwin.name, hostTwinHeaderPath(headerPath));
 
       const qualified = func.namespace
         ? normalizeQualifiedReference(`${func.namespace}::${func.name}`)
@@ -4772,6 +4780,7 @@ function generateFilesForFunctions(
   // The header inlines that read one field, whose inline twins `acc` vc8form tags call.
   context.accessorTwins = accessorTwins(functions, context.funcPtrArgCasts);
   context.getterTwins = getterTwinDefs.filter(t => getterTwinHeader.has(t.name));
+  context.hostTwins = hostTwinDefs.filter(t => hostTwinHeader.has(t.name));
   // Data initializers are emitted from strings, not an AST — the globals emitter
   // needs the same prototype tables to decide whether a function address stored
   // in a slot needs the cast C++ has never let it do implicitly.
@@ -4919,15 +4928,21 @@ function generateFilesForFunctions(
     // The twins of the unit's getters are defined in its inline header too.
     const unitTwins = templateImplPath ? [] : (context.getterTwins ?? []).filter(t => unitFunctions.some(f => f.address === t.address));
     const inlineHeaderPath = inlineHosts.length > 0 || unitTwins.length > 0 ? inlineHostHeaderPath(headerPath) : undefined;
+    // The forced-inline twins of the unit's header inlines, in a header of their own: only
+    // the files that call a twin include it, so no other unit's text changes (host-twins.ts).
+    const unitHostTwins = inlineHosts.length > 0 ? (context.hostTwins ?? []).filter(t => inlineHosts.some(f => f.address === t.address)) : [];
+    const twinHeaderPath = unitHostTwins.length > 0 ? hostTwinHeaderPath(headerPath) : undefined;
     if (!shardOwnsNext(unitCost(unitFunctions))) {
       if (!templateImplPath) shardPlaceholder(files, headerPath, 'header');
       if (inlineHeaderPath) shardPlaceholder(files, inlineHeaderPath, 'header');
+      if (twinHeaderPath) shardPlaceholder(files, twinHeaderPath, 'header');
       shardPlaceholder(files, implPath, 'implementation');
       if (options.generateSourceMaps) shardPlaceholderMap(sourceMaps, `${implPath}.map`);
       continue;
     }
     if (!templateImplPath) shardRecordEmitted(headerPath);
     if (inlineHeaderPath) shardRecordEmitted(inlineHeaderPath);
+    if (twinHeaderPath) shardRecordEmitted(twinHeaderPath);
     shardRecordEmitted(implPath);
 
     // Get graph-resolved includes for this module
@@ -5053,7 +5068,11 @@ function generateFilesForFunctions(
     const reusedInlineHeader = previousImpl !== undefined && inlineHeaderPath
       ? reuseUnitImpl(unitName, inlineHeaderPath)
       : undefined;
-    const reusedImpl = inlineHeaderPath && reusedInlineHeader === undefined ? undefined : previousImpl;
+    const reusedTwinHeader = previousImpl !== undefined && twinHeaderPath
+      ? reuseUnitImpl(unitName, twinHeaderPath)
+      : undefined;
+    const reusedImpl = (inlineHeaderPath && reusedInlineHeader === undefined) || (twinHeaderPath && reusedTwinHeader === undefined)
+      ? undefined : previousImpl;
     // The placement lookups the dependency scan below makes, recorded for the next
     // run's reuse check. Only an emitted unit records; a reused one keeps its record.
     const placementLookups = new Map<string, string>();
@@ -5225,6 +5244,7 @@ function generateFilesForFunctions(
 
       // A getter's twin is defined in its unit's inline header (getter-twins.ts).
       for (const [twin, header] of getterTwinHeader) if (refs.identifiers.has(twin)) addInclude(header);
+      for (const [twin, header] of hostTwinHeader) if (refs.identifiers.has(twin)) addInclude(header);
 
       // Scan for function references — call sites, func-ptr literals, and the
       // address-taken names inside data initializers (the co-located block above
@@ -5418,9 +5438,20 @@ function generateFilesForFunctions(
       });
     }
 
+    let twinHeaderContent: string | undefined = reusedTwinHeader;
+    if (twinHeaderPath && inlineHeaderPath && reusedImpl === undefined && inlineHeaderContent !== undefined) {
+      // In the namespace the hosts are declared in, after the inline header that defines them.
+      const ns = unitHostTwins[0].call.slice(0, Math.max(0, unitHostTwins[0].call.lastIndexOf('::')));
+      const header = inlineHeaderContent;
+      const defs = unitHostTwins.map(t => hostTwinDefinition(t, header)).join('\n\n');
+      twinHeaderContent = ['// Auto-generated by ghidra-mcp — DO NOT EDIT', '', '#pragma once', '',
+        `#include "${inlineHeaderPath.replace(/\\/g, '/')}"`, '',
+        ns ? `namespace ${ns} {\n\n${defs}\n\n} // namespace ${ns}` : defs, ''].join('\n');
+    }
     // Kept as emitted, before stage 2 rewrites it: what the next run reuses.
     if (reusedImpl === undefined) {
       recordUnitText(implPath, implContent);
+      if (twinHeaderPath && twinHeaderContent !== undefined) recordUnitText(twinHeaderPath, twinHeaderContent);
       if (inlineHeaderPath && inlineHeaderContent !== undefined) recordUnitText(inlineHeaderPath, inlineHeaderContent);
     }
     files.set(implPath, {
@@ -5441,6 +5472,17 @@ function generateFilesForFunctions(
         className: classInfo?.name,
         functions: inlineHosts.map(f => f.name),
         includes: [headerPath, ...sortedAllIncludes],
+      });
+    }
+    if (twinHeaderPath && twinHeaderContent !== undefined) {
+      files.set(twinHeaderPath, {
+        path: twinHeaderPath,
+        content: twinHeaderContent,
+        type: 'header',
+        namespace: namespace?.fullPath,
+        className: classInfo?.name,
+        functions: unitHostTwins.map(t => t.name),
+        includes: [inlineHeaderPath!],
       });
     }
 
