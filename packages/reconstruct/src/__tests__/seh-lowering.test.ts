@@ -24,11 +24,14 @@ import type { ExtractedFunction, ProgramInfo, ReconstructOptions } from '../type
 const SCRIPT_OUTPUT = [
   'F\t00401a70\teh4\t00702290\t__except_handler4',
   'L\t-2\t1',
+  'L\treg\t1',
   'E\t0\t-2\t00401adf\t00401ae3',
   'I\tfilter\t0\t00401adf\t0\tOR EAX,0xffffffff',
   'I\tfilter\t0\t00401ae2\t0\tRET',
   'I\thandler\t0\t00401ae3\t0\tMOV ESP,dword ptr [EBP + -0x18]',
   'I\thandler\t0\t00401ae6\t1\tMOV dword ptr [EBP + -0x4],0xfffffffe',
+  'I\thandler\t0\t00401aed\t1\tMOV ECX,dword ptr [EBP + -0x10]',
+  'I\thandler\t0\t00401af0\t1\tMOV dword ptr FS:[0x0],ECX',
   'F\t004e0730\teh3\t007011a0\t_except_handler3',
   'L\t-1\t1',
   'L\t0\t1',
@@ -164,20 +167,29 @@ describe('sehLoweringDecision', () => {
     const d = sehLoweringDecision({ sehFrame: frames.get('004e0730') });
     assert.deepStrictEqual(d, {
       lower: true,
-      scopes: [{ level: 0, filter: 1, filterAddress: '004e0977', handlerAddress: '004e097d', resumeAddress: '004e0980', scopeTable: '007011a0' }],
+      scopes: [{ level: 0, filter: 1, filterAddress: '004e0977', handlerAddress: '004e097d', resumeAddress: '004e0980', scopeTable: '007011a0', frame: 'eh3' }],
     });
   });
 
-  it('refuses EH4 frames', () => {
-    assert.deepStrictEqual(sehLoweringDecision({ sehFrame: frames.get('00401a70') }), { lower: false, reason: 'eh4 frames are not lowered' });
+  it('lowers DebugThread\'s EH4 frame: filter -1, the handler resumes at the -2 store that only precedes the deregistration', () => {
+    assert.deepStrictEqual(sehLoweringDecision({ sehFrame: frames.get('00401a70') }), {
+      lower: true,
+      scopes: [{ level: 0, filter: -1, filterAddress: '00401adf', handlerAddress: '00401ae3', resumeAddress: '00401ae6', scopeTable: '00702290', frame: 'eh4', leaveDeregisters: true }],
+    });
     assert.strictEqual(sehLoweringDecision({}), undefined);
+  });
+
+  it('refuses an EH4 __except block with code of its own (the funclet is not in the decompile)', () => {
+    const f = structuredClone(frames.get('00401a70')!);
+    f.entries[0].handlerCode.splice(1, 0, { address: '004103db', text: 'MOV ECX,dword ptr [EBP + 0xffffefdc]', inParent: false });
+    assert.match((sehLoweringDecision({ sehFrame: f }) as { reason: string }).reason, /does not resume/);
   });
 
   it('lowers SOUNDUTIL_ReadVersionResource\'s __finally: one CALL 00516c01 after the try, the handler falls into it', () => {
     assert.deepStrictEqual(frames.get('00516ac0')!.tryLevelStores, { '-1': 1, reg: 1 });
     assert.deepStrictEqual(sehLoweringDecision({ sehFrame: frames.get('00516ac0') }), {
       lower: true,
-      scopes: [{ kind: 'finally', bodyAddress: '00516c01', level: 0, filter: 0, filterAddress: '-', handlerAddress: '00516bfc', resumeAddress: '-', scopeTable: '007011b0' }],
+      scopes: [{ kind: 'finally', bodyAddress: '00516c01', level: 0, filter: 0, filterAddress: '-', handlerAddress: '00516bfc', resumeAddress: '-', scopeTable: '007011b0', frame: 'eh3' }],
     });
   });
 
@@ -237,30 +249,32 @@ LAB_004e0980:
   return r;
 }`;
 
-  it('wraps the region in a D2SehScope and drops the dummy registration', () => {
+  it('spells the region as D2_SEH_TRY and drops the registration', () => {
     const refusals: string[] = [];
     const out = run(SMALL, refusals);
     assert.deepStrictEqual(refusals, []);
-    assert.ok(/D2SehScope __seh0\{1\};/.test(out), out);
-    assert.ok(/if \(D2_SEH_SETJMP\(__seh0\) == 0\)/.test(out), out);
-    assert.ok(/__seh0\.Enter\(\);\s*(D2_SEH_FENCE\(\);\s*)?r = \*p;/.test(out), out);
-    assert.ok(!/ExceptionList/.test(out), out);
-    assert.ok(!/TryLevel|ScopeTable|ExceptionHandler/.test(out), out);
-    // The handler path and the normal path meet at the exit label, after the scope block.
-    const scopeEnd = out.indexOf('LAB_004e0980:');
-    assert.ok(scopeEnd > out.indexOf('else'), out);
-    // An early return inside the region stays a return (the destructor deregisters).
+    assert.match(out, /D2_SEH_TRY\s*r = \*p;/, out);
+    assert.match(out, /D2_SEH_EXCEPT\(EXCEPTION_EXECUTE_HANDLER\)\s*D2_SEH_END\s*LAB_004e0980:/, out);
+    assert.ok(!/ExceptionList|tSehFrame/.test(out), out);
+    assert.ok(!/volatile|D2_SEH_FENCE|D2SehScope/.test(out), out);
+    // An early return inside the region stays a return.
     assert.ok(/return 4;/.test(out), out);
     // bFailed = 1 runs before the __try, bFailed = 0 inside it.
-    assert.ok(out.indexOf('bFailed = 1') < out.indexOf('__seh0{1}'), out);
-    assert.ok(out.indexOf('bFailed = 0') > out.indexOf('Enter()'), out);
+    assert.ok(out.indexOf('bFailed = 1') < out.indexOf('D2_SEH_TRY'), out);
+    assert.ok(out.indexOf('bFailed = 0') > out.indexOf('D2_SEH_TRY'), out);
+    assert.ok(out.indexOf('bFailed = 0') < out.indexOf('D2_SEH_EXCEPT'), out);
+  });
+
+  it('round-trips through the parser', () => {
+    const out = run(SMALL);
+    assert.strictEqual(emit(parse(out) as never), out);
   });
 
   it('reads through the cast assign-cast writes on the void* ExceptionList', () => {
     const refusals: string[] = [];
     const out = run(SMALL.replace('tSehFrame.Next = ExceptionList;', 'tSehFrame.Next = (EH3_EXCEPTION_REGISTRATION*)ExceptionList;'), refusals);
     assert.deepStrictEqual(refusals, []);
-    assert.ok(/D2SehScope __seh0\{1\};/.test(out), out);
+    assert.ok(/D2_SEH_TRY/.test(out), out);
     assert.ok(!/ExceptionList/.test(out), out);
   });
 
@@ -285,112 +299,58 @@ LAB_004e0980:
   });
 });
 
-describe('seh-lowering keeps what the try block wrote across the longjmp', () => {
-  const run = (code: string, refusals: string[] = []) =>
-    emit(sehLoweringPlugin.createTransformer({ sehScopes: [scope], onRefusal: (r: string) => refusals.push(r) })(parse(code)) as never);
-
-  /** nStep and nSum change inside the __try and are read where the __except resumes. */
-  const STEPS = `int f(int *p, int k) {
-  EH3_EXCEPTION_REGISTRATION tSehFrame;
-  int nStep;
-  int nSum;
-  int nUnrelated;
-  int *pCursor;
-  tSehFrame.ScopeTable = gaTable;
-  tSehFrame.ExceptionHandler = _except_handler3;
-  tSehFrame.Next = ExceptionList;
-  nStep = 1;
-  nSum = k;
-  nUnrelated = 4;
-  tSehFrame.TryLevel = 0;
+/** DebugThread (00401a70) as the tree prints it at v2128: the -2 store that leaves the scope is dropped. */
+const DEBUG_THREAD = `void DebugThread() {
+  void* pSavedEsp;
+  EH4_EXCEPTION_REGISTRATION tSehFrame;
+  tSehFrame.TryLevel = -2;
+  tSehFrame.ExceptionHandler = _except_handler4;
+  tSehFrame.Next = (EH4_EXCEPTION_REGISTRATION*)ExceptionList;
+  tSehFrame.EncodedScopeTable = DEFAULT_SECURITY_COOKIE ^ 0x702290;
   ExceptionList = &tSehFrame;
-  nStep = 2;
-  pCursor = p;
-  nSum = nSum + *pCursor;
-  nStep = 3;
-LAB_004e0980:
-  nSum = nStep * 1000 + nSum + nUnrelated - 4;
-  tSehFrame.TryLevel = -1;
+  BOOL bDebuggerPresent = IsDebuggerPresent();
+  if (bDebuggerPresent == 1) {
+    THREADNAME_INFO tThreadNameInfo;
+    tThreadNameInfo.dwType = 0x1000;
+    tThreadNameInfo.dwFlags = 0;
+    tSehFrame.TryLevel = 0;
+    RaiseException(0x406d1388, 0, 4, (ULONG_PTR*)&tThreadNameInfo.dwType);
+  }
   ExceptionList = tSehFrame.Next;
-  return nSum;
 }`;
 
-  it('volatile-qualifies exactly the locals the region writes and the receiver reads', () => {
+const EH4_SCOPE = { level: 0, filter: -1, filterAddress: '00401adf', handlerAddress: '00401ae3', resumeAddress: '00401ae6', scopeTable: '00702290', frame: 'eh4' as const, leaveDeregisters: true };
+
+describe('seh-lowering: EH4', () => {
+  const run = (code: string, sc: object = EH4_SCOPE, refusals: string[] = []) =>
+    emit(sehLoweringPlugin.createTransformer({ sehScopes: [sc], onRefusal: (r: string) => refusals.push(r) })(parse(code)) as never);
+
+  it('DebugThread: the scope runs to the end of its block when only the deregistration follows', () => {
     const refusals: string[] = [];
-    const out = run(STEPS, refusals);
+    const out = run(DEBUG_THREAD, EH4_SCOPE, refusals);
     assert.deepStrictEqual(refusals, []);
-    assert.match(out, /volatile int nStep;/, out);
-    assert.match(out, /volatile int nSum;/, out);
-    // Written before the region only, or never read after it: left alone.
-    assert.match(out, /\n\s*int nUnrelated;/, out);
-    assert.match(out, /\n\s*int\* pCursor;/, out);
+    assert.match(out, /if \(bDebuggerPresent == 1\) \{[\s\S]*tThreadNameInfo\.dwFlags = 0;\s*\/\/ __try[^\n]*\n\s*D2_SEH_TRY\s*RaiseException\([^;]*;\s*D2_SEH_EXCEPT\(EXCEPTION_CONTINUE_EXECUTION\)\s*D2_SEH_END\s*\}/, out);
+    assert.ok(!/ExceptionList|tSehFrame/.test(out), out);
   });
 
-  it('a pointer is qualified itself, and an address taken is cast back to the declared pointer', () => {
-    const code = STEPS.replace('int *pCursor;', 'int *pCursor;\n  int nOut;')
-      .replace('nStep = 3;', 'Fill(&nOut);\n  nStep = 3;')
-      .replace('pCursor = p;', 'pCursor = p;\n  nSum = nSum + 0;')
-      .replace('return nSum;', 'return nSum + nOut + *pCursor;');
-    const out = run(code);
-    assert.match(out, /int\* volatile pCursor;/, out);
-    assert.match(out, /volatile int nOut;/, out);
-    assert.match(out, /Fill\(\(int\*\)&nOut\)/, out);
-  });
-
-  it('refuses a parameter the region writes and the code after reads (the signature is not the body\'s)', () => {
+  it('refuses a missing leave store the instructions do not vouch for', () => {
     const refusals: string[] = [];
-    run(STEPS.replace('nStep = 3;', 'k = 9;\n  nStep = 3;').replace('return nSum;', 'return nSum + k;'), refusals);
-    assert.deepStrictEqual(refusals, ['parameter k is written in the region and read outside it']);
+    run(DEBUG_THREAD, { ...EH4_SCOPE, leaveDeregisters: false }, refusals);
+    assert.deepStrictEqual(refusals, ['no store leaves the scope']);
   });
 
-  it('at -O2 the __except path sees the values the try block left (i686, a real fault)', { skip: !hasLinuxI686() }, (t) => {
-    const dir = mkdtempSync(join(tmpdir(), 'seh-o2-'));
-    try {
-      // Linux stand-in for d2_platform.h's runtime: the same __builtin_setjmp buffer; the
-      // fault is a real SIGSEGV whose handler does what D2SehDispatch does after
-      // RtlUnwind - pop the scope and __builtin_longjmp into the frame that ran the setjmp.
-      writeFileSync(join(dir, 'harness.h'), [
-        '#include <signal.h>',
-        'struct EH3_EXCEPTION_REGISTRATION { void* Next; void* ExceptionHandler; void* ScopeTable; int TryLevel; };',
-        'struct D2SehScope;',
-        'static D2SehScope* volatile g_pActive;',
-        'struct D2SehScope {',
-        '  long nFilter; void* jb[5];',
-        '  explicit D2SehScope(long f) : nFilter(f) {}',
-        '  __attribute__((noinline)) void Enter() { g_pActive = this; }',
-        '  ~D2SehScope() { if (g_pActive == this) g_pActive = 0; }',
-        '};',
-        '#define D2_SEH_SETJMP(scope) __builtin_setjmp((scope).jb)',
-        '#define D2_SEH_FENCE() __asm__ __volatile__("" ::: "memory")',
-        'static void on_segv(int) { D2SehScope* s = g_pActive; g_pActive = 0; __builtin_longjmp(s->jb, 1); }',
-      ].join('\n'));
-      writeFileSync(join(dir, 'main.cpp'), [
-        '#include <stdio.h>', '#include <string.h>', '#include "harness.h"', '#include "body.inc"',
-        'int main() {',
-        '  struct sigaction sa; memset(&sa, 0, sizeof sa); sa.sa_handler = on_segv; sa.sa_flags = SA_NODEFER; sigaction(SIGSEGV, &sa, 0);',
-        '  int x = 5;',
-        '  printf("%d %d\\n", f(&x, 7), f((int*)0, 7));',
-        '  return 0;',
-        '}',
-      ].join('\n'));
-      const build = (body: string, tag: string): string => {
-        writeFileSync(join(dir, 'body.inc'), body);
-        const exe = join(dir, `t${tag}`);
-        execFileSync('i686-linux-gnu-g++', ['-O2', '-w', '-static', '-o', exe, join(dir, 'main.cpp')], { stdio: 'pipe' });
-        return execFileSync('qemu-i386', [exe], { encoding: 'utf8' }).trim();
-      };
-      const lowered = run(STEPS);
-      // No fault: 3*1000 + 7 + 5. Fault on *pCursor: nStep is 2 and nSum still 7.
-      assert.strictEqual(build(lowered, 'q'), '3012 2007');
-      // The same code without the qualifier is what setjmp semantics forbid: GCC keeps
-      // the values from before the setjmp (observed: '3012 1007').
-      t.diagnostic(`without volatile at -O2: ${build(lowered.replace(/volatile /g, ''), 'u')}`);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
+  it('refuses when code follows the block besides the deregistration', () => {
+    const refusals: string[] = [];
+    run(DEBUG_THREAD.replace('  ExceptionList = tSehFrame.Next;\n}', '  Sleep(0);\n  ExceptionList = tSehFrame.Next;\n}'), EH4_SCOPE, refusals);
+    assert.deepStrictEqual(refusals, ['code follows the scope block besides the deregistration']);
+  });
+
+  it('refuses a return inside a scope with no exit store (the decompiler\'s copy of the tail)', () => {
+    const refusals: string[] = [];
+    run(DEBUG_THREAD.replace('RaiseException(', 'if (g) { ExceptionList = tSehFrame.Next; return; }\n    RaiseException('), EH4_SCOPE, refusals);
+    assert.deepStrictEqual(refusals, ['a return inside a scope with no exit store']);
   });
 });
-
 
 /** SOUNDUTIL_ReadVersionResource (00516ac0) as the decompiler prints it on 2026-10-20, comments trimmed. */
 const SOUNDUTIL = `
@@ -495,14 +455,10 @@ describe('seh-lowering: __try/__finally', () => {
     const refusals: string[] = [];
     const out = run(SOUNDUTIL, refusals);
     assert.deepStrictEqual(refusals, []);
-    assert.match(out, /auto __finally0 = \[&\][^{]*\{\s*dwErrCode = GetLastError\(\);/, out);
-    assert.match(out, /D2SehScope __seh0\{__finally0\};\s*__seh0\.Enter\(\);/, out);
-    assert.match(out, /\}\s*\/\/ normal termination[^\n]*\n\s*__finally0\(\);\s*return bSuccess;/, out);
-    assert.ok(!/ExceptionList|TryLevel|ScopeTable/.test(out), out);
-    // The four the try writes and the block reads survive the unwind.
-    for (const v of ['hFile', 'hMapping', 'pView', 'bSuccess']) assert.match(out, new RegExp(`volatile \\w+ ${v};`), out);
-    assert.match(out, /\n\s*int\* pPeHeader;/, out);
-    // The block's statements moved, once: SetLastError(dwErrCode) only in the lambda.
+    assert.match(out, /D2_SEH_TRY\s*hFile = CreateFileA/, out);
+    assert.match(out, /D2_SEH_FINALLY\s*dwErrCode = GetLastError\(\);[\s\S]*SetLastError\(dwErrCode\);\s*D2_SEH_END\s*return bSuccess;/, out);
+    assert.ok(!/ExceptionList|tSehFrame|volatile|D2SehScope|__finally0/.test(out), out);
+    // The block's statements moved, once.
     assert.strictEqual(out.split('SetLastError(dwErrCode)').length, 2, out);
   });
 
@@ -511,75 +467,7 @@ describe('seh-lowering: __try/__finally', () => {
     run(SOUNDUTIL.replace('SetLastError(0xb);', 'SetLastError(0xb);\n      return 0;'), refusals);
     assert.deepStrictEqual(refusals, ['a return leaves the __try (an abnormal termination)']);
   });
-
-  it('at -O2 the termination handler sees what the try wrote when a fault unwinds the frame (i686)', { skip: !hasLinuxI686() }, (t) => {
-    const dir = mkdtempSync(join(tmpdir(), 'seh-fin-'));
-    try {
-      // Linux stand-in: a chain of scopes; the SIGSEGV handler does what the dispatcher and
-      // RtlUnwind do with D2SehDispatch: the first scope with a filter handles it, every
-      // scope above it runs its __finally block, then the handler resumes its __except.
-      writeFileSync(join(dir, 'harness.h'), [
-        '#include <signal.h>', '#include <stdlib.h>',
-        'struct EH3_EXCEPTION_REGISTRATION { void* Next; void* ExceptionHandler; void* ScopeTable; int TryLevel; };',
-        'struct D2SehScope;',
-        'static D2SehScope* volatile g_pTop;',
-        'struct D2SehScope {',
-        '  D2SehScope* Next; long nFilter; void* jb[5]; void (*pfnFinally)(void*); void* pFinallyCtx; int bRegistered;',
-        '  explicit D2SehScope(long f) : Next(0), nFilter(f), pfnFinally(0), pFinallyCtx(0), bRegistered(0) {}',
-        '  template <class F> explicit D2SehScope(F& fn) : Next(0), nFilter(0), pfnFinally([](void* p) { (*(F*)p)(); }), pFinallyCtx(&fn), bRegistered(0) {}',
-        '  __attribute__((noinline)) void Enter() { Next = g_pTop; g_pTop = this; bRegistered = 1; }',
-        '  ~D2SehScope() { if (bRegistered) { g_pTop = Next; bRegistered = 0; } }',
-        '};',
-        '#define D2_SEH_SETJMP(scope) __builtin_setjmp((scope).jb)',
-        '#define D2_SEH_FENCE() __asm__ __volatile__("" ::: "memory")',
-        'static void on_segv(int) {',
-        '  D2SehScope* t = g_pTop; while (t && t->pfnFinally) t = t->Next; if (!t) abort();',
-        '  for (D2SehScope* s = g_pTop; s != t; s = s->Next) { g_pTop = s->Next; s->bRegistered = 0; s->pfnFinally(s->pFinallyCtx); }',
-        '  g_pTop = t->Next; t->bRegistered = 0; __builtin_longjmp(t->jb, 1);',
-        '}',
-      ].join('\n'));
-      writeFileSync(join(dir, 'main.cpp'), [
-        '#include <stdio.h>', '#include <string.h>', '#include "harness.h"',
-        'int gnLoaded, gnSeen;', '#include "body.inc"',
-        '__attribute__((noinline)) int outer(short* p) {',
-        '  volatile int r = 0;',
-        '  { D2SehScope s{1}; if (D2_SEH_SETJMP(s) == 0) { s.Enter(); inner(p); r = 1; } else { r = 2; } }',
-        '  return r;',
-        '}',
-        'int main() {',
-        '  struct sigaction sa; memset(&sa, 0, sizeof sa); sa.sa_handler = on_segv; sa.sa_flags = SA_NODEFER; sigaction(SIGSEGV, &sa, 0);',
-        '  short x = 5;',
-        '  int a = outer(&x); int seenA = gnSeen;',
-        '  int b = outer((short*)0); int seenB = gnSeen;',
-        '  printf("%d %d %d %d\\n", a, seenA, b, seenB);',
-        '  return 0;',
-        '}',
-      ].join('\n'));
-      const build = (body: string, tag: string): string => {
-        writeFileSync(join(dir, 'body.inc'), body);
-        const exe = join(dir, `t${tag}`);
-        execFileSync('i686-linux-gnu-g++', ['-O2', '-w', '-static', '-o', exe, join(dir, 'main.cpp')], { stdio: 'pipe' });
-        return execFileSync('qemu-i386', [exe], { encoding: 'utf8' }).trim();
-      };
-      const lowered = run(FINALLY_STEPS);
-      // No fault: the block runs on the normal path and sees 3. A fault in the load:
-      // the outer __except handles it, the unwind runs the block, which sees 2.
-      assert.strictEqual(build(lowered, 'q'), '1 3 2 2');
-      // Without the fences GCC hoists the faulting load above `nStep = 2` (observed: 1 3 2 1).
-      t.diagnostic(`without fences at -O2: ${build(lowered.replace(/^\s*D2_SEH_FENCE\(\);\n/gm, ''), 'u')}`);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
 });
-
-function hasLinuxI686(): boolean {
-  try {
-    execFileSync('i686-linux-gnu-g++', ['--version'], { stdio: 'pipe' });
-    execFileSync('qemu-i386', ['--version'], { stdio: 'pipe' });
-    return true;
-  } catch { return false; }
-}
 
 describe('WARDEN_DecryptModule end to end', () => {
   const options: ReconstructOptions = {
@@ -610,19 +498,14 @@ describe('WARDEN_DecryptModule end to end', () => {
     const cpp = [...project.files.entries()].find(([p, f]) => p.endsWith('.cpp') && f.content.includes('WARDEN_DecryptModule('))![1].content;
     const body = cpp.slice(cpp.indexOf('WARDEN_DecryptModule('));
     if (process.env.SHOW_SEH) console.log(body);
-    assert.ok(/D2SehScope __seh0\{1\};/.test(body), body);
-    assert.ok(/if \(D2_SEH_SETJMP\(__seh0\) == 0\) \{\s*__seh0\.Enter\(\);/.test(body), body);
-    assert.ok(!/ExceptionList|\.TryLevel|\.ScopeTable/.test(body), body);
+    assert.ok(!/ExceptionList|\.TryLevel|\.ScopeTable|D2SehScope|volatile/.test(body), body);
     // The handler's continuation (the -1 store's label) follows the scope; bFailed is
     // still 1 there on the exception path, so the module is freed and 0 returned.
     const label = body.indexOf('LAB_004e0980:');
-    assert.ok(label > body.indexOf('} else {'), body);
+    assert.ok(label > body.indexOf('D2_SEH_END'), body);
     assert.ok(body.indexOf('WARDEN_FreeModuleLibraries', label) > label, body);
-    assert.ok(body.indexOf('bFailed = 1') < body.indexOf('D2SehScope __seh0'), body);
-    // MSVC gets the original construct, the lowering stays GCC's.
-    assert.match(body, /#if defined\(_MSC_VER\)\s*__try \{/, body);
-    assert.match(body, /\} __except \(1\) \{\}\s*#else\s*D2SehScope __seh0\{1\};/, body);
-    assert.ok(body.indexOf('#endif') < label, body);
+    assert.ok(body.indexOf('bFailed = 1') < body.indexOf('D2_SEH_TRY'), body);
+    assert.match(body, /D2_SEH_EXCEPT\(EXCEPTION_EXECUTE_HANDLER\)\s*D2_SEH_END/, body);
   });
 
   it('SOUNDUTIL_ReadVersionResource comes out as a __try/__finally', () => {
@@ -643,13 +526,8 @@ describe('WARDEN_DecryptModule end to end', () => {
     const cpp = [...project.files.entries()].find(([p, f]) => p.endsWith('.cpp') && f.content.includes('SOUNDUTIL_ReadVersionResource('))![1].content;
     const body = cpp.slice(cpp.indexOf('SOUNDUTIL_ReadVersionResource('));
     if (process.env.SHOW_SEH) console.log(body);
-    assert.match(body, /auto __finally0 = \[&\]/, body);
-    assert.match(body, /D2SehScope __seh0\{__finally0\};/, body);
-    assert.match(body, /__finally0\(\);\s*#endif\s*return bSuccess;/, body);
-    // MSVC gets the original construct: no lambda, no normal-path call, no fences.
-    const native = body.slice(body.indexOf('#if defined(_MSC_VER)'), body.indexOf('#else'));
-    assert.match(native, /__try \{[\s\S]*\} __finally \{\s*DWORD dwErrCode = GetLastError\(\);/, native);
-    assert.ok(!/__finally0|D2_SEH_FENCE|D2SehScope/.test(native), native);
+    assert.match(body, /D2_SEH_TRY[\s\S]*D2_SEH_FINALLY\s*DWORD dwErrCode = GetLastError\(\);[\s\S]*D2_SEH_END\s*return bSuccess;/, body);
+    assert.ok(!/__finally0|D2_SEH_FENCE|D2SehScope|volatile/.test(body), body);
     assert.ok(!/ExceptionList|\.TryLevel|\.ScopeTable/.test(body), body);
   });
 });
@@ -679,40 +557,24 @@ function hasMingw(): boolean {
   try { execFileSync('i686-w64-mingw32-g++', ['--version'], { stdio: 'pipe' }); return true; } catch { return false; }
 }
 
-describe('D2SehScope compiles and links for i686 mingw', { skip: !hasMingw() }, () => {
-  it('the platform header runtime and a lowered scope build an executable', () => {
+describe('the D2_SEH macros compile for i686 mingw', { skip: !hasMingw() }, () => {
+  it('the platform header and lowered scopes build an executable', () => {
     const dir = mkdtempSync(join(tmpdir(), 'seh-'));
     try {
       writeFileSync(join(dir, 'd2_platform.h'), generatePlatformHeader());
       writeFileSync(join(dir, 'd2_enums.h'), '');
       writeFileSync(join(dir, 't.cpp'), [
         '#include "d2_platform.h"',
-        'int g;',
-        'int f(int *p) {',
-        '  int bFailed = 1;',
-        '  {',
-        '    D2SehScope __seh0{1};',
-        '    if (D2_SEH_SETJMP(__seh0) == 0) {',
-        '      __seh0.Enter();',
-        '      g = *p;',
-        '      bFailed = 0;',
-        '    } else {',
-        '    }',
-        '  }',
-        '  return bFailed;',
-        '}',
-        'int main() { return f((int*)0) == 1 && f(&g) == 0 ? 0 : 1; }',
-        // A lowered body with volatile-qualified locals, against the real runtime, -O2.
         'namespace lowered { int nFillValue = 1; }',
         'namespace lowered {',
         emit(sehLoweringPlugin.createTransformer({ sehScopes: [scope] })(parse(STEPS_FOR_MINGW)) as never),
         '}',
-        // And a __try/__finally, whose scope takes the block (the template constructor).
         'namespace lowered_finally { int gnLoaded, gnSeen;',
         emit(sehLoweringPlugin.createTransformer({ sehScopes: [FINALLY_SCOPE] })(parse(FINALLY_STEPS)) as never),
         '}',
+        'int main() { int x = 2; short y = 3; lowered_finally::inner(&y); return lowered::f2(&x, 1) == 4 && lowered_finally::gnSeen == 3 ? 0 : 1; }',
       ].join('\n'));
-      execFileSync('i686-w64-mingw32-g++', ['-std=c++17', '-O2', '-w', '-fms-extensions', '-static', '-o', join(dir, 't.exe'), join(dir, 't.cpp')], { stdio: 'pipe' });
+      execFileSync('i686-w64-mingw32-g++', ['-std=c++17', '-O2', '-w', '-static', '-o', join(dir, 't.exe'), join(dir, 't.cpp')], { stdio: 'pipe' });
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

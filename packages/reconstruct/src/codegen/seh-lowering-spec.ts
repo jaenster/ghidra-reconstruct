@@ -27,13 +27,14 @@
  * that instruction); a store of a register (`mov [ebp-4],ebx`) counts, its value is the
  * one the decompiler prints.
  *
- * EH4 frames (`__except_handler4`, a cookie-encoded scope table, -2 = outside) are
- * typed in Ghidra since round O2 (EH4_EXCEPTION_REGISTRATION, d2_platform.h defines
- * it) but are not lowered: in two of the four (DebugThread, DEBUG_EnumerateModulesViaPEB)
- * the decompiler drops the `TryLevel = -2` store that leaves the scope as dead, so the
- * region has no end in the decompile, and the other two have `__except` blocks of
- * their own (EnqueueFormattedLogMessage, DEBUG_UnwindStackFrames) that no flow the
- * decompiler follows reaches. They compile, with the registration stores as printed.
+ * EH4 frames (`__except_handler4`, a cookie-encoded scope table, -2 = outside) take
+ * the same rules with -2 for -1, and the level-0 store may be a register store (`mov
+ * [ebp-4],eax` with EAX zeroed: the decompiler prints `TryLevel = 0`). The decompiler
+ * drops the leave store when only the deregistration follows it (DebugThread); the
+ * handler's continuation proves that (`leaveDeregisters`), and the lowering then ends
+ * the scope at the end of its block. Frames whose `__except` block has code of its own
+ * (EnqueueFormattedLogMessage, DEBUG_UnwindStackFrames) are not lowered: that code is
+ * a funclet no flow the decompiler follows reaches, so it is not in the decompile.
  */
 
 import type { ExtractedFunction } from '../types.js';
@@ -50,6 +51,8 @@ export interface SehLoweringScopeSpec {
   handlerAddress: string;
   resumeAddress: string;
   scopeTable: string;
+  frame?: 'eh3' | 'eh4';
+  leaveDeregisters?: boolean;
 }
 
 export type SehLoweringDecision =
@@ -82,19 +85,34 @@ export function handlerResume(code: SehInstruction[], enclosingLevel: number): s
   return next.address;
 }
 
+/** After the handler's resume store: the frame reload and the deregistration, nothing else. */
+const FRAME_RELOAD = /^MOV E[A-Z]{2},dword ptr \[EBP \+ -0x10\]$/i;
+function resumeDeregisters(code: SehInstruction[], resume: string): boolean {
+  const at = code.findIndex(i => i.address === resume);
+  if (at < 0 || code.length < at + 3) return false;
+  return FRAME_RELOAD.test(code[at + 1].text) && DEREGISTER.test(code[at + 2].text);
+}
+
 export function sehLoweringDecision(func: Pick<ExtractedFunction, 'sehFrame'>): SehLoweringDecision | undefined {
   const frame = func.sehFrame;
   if (!frame) return undefined;
-  if (frame.kind !== 'eh3') return { lower: false, reason: `${frame.kind} frames are not lowered` };
+  const outside = frame.kind === 'eh4' ? -2 : -1;
   if (frame.entries.length !== 1) return { lower: false, reason: `${frame.entries.length} scope table entries` };
   const e = frame.entries[0];
-  if (e.level !== 0 || e.enclosingLevel !== -1) return { lower: false, reason: 'a nested scope' };
-  if (!e.filter) return finallyDecision(frame);
+  if (e.level !== 0 || e.enclosingLevel !== outside) return { lower: false, reason: 'a nested scope' };
+  if (!e.filter) {
+    if (frame.kind !== 'eh3') return { lower: false, reason: 'an eh4 __finally scope' };
+    return finallyDecision(frame);
+  }
   const filter = constantFilter(e.filterCode);
   if (filter === undefined) return { lower: false, reason: `filter ${e.filter} is not a constant` };
   const resume = handlerResume(e.handlerCode, e.enclosingLevel);
   if (!resume) return { lower: false, reason: `handler ${e.handler} does not resume at the try's exit` };
-  if (frame.tryLevelStores['0'] !== 1 || frame.tryLevelStores['-1'] !== 1) {
+  const stores = frame.tryLevelStores;
+  const enters = (stores['0'] ?? 0) + (frame.kind === 'eh4' ? (stores['reg'] ?? 0) : 0);
+  const leaves = stores[String(outside)] ?? 0;
+  const known = Object.keys(stores).every(k => k === '0' || k === String(outside) || (frame.kind === 'eh4' && k === 'reg'));
+  if (enters !== 1 || leaves !== 1 || !known) {
     return { lower: false, reason: 'a try level is stored more than once' };
   }
   return {
@@ -106,6 +124,8 @@ export function sehLoweringDecision(func: Pick<ExtractedFunction, 'sehFrame'>): 
       handlerAddress: e.handler,
       resumeAddress: resume,
       scopeTable: frame.scopeTable,
+      frame: frame.kind,
+      ...(frame.kind === 'eh4' && resumeDeregisters(e.handlerCode, resume) ? { leaveDeregisters: true } : {}),
     }],
   };
 }
@@ -151,6 +171,7 @@ export function finallyDecision(frame: SehFrameFacts): SehLoweringDecision {
       handlerAddress: e.handler,
       resumeAddress: '-',
       scopeTable: frame.scopeTable,
+      frame: 'eh3',
     }],
   };
 }

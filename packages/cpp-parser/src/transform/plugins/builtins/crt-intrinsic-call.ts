@@ -17,6 +17,7 @@
  *     CRT_CIPow((long double)x, (long double)y)  ->  pow((double)x, (double)y)
  *     CRT_CISin((long double)(double)x)          ->  sin((double)x)
  *     __CIsqrt(e)                                ->  sqrt((double)(e))
+ *     CRT_Floor((double)x * 30.6001)             ->  floor((double)((double)x * 30.6001))
  *
  * Value-preserving for VC8, whose `long double` is `double`: the operands were doubles in
  * the original and the helper computes the function. In the rebuild the <cmath> function
@@ -40,6 +41,24 @@ export const CRT_INTRINSICS: ReadonlyMap<string, { fn: string; arity: number }> 
   ['CRT_CISin', { fn: 'sin', arity: 1 }],
   ['CRT_CICos', { fn: 'cos', arity: 1 }],
   ['__CIsqrt', { fn: 'sqrt', arity: 1 }],
+  // libcmt's floor and ceil themselves (00683080 floor: SSE2 path, __floor_default fallback).
+  // Ghidra names them CRT_Floor / CRT_Ceil; a source call of floor() compiles to the same
+  // `call _floor` VC8 makes, so the call is the <math.h> one.
+  ['CRT_Floor', { fn: 'floor', arity: 1 }],
+  ['CRT_Ceil', { fn: 'ceil', arity: 1 }],
+]);
+
+/**
+ * Library calls Ghidra names after a guess, spelled as the source spells them; the
+ * arguments are passed through unchanged.
+ *
+ *     CRT_ReturnValue(0x80004005)  ->  AtlThrow(0x80004005)
+ *
+ * 006b1a30 is ATL's AtlThrowImpl (it throws an ATL::CAtlException holding the HRESULT;
+ * see crt-mapping.ts), which source reaches through the `AtlThrow` macro.
+ */
+export const CRT_SOURCE_CALLS: ReadonlyMap<string, string> = new Map([
+  ['CRT_ReturnValue', 'AtlThrow'],
 ]);
 
 export interface CrtIntrinsicCallOptions extends PluginOptions {
@@ -94,7 +113,7 @@ function asDouble(arg: Expression): Expression {
 export const crtIntrinsicCallPlugin: TransformPlugin = {
   id: 'crt-intrinsic-call',
   name: 'CRT Intrinsic Call',
-  description: 'A call of an x87 _CI* math helper is written as the <math.h> function VC8 lowers to it',
+  description: 'A call of a CRT/x87 helper is written as the source function VC8 lowers to it (pow, sqrt, floor, AtlThrow, ...)',
   version: '1.0.0',
   defaultEnabled: true,
   priority: 59.66,
@@ -104,6 +123,13 @@ export const crtIntrinsicCallPlugin: TransformPlugin = {
       if (node.kind !== NodeKind.CallExpr) return undefined;
       const call = node as CallExpr;
       const name = calleeName(call.callee);
+      const renamed = name ? CRT_SOURCE_CALLS.get(name) : undefined;
+      if (renamed) {
+        const out = Expr.call(renamed, call.arguments.map(a => cloneNode(a)));
+        out.location = node.location;
+        options.onSite?.({ line: node.location?.start.line ?? 0, from: name!, to: renamed });
+        return out;
+      }
       const m = name ? CRT_INTRINSICS.get(name) : undefined;
       if (!m || call.arguments.length !== m.arity) return undefined;
       const out = Expr.call(m.fn, call.arguments.map(asDouble));

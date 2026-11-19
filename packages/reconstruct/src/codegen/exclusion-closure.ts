@@ -28,7 +28,7 @@
  *    with no text involved.
  */
 
-import { Lexer, TokenKind } from '@ghidra-mcp/cpp-parser';
+import { Lexer, TokenKind, CRT_INTRINSICS, CRT_SOURCE_CALLS } from '@ghidra-mcp/cpp-parser';
 import { EXCLUDED_SYMBOL_DECLS, resolveCrtInclude } from './crt-mapping.js';
 
 /** The part of a function record the closure needs. Structural, so tests need no fixtures. */
@@ -297,6 +297,9 @@ function declIsDefinition(decl: string): boolean {
  *    and the `#define _fclose fclose` macro aliases.
  *  - a name that resolves to a C library or Win32 entry point. The linker
  *    supplies those, and `compiler::memset` is one of them.
+ *  - a helper whose every call `crt-intrinsic-call` rewrites into the source
+ *    function it came from (`CRT_Floor` -> `floor`, `CRT_ReturnValue` -> `AtlThrow`):
+ *    after the rewrite nothing names it, so a body would be dead MSVC runtime.
  */
 export function platformProvidesDefinition(names: Iterable<string>): boolean {
   const spellings = [...names];
@@ -304,6 +307,7 @@ export function platformProvidesDefinition(names: Iterable<string>): boolean {
     if (spellings.includes(decl.emitted) && declIsDefinition(decl.decl)) return true;
   }
   for (const spelling of spellings) {
+    if (CRT_INTRINSICS.has(spelling) || CRT_SOURCE_CALLS.has(spelling)) return true;
     if (platformDefinedNames.has(spelling)) return true;
     if (resolveCrtInclude(spelling)) return true;
   }

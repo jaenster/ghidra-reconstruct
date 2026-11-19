@@ -806,6 +806,11 @@ export interface SehTryStmt extends ASTNode {
   /** The `__except` filter expression; null for `__finally`. */
   filter: Expression | null;
   handler: CompoundStmt;
+  /**
+   * Spelled with the d2_platform.h macros (`D2_SEH_TRY` ... `D2_SEH_EXCEPT(f)` /
+   * `D2_SEH_FINALLY` ... `D2_SEH_END`) rather than the MSVC keywords.
+   */
+  macro?: boolean;
 }
 
 /**
