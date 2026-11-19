@@ -110,6 +110,107 @@ describe('string-intrinsics: inline strcat', () => {
   });
 });
 
+/**
+ * PALETTE_LoadFromFile 006009c0, trimmed: strcat(path, szPaletteName) then
+ * strcat(path, ".dat"). The ".dat" global is typed char[5], so the decompiler prints the
+ * store of the literal as one builtin_strncpy call instead of byte and dword stores.
+ * Both end scans start from the last byte of szInlineNameBuf, the slot before the path.
+ */
+const PALETTE_LOAD = `void f(char *szPaletteName) {
+  char *pSrcWord; char *pFullPathEnd; char *pPathEnd; char *szNameEnd; char *szInlineNameBuf;
+  char nStrEndOffset1 [260];
+  uint nCopyLen; char cCurChar;
+  nStrEndOffset1[0] = 0;
+  szNameEnd = szPaletteName;
+  do {
+    cCurChar = *szNameEnd;
+    szNameEnd = szNameEnd + 1;
+  } while (cCurChar != '\\0');
+  pPathEnd = (char *)((int)&szInlineNameBuf + 3);
+  do {
+    pSrcWord = pPathEnd + 1;
+    pPathEnd = pPathEnd + 1;
+  } while (*pSrcWord != '\\0');
+  pSrcWord = szPaletteName;
+  for (nCopyLen = (uint)((int)szNameEnd - (int)szPaletteName) >> 2; nCopyLen != 0; nCopyLen = nCopyLen - 1) {
+    *(undefined4 *)pPathEnd = *(undefined4 *)pSrcWord;
+    pSrcWord = pSrcWord + 4;
+    pPathEnd = pPathEnd + 4;
+  }
+  for (nCopyLen = (int)szNameEnd - (int)szPaletteName & 3; nCopyLen != 0; nCopyLen = nCopyLen - 1) {
+    *pPathEnd = *pSrcWord;
+    pSrcWord = pSrcWord + 1;
+    pPathEnd = pPathEnd + 1;
+  }
+  pSrcWord = (char *)((int)&szInlineNameBuf + 3);
+  do {
+    pFullPathEnd = pSrcWord;
+    pSrcWord = pFullPathEnd + 1;
+  } while (pFullPathEnd[1] != '\\0');
+  builtin_strncpy(pFullPathEnd + 1,".dat",5);
+  szInlineNameBuf = szPaletteName;
+  Use(nStrEndOffset1, szInlineNameBuf);
+  return; }`;
+
+const PALETTE_OPTIONS = {
+  stackSlots: [
+    { name: 'szInlineNameBuf', offset: -280, size: 4 },
+    { name: 'nStrEndOffset1', offset: -276, size: 260 },
+  ],
+};
+
+describe('string-intrinsics: strcat of a literal stored by builtin_strncpy', () => {
+  it('PALETTE_LoadFromFile: the ".dat" append is strcat, not a scan from the slot before (#751)', () => {
+    const out = lower(PALETTE_LOAD, PALETTE_OPTIONS);
+    assert.match(out, /strcat\(nStrEndOffset1, szPaletteName\);/);
+    assert.match(out, /strcat\(nStrEndOffset1, "\.dat"\);/);
+    assert.doesNotMatch(out, /&szInlineNameBuf|pFullPathEnd|builtin_strncpy|memcpy/);
+  });
+
+  it('a copy shorter than the literal and its NUL is not a strcat (no terminator stored)', () => {
+    const out = lower(PALETTE_LOAD.replace('".dat",5', '".dat",4'), PALETTE_OPTIONS);
+    assert.doesNotMatch(out, /strcat\(nStrEndOffset1, "\.dat"\)/);
+  });
+
+  it('a literal with an embedded NUL stops the string where the NUL is', () => {
+    const out = lower(PALETTE_LOAD.replace('".dat",5', '".d\\0t",5'), PALETTE_OPTIONS);
+    assert.doesNotMatch(out, /strcat\(nStrEndOffset1, "\.d/);
+  });
+
+  it('runs the same as the loops for names of length 0..9', native, () => {
+    const lowered = lower(PALETTE_LOAD, PALETTE_OPTIONS);
+    const ref = PALETTE_LOAD.replace('char *szInlineNameBuf;\n  char nStrEndOffset1 [260];', '')
+      .replace(/\(int\)/g, '(intptr_t)').replace(/\(uint\)/g, '(uintptr_t)')
+      .replace('builtin_strncpy(', 'memcpy(');
+    const prelude = [
+      'typedef unsigned int uint; typedef uint32_t undefined4;',
+      // The loop form relies on the frame layout: the path right after the 4-byte slot.
+      'static struct { char *slot; char path[260]; } fr;',
+      'static char got[260];',
+      'static void Use(const char *p, char *) { strcpy(got, p); }',
+      '#define szInlineNameBuf fr.slot',
+      '#define nStrEndOffset1 fr.path',
+      `namespace ref { ${ref} }`,
+      '#undef szInlineNameBuf',
+      '#undef nStrEndOffset1',
+      `namespace low { ${lowered} }`,
+    ].join('\n');
+    const body = [
+      'const char *names[] = {"", "a", "ab", "abc", "abcd", "abcde", "abcdef", "abcdefg", "abcdefgh", "abcdefghi"};',
+      'int bad = 0;',
+      'for (const char *n : names) {',
+      '  char a[260], b[260];',
+      '  memset(&fr, 0x5a, sizeof fr); ref::f((char *)n); strcpy(a, got);',
+      '  memset(&fr, 0x5a, sizeof fr); low::f((char *)n); strcpy(b, got);',
+      '  if (strcmp(a, b) != 0) bad++;',
+      '  char want[64]; snprintf(want, sizeof want, "%s.dat", n); if (strcmp(b, want) != 0) bad++;',
+      '}',
+      'printf("%d\\n", bad);',
+    ].join('\n');
+    assert.strictEqual(compileAndRun(prelude, body).trim(), '0', lowered);
+  });
+});
+
 describe('string-intrinsics: what is left alone', () => {
   it('a temporary read after the group (the second scan\'s pointer is used again)', () => {
     // pwSuffixLocale is last set by the ")" group's end scan, so that group may not go;
