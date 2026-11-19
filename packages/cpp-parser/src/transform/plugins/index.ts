@@ -398,6 +398,7 @@ export {
   crtIntrinsicCallPlugin,
   CRT_INTRINSICS,
   type CrtIntrinsicCallOptions,
+  CRT_SOURCE_CALLS,
 } from './builtins/crt-intrinsic-call.js';
 
 export {

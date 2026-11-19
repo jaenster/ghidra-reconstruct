@@ -594,9 +594,26 @@ const MSVC_RUNTIME_DECLS: ExcludedSymbolDecl[] = [
     decl: 'extern "C" long double CRT_CISin(long double x);' },
   { emitted: 'CRT_CICos', real: '_CIcos', source: 'ghidra',
     decl: 'extern "C" long double CRT_CICos(long double x);' },
-  // CRT_ReturnValue @ 006b1a30 — Ghidra: undefined (undefined4), __stdcall
-  { emitted: 'CRT_ReturnValue', real: 'unidentified CRT helper', source: 'ghidra',
-    decl: 'extern "C" uint32_t CRT_ReturnValue(uint32_t dwValue);' },
+  // 006b1a30, Ghidra's CRT_ReturnValue: ATL's AtlThrowImpl (atlexcept.h), which `AtlThrow`
+  // names. __stdcall, does not return, one statement: `_CxxThrowException(&hr, <ThrowInfo
+  // 007020b4>)`, whose one catchable type is `.?AVCAtlException@ATL@@`, 4 bytes - the
+  // HRESULT. ATL writes it as a noinline inline in its header, so it is defined here the
+  // same way; the one call site (Direct3D.cpp, a null test then `AtlThrow(E_FAIL)`) is
+  // the ATLENSURE shape. crt-intrinsic-call spells the call `AtlThrow`.
+  { emitted: 'AtlThrow', real: 'ATL::AtlThrowImpl (Game.exe 006b1a30)', source: 'crt',
+    decl: 'namespace ATL {\n'
+        + 'class CAtlException {\n'
+        + 'public:\n'
+        + '    CAtlException(HRESULT hr) : m_hr(hr) {}\n'
+        + '    HRESULT m_hr;\n'
+        + '};\n'
+        + '#if defined(_MSC_VER)\n'
+        + '__declspec(noinline) __declspec(noreturn) inline void __stdcall AtlThrowImpl(HRESULT hr) { throw CAtlException(hr); }\n'
+        + '#else\n'
+        + '[[noreturn]] __attribute__((noinline)) inline void __stdcall AtlThrowImpl(HRESULT hr) { throw CAtlException(hr); }\n'
+        + '#endif\n'
+        + '}  // namespace ATL\n'
+        + '#define AtlThrow ATL::AtlThrowImpl' },
 ];
 
 /**
