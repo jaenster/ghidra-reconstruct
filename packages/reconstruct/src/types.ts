@@ -74,6 +74,12 @@ export interface ExtractedFunction {
   namespace?: string;
   parentClass?: string;
   decompiled?: string;
+  /**
+   * Ghidra's decompile as extracted, kept when generation rewrites `decompiled` (template
+   * names respelled, a funclet inlined): the text a tag's `dh` is defined over
+   * (codegen/vc8form-dh.ts). Set once at the start of generation.
+   */
+  ghidraDecompiled?: string;
   callingConvention: string;
   size: number;
   isThunk: boolean;

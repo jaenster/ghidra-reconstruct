@@ -25,7 +25,7 @@
  */
 
 import type { ExtractedFunction } from '../types.js';
-import { vc8formBodyHash } from './vc8form-spec.js';
+import { DecompileHash } from './vc8form-spec.js';
 
 export const VC8_LINKAGE_TAG = 'vc8linkage';
 
@@ -62,19 +62,18 @@ export function parseVc8LinkageTag(data: string): ParsedTag | undefined {
 }
 
 /** The measured linkage of func, from its `vc8linkage` tags. */
-export function vc8LinkageVerdict(func: Pick<ExtractedFunction, 'tags' | 'size' | 'decompiled'>): Vc8LinkageVerdict {
+export function vc8LinkageVerdict(func: Pick<ExtractedFunction, 'tags' | 'size' | 'decompiled' | 'ghidraDecompiled'>): Vc8LinkageVerdict {
   const out: Vc8LinkageVerdict = { stale: [] };
   const tags = (func.tags ?? []).filter(t => t.type === VC8_LINKAGE_TAG);
   if (tags.length === 0) return out;
   const fresh: Array<{ tag: string; linkage: Vc8Linkage }> = [];
-  let body: string | undefined;
+  const body = new DecompileHash(func);
   for (const t of tags) {
     const raw = t.data ?? '';
     const tag = parseVc8LinkageTag(raw);
     if (!tag) { out.stale.push({ tag: raw, why: 'not a vc8linkage record' }); continue; }
     if (Number(func.size) !== tag.size) { out.stale.push({ tag: raw, why: `size ${func.size}, the tag measured ${tag.size}` }); continue; }
-    body ??= vc8formBodyHash(func.decompiled ?? '');
-    if (body !== tag.body) { out.stale.push({ tag: raw, why: `decompile ${body}, the tag measured ${tag.body}` }); continue; }
+    if (!body.matches(tag.body)) { out.stale.push({ tag: raw, why: `decompile ${body.dh}, the tag measured ${tag.body}` }); continue; }
     fresh.push({ tag: raw, linkage: tag.linkage });
   }
   const linkages = new Set(fresh.map(f => f.linkage));

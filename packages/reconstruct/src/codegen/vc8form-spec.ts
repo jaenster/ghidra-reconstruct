@@ -12,9 +12,11 @@
  *          proved it
  *   bh     the original function's size and the first 8 hex digits of the SHA-256 of
  *          its bytes, relocations masked
- *   dh     the first 8 hex digits of the SHA-256 of the decompile the tag was measured
- *          against, in its namespace-free token form (`vc8formBodyForm`): the tokens
- *          one space apart, and every qualifier `N::` a name is spelled with dropped
+ *   dh     the first 8 hex digits of the SHA-256 of Ghidra's decompile the tag was
+ *          measured against, in its namespace-free token form: the tokens one space
+ *          apart, and every qualifier `N::` a name is spelled with dropped. The one
+ *          definition is vc8form-dh.ts, which redivivus-app copies: Ghidra's text, never
+ *          the generator's rewrite of it
  *   ord    optional, a positive integer: the place of this tag among the function's
  *          tags of the same form. Ghidra keeps a function's tags as a set, so where a
  *          second form rewrites what a first one printed (two seq, select, nest or
@@ -35,6 +37,9 @@
 import { createHash } from 'node:crypto';
 import { parseVc8Form, type Vc8Form } from '@ghidra-mcp/cpp-parser';
 import type { ExtractedFunction } from '../types.js';
+import { vc8formBodyForm, vc8formDh } from './vc8form-dh.js';
+
+export { vc8formBodyForm };
 
 export const VC8FORM_TAG = 'vc8form';
 
@@ -56,9 +61,9 @@ export interface Vc8FormSpec {
   stale: Array<{ tag: string; why: string }>;
 }
 
-/** The decompile hash a tag's `dh` records: of the body's namespace-free token form. */
+/** The decompile hash a tag's `dh` records, of Ghidra's decompile (vc8form-dh.ts). */
 export function vc8formBodyHash(decompiled: string): string {
-  return createHash('sha256').update(vc8formBodyForm(decompiled)).digest('hex').slice(0, 8);
+  return vc8formDh(decompiled, text => createHash('sha256').update(text).digest('hex'));
 }
 
 /**
@@ -69,63 +74,50 @@ export function vc8formLegacyBodyHash(decompiled: string): string {
   return createHash('sha256').update(decompiled.replace(/\s+/g, ' ').trim()).digest('hex').slice(0, 8);
 }
 
-const isWordStart = (c: number) => (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c === 95 || c === 36;
-const isDigit = (c: number) => c >= 48 && c <= 57;
-const isWord = (c: number) => isWordStart(c) || isDigit(c);
-const isSpace = (c: number) => c === 32 || c === 9 || c === 10 || c === 13 || c === 11 || c === 12;
+type DecompiledFunction = Pick<ExtractedFunction, 'decompiled' | 'ghidraDecompiled'>;
 
-/**
- * The decompile as tokens one space apart, with every qualifier dropped: an identifier
- * followed by `::` goes with the `::`, so `D2Game::SKILLS::Foo(x)` and `Foo (x)` are one
- * form. String and character literals are kept whole; a comment is one token whose own
- * text gets the same treatment. Other punctuation is one token per character, which only
- * matters where it joins two forms Ghidra never prints apart.
- */
-export function vc8formBodyForm(decompiled: string): string {
-  return tokenForm(decompiled, true);
+/** Ghidra's decompile of func: the text `dh` is defined over, before generation rewrote it. */
+export function ghidraDecompile(func: DecompiledFunction): string {
+  return func.ghidraDecompiled ?? func.decompiled ?? '';
 }
 
-function tokenForm(text: string, literals: boolean): string {
-  const toks: string[] = [];
-  const n = text.length;
-  let i = 0;
-  while (i < n) {
-    const c = text.charCodeAt(i);
-    if (isSpace(c)) { i++; continue; }
-    const two = text.slice(i, i + 2);
-    if (literals && (two === '/*' || two === '//')) {
-      const end = two === '/*' ? text.indexOf('*/', i + 2) : text.indexOf('\n', i + 2);
-      const stop = end < 0 ? n : end;
-      toks.push(two + ' ' + tokenForm(text.slice(i + 2, stop), false) + (two === '/*' ? ' */' : ''));
-      i = two === '/*' ? (end < 0 ? n : end + 2) : stop;
-      continue;
-    }
-    if (literals && (c === 34 || c === 39)) {
-      // A literal ends at its unescaped quote; one never runs past its line.
-      let j = i + 1;
-      while (j < n && text.charCodeAt(j) !== c && text.charCodeAt(j) !== 10) j += text.charCodeAt(j) === 92 ? 2 : 1;
-      j = Math.min(j + 1, n);
-      toks.push(text.slice(i, j));
-      i = j;
-      continue;
-    }
-    if (isWordStart(c) || isDigit(c)) {
-      let j = i + 1;
-      while (j < n && (isWord(text.charCodeAt(j)) || (isDigit(c) && text.charCodeAt(j) === 46))) j++;
-      toks.push(text.slice(i, j));
-      i = j;
-      continue;
-    }
-    if (two === '::') { toks.push('::'); i += 2; continue; }
-    toks.push(text[i]!);
-    i++;
+/** Keep each function's decompile as Ghidra printed it, before anything rewrites `decompiled`. */
+export function keepGhidraDecompiles(functions: ExtractedFunction[]): void {
+  for (const f of functions) if (f.ghidraDecompiled === undefined && f.decompiled !== undefined) f.ghidraDecompiled = f.decompiled;
+}
+
+/**
+ * Whether a tag's recorded `dh` is current for func. `dh` is the hash of Ghidra's decompile.
+ * Until the one-shot rehash has run, a tag may still carry the hash of the decompile as the
+ * generator had rewritten it (template names respelled) when it checked tags that way; that
+ * hash is accepted too, and named, so the rehash tool can list it.
+ */
+export class DecompileHash {
+  private ghidra?: string;
+  private stagedHash?: string | null;
+  constructor(private readonly func: DecompiledFunction) {}
+
+  /** `dh` of Ghidra's decompile. */
+  get dh(): string {
+    return (this.ghidra ??= vc8formBodyHash(ghidraDecompile(this.func)));
   }
-  const out: string[] = [];
-  for (let k = 0; k < toks.length; k++) {
-    if (toks[k + 1] === '::' && isWordStart(toks[k]!.charCodeAt(0))) { k++; continue; }
-    out.push(toks[k]!);
+
+  /** The generator-stage hash, when the generator's text hashes differently; else null. */
+  get staged(): string | null {
+    if (this.stagedHash === undefined) {
+      const d = this.func.decompiled ?? '';
+      this.stagedHash = d === ghidraDecompile(this.func) ? null : vc8formBodyHash(d);
+      if (this.stagedHash === this.dh) this.stagedHash = null;
+    }
+    return this.stagedHash;
   }
-  return out.join(' ');
+
+  /** 'ghidra' when dh is current, 'staged' when it is the transitional hash, else undefined. */
+  matches(dh: string): 'ghidra' | 'staged' | undefined {
+    if (dh === this.dh) return 'ghidra';
+    if (dh === this.staged) return 'staged';
+    return undefined;
+  }
 }
 
 /** Parse one tag's data; undefined when it is not a well-formed vc8form record. */
@@ -148,21 +140,20 @@ export function parseVc8FormTag(data: string): Vc8FormTag | undefined {
 }
 
 /** The forms to apply to func, in tag order, and the tags left out. */
-export function vc8FormSpec(func: Pick<ExtractedFunction, 'tags' | 'size' | 'decompiled'>): Vc8FormSpec | undefined {
+export function vc8FormSpec(func: Pick<ExtractedFunction, 'tags' | 'size' | 'decompiled' | 'ghidraDecompiled'>): Vc8FormSpec | undefined {
   const tags = (func.tags ?? []).filter(t => t.type === VC8FORM_TAG);
   if (tags.length === 0) return undefined;
   const out: Vc8FormSpec = { forms: [], stale: [] };
   const forms: Array<{ form: Vc8Form; tag: string; order: number }> = [];
-  let body: string | undefined;
+  const body = new DecompileHash(func);
   for (const t of tags) {
     const raw = t.data ?? '';
     const tag = parseVc8FormTag(raw);
     if (!tag) { out.stale.push({ tag: raw, why: 'not a vc8form record' }); continue; }
     if (Number(func.size) !== tag.size) { out.stale.push({ tag: raw, why: `size ${func.size}, the tag measured ${tag.size}` }); continue; }
-    body ??= vc8formBodyHash(func.decompiled ?? '');
-    if (body !== tag.body) {
-      const legacy = vc8formLegacyBodyHash(func.decompiled ?? '') === tag.body ? '; its dh is the whitespace-only hash, rehash it (scripts/vc8form-rehash.ts)' : '';
-      out.stale.push({ tag: raw, why: `decompile ${body}, the tag measured ${tag.body}${legacy}` });
+    if (!body.matches(tag.body)) {
+      const legacy = vc8formLegacyBodyHash(ghidraDecompile(func)) === tag.body ? '; its dh is the whitespace-only hash, rehash it (scripts/vc8form-rehash.ts)' : '';
+      out.stale.push({ tag: raw, why: `decompile ${body.dh}, the tag measured ${tag.body}${legacy}` });
       continue;
     }
     forms.push({ form: tag.form, tag: raw, order: tag.order ?? 0 });
@@ -176,23 +167,28 @@ export function vc8FormSpec(func: Pick<ExtractedFunction, 'tags' | 'size' | 'dec
   return out;
 }
 
-/** A tagged function's size and both decompile hashes, with its vc8form tags as Ghidra holds them. */
+/** A tagged function's size and its decompile hashes, with its vc8form tags as Ghidra holds them. */
 export interface Vc8FormHashRecord {
   address: string;
   name: string;
   size: number;
-  /** `vc8formBodyHash` of the decompile. */
+  /** `vc8formBodyHash` of Ghidra's decompile: the `dh` a current tag records. */
   form: string;
-  /** `vc8formLegacyBodyHash` of the decompile. */
+  /** `vc8formLegacyBodyHash` of Ghidra's decompile. */
   legacy: string;
+  /** `vc8formBodyHash` of the decompile as the generator rewrote it, when that differs. */
+  staged?: string;
   tags: string[];
 }
 
-export function vc8formHashRecord(func: Pick<ExtractedFunction, 'address' | 'name' | 'tags' | 'size' | 'decompiled'>): Vc8FormHashRecord | undefined {
+export function vc8formHashRecord(func: Pick<ExtractedFunction, 'address' | 'name' | 'tags' | 'size' | 'decompiled' | 'ghidraDecompiled'>): Vc8FormHashRecord | undefined {
   const tags = (func.tags ?? []).filter(t => t.type === VC8FORM_TAG).map(t => t.data ?? '');
   if (tags.length === 0) return undefined;
-  const d = func.decompiled ?? '';
-  return { address: String(func.address), name: String(func.name ?? ''), size: Number(func.size), form: vc8formBodyHash(d), legacy: vc8formLegacyBodyHash(d), tags: tags.sort() };
+  const h = new DecompileHash(func);
+  return {
+    address: String(func.address), name: String(func.name ?? ''), size: Number(func.size), form: h.dh,
+    legacy: vc8formLegacyBodyHash(ghidraDecompile(func)), ...(h.staged ? { staged: h.staged } : {}), tags: tags.sort(),
+  };
 }
 
 export const FORM_ORDER = ['nullfault32', 'width', 'boolflag', 'retwiden', 'own', 'split', 'zerolife', 'join', 'coalesce', 'dup', 'guardchoice', 'fold', 'nestcall', 'fill', 'elems', 'copy', 'rowptr', 'ptrwalk', 'recordwalk', 'fieldalias', 'postdec', 'cache', 'pairvia', 'ifsel', 'clamp', 'guards', 'merge-guards', 'retval', 'branchret', 'retbase', 'select', 'tsel', 'merge-tail', 'tailguard', 'tailcopy', 'swtail', 'andguard', 'sel', 'retvar', 'onecall', 'roundup', 'switch', 'swclamp', 'swmerge', 'nest', 'continue', 'arms', 'tarms', 'unselect', 'zero', 'nonzero', 'bool', 'shift', 'range', 'castout', 'signbit', 'cmp', 'swap', 'hoist', 'opas', 'dec', 'uncoalesce', 'sinkvia', 'lift', 'decl', 'initbefore', 'zinit', 'znew', 'seq', 'nullinit', 'movestore', 'sinkstore', 'nullfield', 'acc', 'swdefault'] as const satisfies ReadonlyArray<Vc8Form['op']>;

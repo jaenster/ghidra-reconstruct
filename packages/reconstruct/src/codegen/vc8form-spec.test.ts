@@ -1,6 +1,9 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
-import { FORM_ORDER, parseVc8FormTag, vc8FormSpec, vc8formBodyForm, vc8formBodyHash, vc8formHashRecord, vc8formLegacyBodyHash } from './vc8form-spec.js';
+import { createHash } from 'node:crypto';
+import { DecompileHash, FORM_ORDER, ghidraDecompile, keepGhidraDecompiles, parseVc8FormTag, vc8FormSpec, vc8formBodyForm, vc8formBodyHash, vc8formHashRecord, vc8formLegacyBodyHash } from './vc8form-spec.js';
+import { vc8formDh } from './vc8form-dh.js';
+import type { ExtractedFunction } from '../types.js';
 import { planRehash, rehashJava, rowsChecksum } from './vc8form-rehash.js';
 import { applyVc8Forms, emit, parse, type TranslationUnit } from '@ghidra-mcp/cpp-parser';
 
@@ -161,5 +164,49 @@ describe('vc8form-spec', () => {
     assert.strictEqual(plan.checksum, rowsChecksum(plan.rows));
     const java = rehashJava(plan, 'tx');
     assert.ok(java.includes(plan.checksum) && java.includes('PRECHECK FAILED'));
+  });
+});
+
+describe('dh is defined over Ghidra\'s decompile', () => {
+  // Game.exe 00450040 as Ghidra prints it (v2130), and the same text after generation
+  // respelled its template names: the contributor's dh is the first.
+  const raw = '\nvoid __thiscall\nTSGrowableArray<TSExplicitList<SGAMEDATA,-572662307>>::Reserve\n          (TSGrowableArray<TSExplicitList<SGAMEDATA,_572662307>> *this,uint32_t nCount)\n{\n  return;\n}\n';
+  const staged = raw.replace('TSExplicitList<SGAMEDATA,_572662307>', 'TSExplicitList<SGAMEDATA, -572662307>');
+  const fn = (dh: string) => ({ size: 16, decompiled: staged, ghidraDecompiled: raw, tags: [tag('fold(t)', 16, dh)] });
+
+  it('is one function, shared with redivivus-app', () => {
+    const sha = (t: string) => createHash('sha256').update(t).digest('hex');
+    assert.strictEqual(vc8formDh(raw, sha), vc8formBodyHash(raw));
+    assert.strictEqual(vc8formBodyHash(raw), sha(vc8formBodyForm(raw)).slice(0, 8));
+  });
+
+  it('applies a tag hashed over Ghidra\'s text, and the generator-stage hash until the rehash', () => {
+    assert.notStrictEqual(vc8formBodyHash(raw), vc8formBodyHash(staged));
+    assert.strictEqual(vc8FormSpec(fn(vc8formBodyHash(raw)))!.forms.length, 1);
+    assert.strictEqual(vc8FormSpec(fn(vc8formBodyHash(staged)))!.forms.length, 1);
+    const stale = vc8FormSpec(fn('ffffffff'))!;
+    assert.strictEqual(stale.forms.length, 0);
+    assert.match(stale.stale[0]!.why, new RegExp(`decompile ${vc8formBodyHash(raw)},`));
+    const h = new DecompileHash({ decompiled: staged, ghidraDecompiled: raw });
+    assert.deepStrictEqual([h.matches(vc8formBodyHash(raw)), h.matches(vc8formBodyHash(staged)), h.matches('ffffffff')], ['ghidra', 'staged', undefined]);
+    assert.strictEqual(new DecompileHash({ decompiled: raw }).staged, null);
+  });
+
+  it('keeps the decompile once, before generation rewrites it', () => {
+    const f = { decompiled: raw } as unknown as ExtractedFunction;
+    keepGhidraDecompiles([f]);
+    f.decompiled = staged;
+    keepGhidraDecompiles([f]);
+    assert.strictEqual(ghidraDecompile(f), raw);
+  });
+
+  it('plans the staged tags for the one-shot rehash', () => {
+    const rec = vc8formHashRecord({ address: '00450040', name: 'Reserve', ...fn(vc8formBodyHash(staged)) })!;
+    assert.strictEqual(rec.form, vc8formBodyHash(raw));
+    assert.strictEqual(rec.staged, vc8formBodyHash(staged));
+    const plan = planRehash(new Map([['00450040', rec]]));
+    assert.deepStrictEqual(plan.rows.map(r => [r.reason, r.new.endsWith(`dh=${vc8formBodyHash(raw)}`)]), [['staged', true]]);
+    const current = vc8formHashRecord({ address: '00450040', name: 'Reserve', ...fn(vc8formBodyHash(raw)) })!;
+    assert.deepStrictEqual([planRehash(new Map([['00450040', current]])).rows.length, planRehash(new Map([['00450040', current]])).kept], [0, 1]);
   });
 });

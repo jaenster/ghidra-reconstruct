@@ -5,7 +5,7 @@
  * original binary addresses for debugging purposes.
  */
 
-import { vc8formBodyHash } from './vc8form-spec.js';
+import { ghidraDecompile, vc8formBodyHash } from './vc8form-spec.js';
 import { declaredParameters } from './header.js';
 import { signatureParameters } from './templates/index.js';
 import type {
@@ -82,7 +82,7 @@ export function generateSourceMap(
     }
 
     // What the ratchet records with a body, and its escape hatch (docs/ratchet.md).
-    if (func.decompiled) mapping.dh = vc8formBodyHash(func.decompiled);
+    if (func.decompiled) mapping.dh = vc8formBodyHash(ghidraDecompile(func));
     if (func.tags?.some(t => t.type === 'ratchet' && t.data === 'release')) mapping.ratchet = 'release';
     const storage = parameterStorage(func);
     if (storage) mapping.paramStorage = storage;

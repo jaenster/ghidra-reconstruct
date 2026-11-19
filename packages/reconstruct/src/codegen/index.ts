@@ -109,6 +109,7 @@ import { collectCrtHeaders, EXCLUDED_SYMBOL_DECLS, declaredIdentifier, WIN32_ZER
 import { selectExclusionEmissions, setPlatformDefinedNames, setPlatformDeclaredNames, collectReferencedNames, mayReferenceNamespaces } from './exclusion-closure.js';
 import { normalizePointerSizeSpellings } from './pointer-size-spelling.js';
 import { flattenTemplateNames } from './template-names.js';
+import { keepGhidraDecompiles } from './vc8form-spec.js';
 import { buildTemplateRegistry, classScopeOf, memberDefinitionScope, templateDataDefinitions, templateHeaderTypes } from './templates/index.js';
 import { EXTERN_ENTRY_SUFFIX, fileStaticKey, readForeignSourcesAt, selectFileStaticFunctions, type ForeignSource } from './file-static-functions.js';
 import { inlineHostHeaderPath, inlineHostKey, isInlineHost, refusedInlineHosts } from './inline-hosts.js';
@@ -862,6 +863,8 @@ export function generateProjectStage1(
   setDeclarationMarkers(moduleLibrariesOf(options.projectConfig) !== undefined);
   const genT0 = Date.now();
   beginShard(shard);
+  // Before anything rewrites a decompile: a tag's dh is over Ghidra's text (vc8form-dh.ts).
+  keepGhidraDecompiles(functions);
   // Ghidra's union-facet markers are not variables: a forced union facet is recorded as
   // a dynamic (HASH) local named `unionfacet...` whose type is the union, and the
   // decompiler prints the access through the chosen member, never the symbol. Dropped
