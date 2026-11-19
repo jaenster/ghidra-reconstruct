@@ -29,6 +29,7 @@ import type { TranslationUnit, FunctionDecl, Identifier, ASTNode } from './ast/n
 import { NodeKind } from './ast/kinds.js';
 import { traverseAST } from './ast/visitor.js';
 import { applyVc8Forms, type Vc8FormOptions } from './transform/plugins/builtins/vc8-form.js';
+import type { CountdownIndexForOptions } from './transform/plugins/builtins/countdown-index-for.js';
 
 // ============================================
 // GHIDRA PREPROCESSING
@@ -288,6 +289,15 @@ export function transformGhidraCode(
       preset,
       ...pluginOptions,
     };
+    // A loop counter a measured vc8form names keeps the countdown that form rewrites.
+    const measuredCounters = (options.vc8Forms?.forms ?? []).flatMap(({ form }) =>
+      form.op === 'ptrwalk' || form.op === 'postdec' ? [form.counter] : form.op === 'dec' ? [form.name] : []);
+    if (measuredCounters.length > 0) {
+      pipelineOpts.pluginOptions = {
+        ...pipelineOpts.pluginOptions,
+        'countdown-index-for': { ...pipelineOpts.pluginOptions?.['countdown-index-for'], measuredCounters } as CountdownIndexForOptions,
+      };
+    }
 
     const pipeline = defaultRegistry.createPipeline<TranslationUnit>(pipelineOpts);
     const result = pipeline.execute(ast);
