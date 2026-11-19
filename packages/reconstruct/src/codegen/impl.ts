@@ -4001,7 +4001,7 @@ function transformDecompiledCode(
       perPluginOptions['shadowed-type-qualify'] = shadowedTypes;
     }
 
-    // An EH3 __try/__except frame: lowered onto D2SehScope when the instructions prove
+    // An EH3/EH4 __try frame: spelled with the D2_SEH macros when the instructions prove
     // its filter and handler, reported otherwise.
     if (enclosing?.sehLowering) {
       const seh: SehLoweringDecision = enclosing.sehLowering;

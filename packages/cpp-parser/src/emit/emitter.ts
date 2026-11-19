@@ -2432,7 +2432,42 @@ export class CppEmitter {
     else if (node.statement.kind === NodeKind.NullStmt) this.write(';');
   }
 
+  /**
+   * The statements of a macro-delimited block (`D2_SEH_TRY ... D2_SEH_END`): the macros
+   * carry the braces, so the statements are indented one level under them.
+   */
+  private emitMacroBlockStatements(stmts: Statement[]): void {
+    this.newline();
+    this.indentLevel++;
+    let prev: Statement | null = null;
+    for (const stmt of stmts) {
+      if (prev && this.blankLineBetween(prev, stmt)) this.newline();
+      this.write(this.indent());
+      this.emitNode(stmt);
+      if (this.needsSemicolon(stmt)) this.write(';');
+      this.newline();
+      prev = stmt;
+    }
+    this.indentLevel--;
+    this.write(this.indent());
+  }
+
   private emitSehTryStmt(node: SehTryStmt): void {
+    if (node.macro) {
+      // d2_platform.h: __try/__except/__finally under _MSC_VER, the bare body elsewhere.
+      this.write('D2_SEH_TRY');
+      this.emitMacroBlockStatements(node.body.statements);
+      if (node.handlerKind === 'finally') {
+        this.write('D2_SEH_FINALLY');
+      } else {
+        this.write('D2_SEH_EXCEPT(');
+        if (node.filter) this.emitNode(node.filter);
+        this.write(')');
+      }
+      this.emitMacroBlockStatements(node.handler.statements);
+      this.write('D2_SEH_END');
+      return;
+    }
     this.write('__try ');
     this.emitCompoundStmt(node.body);
     if (this.style.braceStyle === 'stroustrup' || this.style.braceStyle === 'k&r') {

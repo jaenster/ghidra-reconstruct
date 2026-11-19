@@ -396,86 +396,27 @@ const MSVC_SEH3_TYPE_LINES: readonly string[] = [
 ];
 
 /**
- * The runtime `seh-lowering` lowers an MSVC `__try`/`__except` onto.
+ * The spelling `seh-lowering` gives a recovered MSVC `__try`.
  *
- * PSEH2 (`<pseh/pseh2.h>`, shipped with mingw-w64) is the obvious candidate and does
- * not compile as C++: its `_SEH2_TRY` declares GNU nested functions, which g++ rejects.
- * So the scope is written out here, in the shape `_except_handler3` itself works in:
- *
- *  - `D2SehScope` is an EXCEPTION_REGISTRATION_RECORD (Next, Handler first) that
- *    `Enter()` pushes on fs:[0] and `Leave()`/the destructor pops, so every way out of
- *    the `__try` block - its end, a `return`, a `goto` - deregisters it, as the
- *    original's epilogue and try-level stores did;
- *  - `D2SehDispatch`, the registered handler, runs a `__finally` scope's block on an
- *    unwind pass (and ignores the pass otherwise), answers the filter's constant (-1 continue execution, 0 continue search), and for 1 unwinds
- *    every frame above its own (`RtlUnwind`, as `_global_unwind2` does), pops itself
- *    and resumes the `__except` block with `__builtin_longjmp` into the frame that ran
- *    `D2_SEH_SETJMP`.
- *
- * `__builtin_setjmp` restores only EBP/ESP/EIP, so a local the try block writes and the
- * code after it reads must be `volatile` (setjmp semantics); `seh-lowering` qualifies
- * exactly those, so the lowering holds at any optimisation level, not only at -O0.
+ * Blizzard wrote `__try`/`__except`/`__finally`; the Mac build of the same source has
+ * only the bodies (Clang has no SEH), and so does D2R's x64 build of what survived. So
+ * the macros are the real construct under MSVC and the bare body everywhere else: no
+ * runtime, no setjmp, no fs:[0]. The `__except` block is compiled but never entered
+ * outside MSVC (its filter is not evaluated), and a `__finally` block runs after the
+ * body as the normal path does.
  */
 const MSVC_SEH_RUNTIME_LINES: readonly string[] = [
-  '// MSVC __try/__except, lowered by seh-lowering: a real fs:[0] registration (see platform-types.ts)',
-  '#if defined(_WIN32) && defined(__i386__) && defined(__GNUC__)',
-  'extern "C" EXCEPTION_DISPOSITION __cdecl D2SehDispatch(EXCEPTION_RECORD* pRecord, void* pFrame, CONTEXT* pContext, void* pDispatcherContext);',
-  'struct D2SehScope {',
-  '    D2SehScope* Next;      // EXCEPTION_REGISTRATION_RECORD: the fs:[0] chain ...',
-  '    void* Handler;         // ... and its handler; these two come first',
-  '    long nFilter;          // the __except filter\'s constant result',
-  '    DWORD dwExceptionCode; // the code of the exception the __except block handles',
-  '    int bRegistered;',
-  '    void* jb[5];           // __builtin_setjmp buffer: where the __except block resumes',
-  '    void (*pfnFinally)(void*); // __try/__finally: the termination handler ...',
-  '    void* pFinallyCtx;         // ... and the block it runs',
-  '    explicit D2SehScope(long filter) : Next(0), Handler((void*)&D2SehDispatch), nFilter(filter), dwExceptionCode(0), bRegistered(0), pfnFinally(0), pFinallyCtx(0) {}',
-  '    // __try/__finally: an exception unwinding this frame runs the block (the normal path calls it itself).',
-  '    template <class F> explicit D2SehScope(F& fnFinally)',
-  '        : Next(0), Handler((void*)&D2SehDispatch), nFilter(0), dwExceptionCode(0), bRegistered(0),',
-  '          pfnFinally([](void* p) { (*(F*)p)(); }), pFinallyCtx(&fnFinally) {}',
-  '    D2SehScope(const D2SehScope&) = delete;',
-  '    D2SehScope& operator=(const D2SehScope&) = delete;',
-  '    // Out of line, so the call gives the setjmp receiver an edge even in a block with no other call.',
-  '    __attribute__((noinline)) void Enter() {',
-  '        NT_TIB* pTib = (NT_TIB*)NtCurrentTeb();',
-  '        Next = (D2SehScope*)pTib->ExceptionList;',
-  '        pTib->ExceptionList = (EXCEPTION_REGISTRATION_RECORD*)this;',
-  '        bRegistered = 1;',
-  '    }',
-  '    void Leave() {',
-  '        if (!bRegistered) return;',
-  '        ((NT_TIB*)NtCurrentTeb())->ExceptionList = (EXCEPTION_REGISTRATION_RECORD*)Next;',
-  '        bRegistered = 0;',
-  '    }',
-  '    ~D2SehScope() { Leave(); }',
-  '};',
-  '#define D2_SEH_SETJMP(scope) __builtin_setjmp((scope).jb)',
-  '// Keeps a __try\'s observable stores and its faulting accesses in program order.',
-  '#define D2_SEH_FENCE() __asm__ __volatile__("" ::: "memory")',
-  'extern "C" inline EXCEPTION_DISPOSITION __cdecl D2SehDispatch(EXCEPTION_RECORD* pRecord, void* pFrame, CONTEXT*, void*) {',
-  '    D2SehScope* pScope = (D2SehScope*)pFrame;',
-  '    if (pRecord->ExceptionFlags & (EXCEPTION_UNWINDING | EXCEPTION_EXIT_UNWIND)) {',
-  '        // The unwind passes through this frame: a __finally runs its block, as',
-  '        // _except_handler3\'s _local_unwind2 does. RtlUnwind unlinks the record itself.',
-  '        if (pScope->pfnFinally && pScope->bRegistered) { pScope->bRegistered = 0; pScope->pfnFinally(pScope->pFinallyCtx); }',
-  '        return ExceptionContinueSearch;',
-  '    }',
-  '    if (pScope->pfnFinally) return ExceptionContinueSearch; // a __finally handles nothing',
-  '    if (pScope->nFilter < 0) return ExceptionContinueExecution;',
-  '    if (pScope->nFilter == 0) return ExceptionContinueSearch;',
-  '    pScope->dwExceptionCode = pRecord->ExceptionCode;',
-  '    // _global_unwind2: unwind every frame above this one, then continue right here.',
-  '    __asm__ __volatile__("pushl $0\\n\\tpushl %1\\n\\tpushl $1f\\n\\tpushl %0\\n\\tcall _RtlUnwind@16\\n1:\\n"',
-  '                         : : "r"(pFrame), "r"(pRecord) : "eax", "ecx", "edx", "memory");',
-  '    pScope->Leave();',
-  '    __builtin_longjmp(pScope->jb, 1);',
-  '}',
+  '// MSVC structured exception handling, as seh-lowering spells it (see platform-types.ts)',
+  '#if defined(_MSC_VER)',
+  '#define D2_SEH_TRY __try {',
+  '#define D2_SEH_EXCEPT(filter) } __except (filter) {',
+  '#define D2_SEH_FINALLY } __finally {',
+  '#define D2_SEH_END }',
   '#else',
-  '// No fs:[0] to register on: the __try block runs unprotected.',
-  'struct D2SehScope { explicit D2SehScope(long) {} template <class F> explicit D2SehScope(F&) {} void Enter() {} };',
-  '#define D2_SEH_SETJMP(scope) 0',
-  '#define D2_SEH_FENCE() ((void)0)',
+  '#define D2_SEH_TRY {',
+  '#define D2_SEH_EXCEPT(filter) } if (0) {',
+  '#define D2_SEH_FINALLY } {',
+  '#define D2_SEH_END }',
   '#endif',
 ];
 

@@ -1134,7 +1134,6 @@ export { pointerAssignCastPlugin } from './builtins/pointer-assign-cast.js';
 import { callArgCastPlugin } from './builtins/call-arg-cast.js';
 import { pointerCompareCastPlugin } from './builtins/pointer-compare-cast.js';
 import { sizelessPointerArithPlugin } from './builtins/sizeless-pointer-arith.js';
-import { sehNativePlugin } from './builtins/seh-native.js';
 import { ehStateGuardPlugin } from './builtins/eh-state-guard.js';
 import { returnCastPlugin } from './builtins/return-cast.js';
 export { returnCastPlugin, type ReturnCastOptions } from './builtins/return-cast.js';
@@ -1151,7 +1150,6 @@ import { unprototypedCallCastPlugin } from './builtins/unprototyped-call-cast.js
 export { callArgCastPlugin } from './builtins/call-arg-cast.js';
 export { pointerCompareCastPlugin } from './builtins/pointer-compare-cast.js';
 export { sizelessPointerArithPlugin, type SizelessPointerArithOptions } from './builtins/sizeless-pointer-arith.js';
-export { sehNativePlugin, SEH_NATIVE_CONDITION } from './builtins/seh-native.js';
 export { ehStateGuardPlugin, type EhStateGuardOptions } from './builtins/eh-state-guard.js';
 export { floatPointerBitcastPlugin } from './builtins/float-pointer-bitcast.js';
 export { narrowCastThroughUintptrPlugin } from './builtins/narrow-cast-through-uintptr.js';
@@ -1444,7 +1442,6 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   overloadPinCastPlugin,      // Type: exact type of the shared-name member whose address the body takes (priority 627)
   unprototypedCallCastPlugin, // Type: give a FARPROC call the parameter list C left unspecified (priority 622)
   ehStateGuardPlugin,         // C++ EH: a one-state frame as the local guard object VC8 builds it for (priority 988)
-  sehNativePlugin,            // SEH: native __try/__except/__finally beside each D2SehScope lowering, under _MSC_VER (priority 989)
   sizelessPointerArithPlugin, // Type: void*/function-pointer arithmetic as byte arithmetic on uint8_t* (priority 626)
   baseClassAccessPlugin,      // Structs: p->super_B.m -> p->m, &p->super_B -> p, f((B*)derived) -> f(derived) for real base classes (priority 625)
   memberCallPlugin,           // C++: C::Fn(&obj, a) -> obj.Fn(a) for a non-static member, the receiver param -> this (priority 960)
@@ -1457,7 +1454,7 @@ export const allBuiltinPlugins: TransformPlugin[] = [
   functionNameReconcilePlugin, // Cleanup: respell a reference with the declaration's name+namespace (priority 20)
   globalAliasResolvePlugin,   // Cleanup: respell a secondary Ghidra label with its address's primary label (priority 19)
   tebFieldAccessPlugin,       // Cleanup: a thread-environment-block label as that field of NtCurrentTeb() (priority 20)
-  sehLoweringPlugin,          // Correctness: an EH3 __try/__except frame -> a D2SehScope on fs:[0] (priority 680)
+  sehLoweringPlugin,          // Correctness: an EH3/EH4 __try frame -> the D2_SEH_TRY macros (priority 680)
   thisParamRewritePlugin,     // Cleanup: __thiscall `this` → the free function's param name (priority 46)
   stackFrameAddressPlugin,    // Cleanup: `&stack0xNNNN` → the frame slot that owns it (priority 520)
   shadowedTypeQualifyPlugin,  // Cleanup: (Draw**)x → (::Draw**)x when a same-named namespace shadows the type (priority 47)

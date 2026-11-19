@@ -1427,6 +1427,11 @@ export class Parser {
       stmt.leadingTrivia = leadingTrivia;
       return stmt;
     }
+    if (this.checkIdentifierText('D2_SEH_TRY')) {
+      const stmt = this.parseSehMacroStatement();
+      stmt.leadingTrivia = leadingTrivia;
+      return stmt;
+    }
     if (this.checkIdentifierText('__try') && this.checkAhead(1, TokenKind.LeftBrace)) {
       const stmt = this.parseSehTryStatement();
       stmt.leadingTrivia = leadingTrivia;
@@ -1494,6 +1499,11 @@ export class Parser {
 
     const statements: Statement[] = [];
     while (!this.check(TokenKind.RightBrace) && !this.isAtEnd()) {
+      // `D2_SEH_TRY HANDLE h; ...` would otherwise read as a declaration of type D2_SEH_TRY.
+      if (this.checkIdentifierText('D2_SEH_TRY')) {
+        statements.push(this.parseStatement());
+        continue;
+      }
       // Check for declaration
       if (this.looksLikeDeclaration()) {
         const decl = this.parseDeclaration();
@@ -1562,6 +1572,55 @@ export class Parser {
     this.expect(TokenKind.RightParen);
     const handler = this.parseCompoundStatement();
     return this.node(NodeKind.SehTryStmt, startLoc, { body, handlerKind: 'except', filter, handler }) as SehTryStmt;
+  }
+
+  /**
+   * The d2_platform.h spelling of a structured exception handler, whose macros carry
+   * the braces: `D2_SEH_TRY ... D2_SEH_EXCEPT(filter) ... D2_SEH_END` or
+   * `D2_SEH_TRY ... D2_SEH_FINALLY ... D2_SEH_END`.
+   */
+  private parseSehMacroStatement(): SehTryStmt {
+    const startLoc = this.currentLocation();
+    this.advance(); // D2_SEH_TRY
+    const block = (stops: string[]): CompoundStmt => {
+      const at = this.currentLocation();
+      const statements: Statement[] = [];
+      while (!stops.some(t => this.checkIdentifierText(t)) && !this.isAtEnd()) {
+        if (this.checkIdentifierText('D2_SEH_TRY')) {
+          statements.push(this.parseStatement());
+        } else if (this.looksLikeDeclaration()) {
+          const decl = this.parseDeclaration();
+          if (decl) {
+            statements.push(this.node(NodeKind.DeclStmt, decl.location, {
+              declarations: [decl, ...this.takeExtraDecls()],
+            }) as Statement);
+          }
+        } else {
+          statements.push(this.parseStatement());
+        }
+      }
+      return this.node(NodeKind.CompoundStmt, at, { statements }) as CompoundStmt;
+    };
+    const body = block(['D2_SEH_EXCEPT', 'D2_SEH_FINALLY']);
+    let filter: Expression | null = null;
+    let handlerKind: 'except' | 'finally' = 'finally';
+    if (this.checkIdentifierText('D2_SEH_EXCEPT')) {
+      this.advance();
+      this.expect(TokenKind.LeftParen);
+      filter = this.parseExpression();
+      this.expect(TokenKind.RightParen);
+      handlerKind = 'except';
+    } else if (this.checkIdentifierText('D2_SEH_FINALLY')) {
+      this.advance();
+    } else {
+      throw new ParserError(`Expected D2_SEH_EXCEPT or D2_SEH_FINALLY, got ${this.current().token.text}`, this.currentLocation());
+    }
+    const handler = block(['D2_SEH_END']);
+    if (!this.checkIdentifierText('D2_SEH_END')) {
+      throw new ParserError(`Expected D2_SEH_END, got ${this.current().token.text}`, this.currentLocation());
+    }
+    this.advance();
+    return this.node(NodeKind.SehTryStmt, startLoc, { body, handlerKind, filter, handler, macro: true }) as SehTryStmt;
   }
 
   private checkIdentifierText(text: string): boolean {

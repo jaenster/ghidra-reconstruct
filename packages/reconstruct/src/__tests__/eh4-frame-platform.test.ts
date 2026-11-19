@@ -63,9 +63,9 @@ describe('EH4 frames', () => {
     assert.match(cpp!.content, /tSehFrame\.Next = \(EH4_EXCEPTION_REGISTRATION ?\*\)ExceptionList;/, cpp!.content);
   });
 
-  it('is reported, not lowered', () => {
+  it('a frame with no scope table entries is reported, not lowered', () => {
     const d = sehLoweringDecision({ sehFrame: { kind: 'eh4', scopeTable: '00702290', handlerSymbol: '_except_handler4', entries: [], tryLevelStores: {} } as never });
-    assert.deepStrictEqual(d, { lower: false, reason: 'eh4 frames are not lowered' });
+    assert.deepStrictEqual(d, { lower: false, reason: '0 scope table entries' });
   });
 });
 
