@@ -13,7 +13,7 @@ import { migrateBinding, migrateStored, renameTypeSpelling, type PreviousTree } 
 import { bindSites, bodyFormSites, bindingKey, scanSites, siteSpellings, type Binding, type SiteScan } from './refs.js';
 import { rewriteBody } from './rewrite.js';
 import { carryStaticLocals } from './static-locals.js';
-import { bodyHash, type RatchetRecord, type RecordKind, type StoredBody } from './store.js';
+import { bodyHash, isHandOwned, type RatchetRecord, type RecordKind, type StoredBody } from './store.js';
 import type { SymbolIndex } from './symbol-index.js';
 import { TokenKind } from '@ghidra-mcp/cpp-parser';
 import { definitionSignature, lexTokens, misparsedTypes, type FunctionExtent } from './scan.js';
@@ -90,7 +90,7 @@ export function staticClosure(index: SymbolIndex, root: string, bindingsOf: (a: 
   return out;
 }
 
-export function capture(index: SymbolIndex, address: string, kind: RecordKind, evidence: string, opts: { dh?: string; note?: string; closure?: boolean } = {}): { record?: RatchetRecord; error?: string } {
+export function capture(index: SymbolIndex, address: string, kind: RecordKind, evidence: string, opts: { dh?: string; note?: string; closure?: boolean; hand?: boolean } = {}): { record?: RatchetRecord; error?: string } {
   const root = storeBody(index, address);
   if (!root.body) return { error: root.error };
   const members: StoredBody[] = [root.body];
@@ -115,6 +115,7 @@ export function capture(index: SymbolIndex, address: string, kind: RecordKind, e
     record: {
       address,
       kind,
+      ...(opts.hand && kind === 'pin' ? { owner: 'hand' as const } : {}),
       evidence,
       captured: new Date().toISOString().slice(0, 10),
       ...(opts.dh ? { dh: opts.dh } : {}),
@@ -132,6 +133,8 @@ export interface ApplyRow {
   /** The record this row is for, when it is a closure member. */
   record: string;
   kind: RecordKind;
+  /** The record is hand-owned (store.ts RecordOwner). */
+  hand?: boolean;
   status: ApplyStatus;
   detail: string;
   /**
@@ -144,6 +147,11 @@ export interface ApplyRow {
 export interface ApplyOptions {
   /** Addresses whose generated body goes through (release.tsv plus `ratchet:release` tags). */
   releases?: Set<string>;
+  /**
+   * The addresses of release.tsv alone. A hand-owned record leaves only through such a row;
+   * `releases` is used where this is not given.
+   */
+  releaseRows?: Set<string>;
   /** address -> the `bodyHash` a release is for: only that generated body goes through. */
   releaseBodies?: Map<string, string>;
   /** Re-spell every stored body even where the fresh one is equivalent (a rewrite test). */
@@ -237,6 +245,7 @@ export function applyRecords(index: SymbolIndex, records: RatchetRecord[], opts:
   const rows: ApplyRow[] = [];
   const releases = opts.releases ?? new Set<string>();
   const releaseBodies = opts.releaseBodies ?? new Map<string, string>();
+  const releaseRows = opts.releaseRows ?? releases;
   /** Released, and the generated body is the one the release names (if it names one). */
   const isReleased = (address: string, fresh: string | undefined) =>
     releases.has(address) && (!releaseBodies.has(address) || (fresh !== undefined && bodyHash(fresh) === releaseBodies.get(address)));
@@ -249,8 +258,15 @@ export function applyRecords(index: SymbolIndex, records: RatchetRecord[], opts:
 
   for (const rec of ordered) {
     const rootName = rec.members[0]?.name ?? rec.address;
+    const hand = isHandOwned(rec);
     const row = (m: StoredBody, status: ApplyStatus, detail = '') =>
-      rows.push({ address: m.address, name: index.fnByAddr.get(m.address)?.qname ?? m.name, record: rec.address, kind: rec.kind, status, detail });
+      rows.push({ address: m.address, name: index.fnByAddr.get(m.address)?.qname ?? m.name, record: rec.address, kind: rec.kind, ...(hand ? { hand } : {}), status, detail });
+    // A hand-owned body goes only through a release row (never a source-map tag); a match
+    // record through either.
+    if (hand && releaseRows.has(rec.address) && isReleased(rec.address, locate(index, rec.address)?.definition)) {
+      row(rec.members[0], 'released', 'hand-owned; release.tsv');
+      continue;
+    }
     if (rec.kind === 'match' && isReleased(rec.address, locate(index, rec.address)?.definition)) {
       row(rec.members[0], 'released', 'release.tsv or ratchet:release');
       continue;

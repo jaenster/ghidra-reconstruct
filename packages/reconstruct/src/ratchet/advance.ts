@@ -14,6 +14,10 @@
  * - `retired`: the function was released and the measurement shows what the release cost.
  *   The record and the release go: the generated body won deliberately.
  *
+ * A hand-owned pin (store.ts RecordOwner) is never captured, refreshed or retired by a
+ * measurement. It leaves only through a release.tsv row: the measurement after the row (once
+ * the tree carries the body the row names, when it names one) removes the record and the row.
+ *
  * A release is consumed by the measurement that follows it either way. A closure member's
  * release (members.ts writes them) is consumed once every record holding it was captured
  * MATCH: each now stores the body the release let through, so the release has nothing left to
@@ -25,7 +29,7 @@
 import { bindSites, bodyForm, scanSites, type Binding } from './refs.js';
 import { capture, locate } from './ratchet.js';
 import type { RatchetRecord, RatchetStore } from './store.js';
-import { bodyHash, normalizeAddress } from './store.js';
+import { bodyHash, isHandOwned, normalizeAddress } from './store.js';
 import type { SymbolIndex } from './symbol-index.js';
 
 export interface AuditRow { address: string; name: string; status: string }
@@ -128,12 +132,6 @@ export function advance(index: SymbolIndex, store: RatchetStore, audit: Map<stri
       ? { address: rec.address, name, status: 'phase-noise', audit: st, detail: 'the tree carries the stored body; not advanced' }
       : { address: rec.address, name, status: 'lost', audit: st, detail: carried.why ?? '' });
   }
-  const captured = new Set(rows.filter(r => r.status === 'new' || r.status === 'refreshed' || r.status === 'unchanged').map(r => r.address));
-  const holders = new Map<string, string[]>();
-  for (const rec of existing.values()) {
-    if (rec.kind !== 'match') continue;
-    for (const m of rec.members.slice(1)) holders.set(m.address, [...(holders.get(m.address) ?? []), rec.address]);
-  }
   const releaseBody = new Map(releases.map(r => [r.address, r.body]));
   const carriesReleased = (member: string) => {
     const body = releaseBody.get(member);
@@ -141,6 +139,18 @@ export function advance(index: SymbolIndex, store: RatchetStore, audit: Map<stri
     const loc = locate(index, member);
     return loc !== undefined && bodyHash(loc.definition) === body;
   };
+  for (const rec of existing.values()) {
+    if (!isHandOwned(rec) || !released.has(rec.address) || !carriesReleased(rec.address)) continue;
+    consumed.add(rec.address);
+    if (!opts.dryRun) store.remove(rec.address);
+    rows.push({ address: rec.address, name: rec.members[0]?.name ?? '', status: 'retired', audit: audit.get(rec.address)?.status ?? 'not in audit', detail: 'hand-owned, released by release.tsv; the generated body took over' });
+  }
+  const captured = new Set(rows.filter(r => r.status === 'new' || r.status === 'refreshed' || r.status === 'unchanged').map(r => r.address));
+  const holders = new Map<string, string[]>();
+  for (const rec of existing.values()) {
+    if (rec.kind !== 'match') continue;
+    for (const m of rec.members.slice(1)) holders.set(m.address, [...(holders.get(m.address) ?? []), rec.address]);
+  }
   for (const [member, hs] of holders) {
     if (released.has(member) && !existing.has(member) && hs.every(h => captured.has(h)) && carriesReleased(member)) {
       consumed.add(member);

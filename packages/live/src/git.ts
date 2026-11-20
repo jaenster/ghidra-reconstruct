@@ -124,6 +124,9 @@ export async function mergeIntoModified(modifiedDir: string, branch: string): Pr
       + r.followed.reduce((n, f) => n + f.errors.length, 0);
     const note = `ratchet: ${r.pins.length} pins, ${r.followed.length} hand files followed, ${unresolved} unresolved`;
     if (r.state === 'conflict') return { state: 'conflict', conflictFiles: r.conflictFiles, message: `${r.message ?? ''}; ${note}` };
+    // A hand-owned body the merge cannot carry aborted it: nothing to resolve in the tree,
+    // the record has to be captured again, so it stops the loop like a failed merge.
+    if (r.state === 'unresolved') return { state: 'error', message: `${r.message ?? ''}; ${note}` };
     return { state: r.state, message: [r.message, note].filter(Boolean).join('; ') };
   }
   const status = await git(modifiedDir, ['status', '--porcelain']);

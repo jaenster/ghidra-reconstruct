@@ -8,11 +8,13 @@
  *           --fresh: the regen's .ghidra-mcp/ratchet-fresh.json; releases the non-MATCH closure
  *           members whose records stay MATCH with their generated body (members.ts)
  *   apply   --tree T --store S [--in-place | --out O]      a generated tree, offline
- *   pin     --tree T --store S <addr...> [--note N]        capture hand-edited bodies
- *   unpin   --store S <addr...>
+ *   pin     --tree T --store S <addr...> [--note N]        capture hand-edited bodies, hand-owned
+ *   own     --store S [--dry-run]                          mark every pin hand-owned (idempotent)
+ *   unpin   --store S <addr...>                            not for hand-owned pins: release them
  *   release --store S <addr> --reason R                    let the generated body through
  *   follow  --tree T --from REV [--to REV] [--dir D...]    carry hand files through renames
- *   merge   --tree T <regen-ref> [--no-commit] [--no-sign]  git merge with pins as the merge
+ *   merge   --tree T <regen-ref> [--no-commit] [--no-sign]  git merge with pins as the merge;
+ *           exit 4, merge aborted, when a hand-owned pin cannot be re-spelled
  *   show    --store S <addr>
  *
  * Every command prints a TSV report (or writes it with --report) and a one-line summary on
@@ -30,7 +32,7 @@ import { followHandFile } from './follow.js';
 import { formatMemberReport, readFreshBodies, releaseNonMatchMembers, summarizeMembers } from './members.js';
 import { ratchetMerge } from './merge.js';
 import { applyRecords, capture, formatApplyReport, summarize } from './ratchet.js';
-import { RatchetStore, normalizeAddress } from './store.js';
+import { RatchetStore, isHandOwned, migrateHandOwner, normalizeAddress } from './store.js';
 import { SymbolIndex, diskTree } from './symbol-index.js';
 
 type Opts = Record<string, string | string[] | boolean>;
@@ -172,22 +174,34 @@ export async function main(argv: string[]): Promise<number> {
       const rev = revOf(tree);
       let bad = 0;
       for (const a of rest.map(normalizeAddress)) {
-        const c = capture(index, a, 'pin', rev, { note: typeof opts.note === 'string' ? opts.note : undefined, closure: false });
+        // A capture again keeps the note it had unless a new one is given.
+        const note = typeof opts.note === 'string' ? opts.note : store.get(a)?.note;
+        const c = capture(index, a, 'pin', rev, { note, closure: false, hand: true });
         if (!c.record) { console.error(`pin ${a}: ${c.error}`); bad++; continue; }
         store.put(c.record);
         console.log(`pinned\t${a}\t${c.record.members[0].name}`);
       }
       return bad ? 1 : 0;
     }
+    case 'own': {
+      const store = new RatchetStore(need(opts, 'store'));
+      const dryRun = opts['dry-run'] === true;
+      const r = migrateHandOwner(store, { dryRun });
+      for (const a of r.changed) console.log(`owned\t${a}`);
+      console.error(`ratchet own: ${r.changed.length} pins marked hand-owned, ${r.already} already${dryRun ? ' (dry run)' : ''}`);
+      return 0;
+    }
     case 'unpin': {
       const store = new RatchetStore(need(opts, 'store'));
+      let bad = 0;
       for (const a of rest.map(normalizeAddress)) {
         const r = store.get(a);
         if (r?.kind !== 'pin') { console.error(`unpin ${a}: no pin`); continue; }
+        if (isHandOwned(r)) { console.error(`unpin ${a}: hand-owned; it leaves through a release.tsv row (ratchet release)`); bad++; continue; }
         store.remove(a);
         console.log(`unpinned\t${a}`);
       }
-      return 0;
+      return bad ? 1 : 0;
     }
     case 'release': {
       const store = new RatchetStore(need(opts, 'store'));
@@ -259,10 +273,10 @@ export async function main(argv: string[]): Promise<number> {
       for (const c of r.conflictFiles) lines.push(`conflict\t${c}\t\t`);
       emit(opts, `${lines.join('\n')}\n`);
       console.error(`ratchet merge ${branch}: ${r.state}${r.message ? ` - ${r.message}` : ''}; pins ${r.pins.length}, hand files followed ${r.followed.length}, conflicts ${r.conflictFiles.length}`);
-      return r.state === 'conflict' ? 3 : r.state === 'dirty' ? 5 : r.state === 'error' ? 1 : 0;
+      return r.state === 'conflict' ? 3 : r.state === 'unresolved' ? 4 : r.state === 'dirty' ? 5 : r.state === 'error' ? 1 : 0;
     }
     default:
-      console.error('usage: ratchet advance|apply|pin|unpin|release|follow|show (see the header of ratchet/cli.ts)');
+      console.error('usage: ratchet advance|apply|pin|own|unpin|release|follow|merge|show (see the header of ratchet/cli.ts)');
       return cmd === 'help' ? 0 : 2;
   }
 }

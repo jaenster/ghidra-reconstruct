@@ -9,9 +9,11 @@
  * before `git merge-file` runs. The three agree on every pinned region, so the textual merge
  * only ever sees the rest of the file, and the pin comes out re-spelled.
  *
- * Then the hand-written files follow the regen's renames (follow.ts). A pin that cannot be
- * re-spelled is reported and its old body kept under `#if 0` beside the generated one; it
- * never fails the merge.
+ * Then the hand-written files follow the regen's renames (follow.ts). A hand-owned pin
+ * (store.ts RecordOwner) that cannot be printed again - unresolved, stale, or gone from the
+ * regen - fails the merge: it is aborted, nothing is committed, and the result names each
+ * address and why (state `unresolved`). Any other pin that cannot be re-spelled is reported
+ * and its old body kept under `#if 0` beside the generated one.
  */
 import { execFileSync, spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
@@ -42,7 +44,7 @@ export interface RatchetMergeOptions {
 }
 
 export interface RatchetMergeResult {
-  state: 'clean' | 'conflict' | 'uptodate' | 'error' | 'dirty';
+  state: 'clean' | 'conflict' | 'uptodate' | 'error' | 'dirty' | 'unresolved';
   conflictFiles: string[];
   pins: ApplyRow[];
   followed: Array<{ file: string; renames: string[]; includes: string[]; errors: string[] }>;
@@ -70,6 +72,11 @@ export function checkoutTree(repo: string, rev: string, dirs: string[] = ['Sourc
     execFileSync('tar', ['-x', '-C', dir], { input: tar, maxBuffer: 1 << 30 });
   }
   return { root: dir, done: () => fs.rmSync(dir, { recursive: true, force: true }) };
+}
+
+/** The rows of hand-owned records the merge cannot carry: each one fails it. */
+export function handFailures(rows: ApplyRow[]): ApplyRow[] {
+  return rows.filter(r => r.hand && (r.status === 'unresolved' || r.status === 'stale' || r.status === 'gone'));
 }
 
 /** Replace the bodies of `addresses` in `text` with the bodies `pinned` has for them. */
@@ -113,8 +120,25 @@ export function ratchetMerge(tree: string, branch: string, opts: RatchetMergeOpt
       // A pin against the tree it was taken from (evidence.ts); the tree before the merge
       // where the repo does not have that commit.
       const byEvidence = evidencePrevious(tree, theirsIndex, GENERATED);
-      const applied = applyRecords(theirsIndex, pins, { previous: previousTree(beforeIndex, theirsIndex), previousFor: rec => byEvidence(rec.evidence) });
+      const rows0 = store!.releases();
+      const releases = new Set(rows0.map(r => r.address));
+      const releaseBodies = new Map(rows0.flatMap(r => (r.body ? [[r.address, r.body] as [string, string]] : [])));
+      const applied = applyRecords(theirsIndex, pins, {
+        releases, releaseBodies, releaseRows: releases,
+        previous: previousTree(beforeIndex, theirsIndex), previousFor: rec => byEvidence(rec.evidence),
+      });
       result.pins = applied.rows;
+      const lost = handFailures(applied.rows);
+      if (lost.length > 0) {
+        const abort = gitRun(tree, cfg, ['merge', '--abort']);
+        return {
+          ...result,
+          state: 'unresolved',
+          message: `merge aborted${abort.code === 0 ? '' : ` (abort failed: ${(abort.err || abort.out).trim()})`}: `
+            + `${lost.length} hand-owned bod${lost.length === 1 ? 'y' : 'ies'} cannot be printed under the regen's names: `
+            + lost.map(r => `${r.address} ${r.name} ${r.status}: ${r.detail}`).join('; '),
+        };
+      }
       const pinnedFiles = new Map<string, Map<string, string>>();
       for (const row of applied.rows) {
         const e = theirsIndex.extents.get(row.address);

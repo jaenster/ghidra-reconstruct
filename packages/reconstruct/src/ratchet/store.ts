@@ -3,7 +3,9 @@
  * beside the VC8 evidence that justifies it.
  *
  *   <store>/fn/<address>.json   a record, kind `match` (advanced only by a measurement) or
- *                               `pin` (a hand-edited body, written deliberately)
+ *                               `pin` (a hand-edited body, written deliberately); a pin with
+ *                               `owner: "hand"` is owned by the source tree (the manifest of
+ *                               hand-owned functions) and leaves only through a release.tsv row
  *   <store>/release.tsv         addresses whose generated body goes through anyway
  *
  * A record holds the body text exactly as it was emitted (or hand-edited), the scope it was
@@ -17,6 +19,14 @@ import * as path from 'node:path';
 import type { Binding } from './refs.js';
 
 export type RecordKind = 'match' | 'pin';
+
+/**
+ * Who owns a pinned body. `hand`: the source tree. Such a record is never released by the
+ * ratchet itself, not even when the generated body becomes `equal`; only a release.tsv row
+ * lets the generated body through, and the measurement after it removes the record. A merge
+ * that cannot print it again under the regen's names fails (merge.ts).
+ */
+export type RecordOwner = 'hand';
 
 export interface StoredBody {
   address: string;
@@ -42,6 +52,8 @@ export interface StoredBody {
 export interface RatchetRecord {
   address: string;
   kind: RecordKind;
+  /** Pins only; absent on records written before ownership existed (see RecordOwner). */
+  owner?: RecordOwner;
   /** match: the evidence commit that measured MATCH; pin: the commit the body was taken from. */
   evidence: string;
   captured: string;
@@ -121,6 +133,32 @@ export class RatchetStore {
     fs.writeFileSync(path.join(this.dir, 'release.tsv'),
       `# address\treason[\tbody=<hash>] - the generated body (that one, when a hash is given) goes through; the next measurement decides (docs/ratchet.md)\n${body}${body ? '\n' : ''}`, 'utf-8');
   }
+}
+
+export function isHandOwned(r: Pick<RatchetRecord, 'kind' | 'owner'>): boolean {
+  return r.kind === 'pin' && r.owner === 'hand';
+}
+
+/** The record with `owner: "hand"` right after `kind`, every other field as it was. */
+export function withHandOwner(r: RatchetRecord): RatchetRecord {
+  const { address, kind, owner: _owner, ...rest } = r;
+  return { address, kind, owner: 'hand', ...rest };
+}
+
+/**
+ * Mark every pin record hand-owned, keeping every other field. Idempotent: a record that is
+ * already hand-owned is not rewritten.
+ */
+export function migrateHandOwner(store: RatchetStore, opts: { dryRun?: boolean } = {}): { changed: string[]; already: number } {
+  const changed: string[] = [];
+  let already = 0;
+  for (const r of store.list()) {
+    if (r.kind !== 'pin') continue;
+    if (r.owner === 'hand') { already++; continue; }
+    if (!opts.dryRun) store.put(withHandOwner(r));
+    changed.push(r.address);
+  }
+  return { changed, already };
 }
 
 export function normalizeAddress(a: string): string {
