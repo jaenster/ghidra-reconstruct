@@ -54,6 +54,18 @@ describe('exact-float-constant', () => {
     assert.strictEqual(refusals.length, 1);
   });
 
+  it('leaves FLD1/FLDZ values that a referenced constant rounds to', () => {
+    // DRAW_BuildHSLTransformTables (00605f00): FLD1 stores beside the 1.2f divisor at 006e5ee8.
+    const DIV = { name: 'DOUBLE_006e5ee8', value: Math.fround(1.2) };
+    const { out } = run(
+      `void f(double *p) { if (1.0 < p[0]) { p[0] = 1.0; } p[1] = 1.0; p[2] = (p[2] + 0.2) / 1.2000000476837158; p[3] = 0.0; }`,
+      [DIV],
+    );
+    assert.ok(out.includes('1.0 < p[0]') && out.includes('p[0] = 1.0') && out.includes('p[1] = 1.0'), out);
+    assert.ok(out.includes('p[3] = 0.0'), out);
+    assert.ok(out.includes('/ 1.2000000476837158'), out);
+  });
+
   it('counts significant digits as printed', () => {
     assert.strictEqual(significantDigits('9.536743e-07'), 7);
     assert.strictEqual(significantDigits('0.05'), 1);
