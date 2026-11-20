@@ -208,6 +208,38 @@ export function generatedSpelling(root: string, ref: string): ((name: string) =>
   };
 }
 
+/**
+ * The file-static functions a file defines: `static`, then the return type, then the name
+ * right before `(`, outside any function or class body (namespace and `extern "C"` blocks do
+ * not count). A hand-written header inline lives beside the body that uses it and is the
+ * tree's own definition of that name.
+ */
+export function fileStaticFunctions(text: string): Set<string> {
+  const out = new Set<string>();
+  const { tokens } = lexBody(text);
+  // One entry per open brace: whether it opened a namespace or linkage block.
+  const open: boolean[] = [];
+  const inBody = () => open.some(o => !o);
+  for (let i = 0; i < tokens.length; i++) {
+    const t = tokens[i].text;
+    if (t === '{') {
+      // `namespace A::B {`: step back over the (possibly nested) name to the keyword.
+      let k = i - 1;
+      while (k >= 0 && (tokens[k].text === '::' || /^[A-Za-z_]\w*$/.test(tokens[k].text)) && tokens[k].text !== 'namespace') k--;
+      const p1 = tokens[i - 1]?.text, p2 = tokens[i - 2]?.text;
+      open.push(tokens[k]?.text === 'namespace' || p2 === 'extern' && /^"/.test(p1 ?? ''));
+    } else if (t === '}') open.pop();
+    else if (t === 'static' && !inBody()) {
+      for (let j = i + 1; j < tokens.length; j++) {
+        const u = tokens[j].text;
+        if (u === '(') { const name = tokens[j - 1]?.text; if (name && /^[A-Za-z_]\w*$/.test(name)) out.add(name); break; }
+        if (u === ';' || u === '=' || u === '{' || u === '}') break;
+      }
+    }
+  }
+  return out;
+}
+
 export function treeEnv(root: string, vocabularyPath = DEFAULT_VOCABULARY, generatedRef = DEFAULT_GENERATED_REF): TreeEnv {
   const paths = steeringPaths(root);
   const read = (rel: string) => { try { return readFileSync(join(root, rel), 'utf8'); } catch { return undefined; } };
@@ -267,10 +299,22 @@ export function lintSteeringTree(env: TreeEnv): TreeResult {
   const raw: Array<Omit<PinFinding, 'key'>> = [];
   const hdrCache = new Map<string, HeaderDecl[]>();
   const sigCache = new Map<string, string | undefined>();
+  const helperCache = new Map<string, Set<string>>();
+  const helpersOf = (file: string): Set<string> => {
+    let h = helperCache.get(file);
+    if (!h) {
+      let text = '';
+      try { text = readFileSync(join(env.root, file), 'utf8'); } catch { /* a moved file: no helpers */ }
+      h = fileStaticFunctions(text);
+      helperCache.set(file, h);
+    }
+    return h;
+  };
   for (const r of records) {
     for (const m of r.members) {
       const steerEnv: SteerEnv = {
         vocabulary: env.vocabulary, index: env.index, scope: m.scope, globals: env.globals, generated: env.generated,
+        fileHelpers: helpersOf(m.file),
         storedBindings: new Set(m.bindings.map(([i]) => i)),
       };
       const body = parseBody(m.text);
@@ -385,7 +429,10 @@ export function lintSteeringPatch(env: TreeEnv, patchText: string, address: stri
       structural.push({ check: PROTOTYPE_CHECK_ID, line: lineAt(applied.text, after.start), subject: addr, detail: `the patch changes the prototype of ${addr}; prototypes are Ghidra's`, sig: `proto:${addr}` });
     }
     const scope = [...after.scope, ...after.declarator.slice(0, -1)];
-    const steerEnv: SteerEnv = { vocabulary: env.vocabulary, index: env.index, scope, globals: env.globals, generated: env.generated };
+    const steerEnv: SteerEnv = {
+      vocabulary: env.vocabulary, index: env.index, scope, globals: env.globals, generated: env.generated,
+      fileHelpers: fileStaticFunctions(oldText),
+    };
     const oldBody = parseBody(oldText.slice(before.start, before.end), lineAt(oldText, before.start));
     const newBody = parseBody(applied.text.slice(after.start, after.end), lineAt(applied.text, after.start));
     const introduced = multisetMinus(lintBody(newBody, steerEnv), lintBody(oldBody, steerEnv))

@@ -14,7 +14,7 @@ import { parseBody } from '../lint/steering/body.js';
 import { addressShaped, lintBody, pragmaName, type SteerEnv, type SteerFinding } from '../lint/steering/checks.js';
 import { applyHunks, extractDiff, parseUnifiedDiff } from '../lint/steering/patch.js';
 import {
-  countTree, keyPinFindings, lintSteeringPatch, lintSteeringTree, loadSteeringBaseline, saveSteeringBaseline, treeEnv,
+  countTree, fileStaticFunctions, keyPinFindings, lintSteeringPatch, lintSteeringTree, loadSteeringBaseline, saveSteeringBaseline, treeEnv,
 } from '../lint/steering/run.js';
 import { buildVocabulary, globMatcher, type VocabularyFile } from '../lint/steering/vocabulary.js';
 import { SymbolIndex, memoryTree } from '../ratchet/symbol-index.js';
@@ -216,6 +216,16 @@ describe('steering lint: unbound identifiers', () => {
   it('a name the generator itself emits counts as bound', () => {
     const fs = run('void f(int a) { GetQuestBitBufferInline(a); }', e({ generated: n => n === 'GetQuestBitBufferInline' }));
     assert.deepStrictEqual(of(fs, 'unbound-identifier'), []);
+  });
+
+  it('a file-static helper defined in the body\'s own file counts as bound (00600f10 CELCMP_GetCellCountInl)', () => {
+    const file = 'namespace D2CMP::SRC {\n// hand header\nstatic __inline int GetCountInl(DC6* p) {\n  return p->a * p->b;\n}\n\n' +
+      '// 1.14d: 00600f10\nint f(DC6* p) {\n  static int sLocalInit(int);\n  return GetCountInl(p);\n}\n}\nnamespace Other { struct S { static int Member(int); }; }\n';
+    const helpers = fileStaticFunctions(file);
+    assert.deepStrictEqual([...helpers], ['GetCountInl']);
+    const body = 'int f(DC6* p) { return GetCountInl(p) + Other(p); }';
+    assert.deepStrictEqual(subjects(run(body, e({ fileHelpers: helpers })), 'unbound-identifier'), ['Other']);
+    assert.deepStrictEqual(subjects(run(body, e()), 'unbound-identifier'), ['GetCountInl', 'Other']);
   });
 });
 
