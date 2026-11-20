@@ -23,7 +23,9 @@ Why there and not in ghidra-reconstruct:
   one commit can say "evidence at N, store advanced", and a `git log` on one record is the audit
   trail of that function.
 - A `pin` is hand-written code. Hand-written code lives on `source/modified`; ghidra-reconstruct
-  is a tool that also drives other targets and holds no Diablo II data.
+  is a tool that also drives other targets and holds no Diablo II data. A pin with
+  `"owner": "hand"` is owned by the source tree: the pin store is the manifest of hand-owned
+  functions (below).
 - The generator already reads `source/modified` (`foreignReferences` reads `Redivivus/`), and the
   daemon already treats paths there as never-touch (`packages/live/src/paths.ts`: `ratchet/` is in
   `NEVER_TOUCH`; `hand-follow` excludes it). The store is not generator output, so the regen merge
@@ -131,8 +133,12 @@ Replaces `git merge source/regen`; the live daemon's `mergeIntoModified` does th
 `<modified>/ratchet` exists. For every file holding a pinned function, the pin is printed under the
 regen's names and that text replaces the function's body in base, ours and theirs before
 `git merge-file` runs: the three agree on every pinned region, so the textual merge only sees the
-rest of the file and a pinned body is never merged as text. A pin that cannot be re-spelled is
-reported and kept under `#if 0` beside the generated body. Then the hand-written files
+rest of the file and a pinned body is never merged as text. A hand-owned pin that cannot be
+re-spelled (`unresolved`), no longer parses (`stale`) or is gone from the regen (`gone`) fails the
+merge: it is aborted, nothing is committed, `ratchet merge` exits 4 and names each address with
+the reason, and the daemon blocks as on a failed merge. Capture the record again (`ratchet pin`
+on a tree that carries the body under the new names) and merge again. Any other pin that cannot
+be re-spelled is reported and kept under `#if 0` beside the generated body. Then the hand-written files
 (`Redivivus/`, `support/`) follow the regen: their references are bound under the tree before the
 merge and re-spelled under the regen (a moved function re-qualified, a renamed field renamed, a
 callee whose parameters changed called with its arguments re-ordered by parameter identity and
@@ -186,9 +192,24 @@ node <gr>/packages/reconstruct/dist/ratchet/cli.js pin --tree recon/modified --s
 node <gr>/packages/reconstruct/dist/ratchet/cli.js unpin --store recon/modified/ratchet 0052d7b0
 ```
 
-Scriptable: any number of addresses, one record each, exit 1 if any could not be captured. A pin
-always wins over the generated body. A pin whose stored body equals the fresh one modulo spelling
-shows `equal` in the merge report: the edit has reached the generator and the pin can go.
+Scriptable: any number of addresses, one record each, exit 1 if any could not be captured. A
+capture again keeps the record's note unless `--note` gives a new one. A pin always wins over the
+generated body.
+
+### Hand-owned pins: the manifest
+
+`ratchet pin` writes `"owner": "hand"`, and `ratchet own --store S` marks every older pin the same
+way (idempotent; every other field stays as it was). A hand-owned record:
+
+- is never released by the ratchet: not when its stored body equals the generated one (`equal` in
+  the merge report means only that the generator caught up), not by a member release (it is the
+  root of its own record), and not by a measurement (`advance` reports it `pin` and leaves it);
+- leaves only through a `release.tsv` row: the generated body goes through from the next merge,
+  and the measurement after it removes the record and the row (`retired`). The `ratchet:release`
+  Ghidra tag does not release it, and `ratchet unpin` refuses it;
+- fails `ratchet merge` when it cannot be printed again (above): Gate A.
+
+A pin without `owner` keeps the old behaviour (reported, kept under `#if 0`).
 
 ## The escape hatch: releasing a kept body
 
@@ -226,7 +247,7 @@ node <gr>/packages/reconstruct/dist/ratchet/cli.js advance --tree recon/modified
 |`hand`|MATCH, but the body differs from `--regen`: a hand edit. Pin it.|not captured|
 |`phase-noise`|not MATCH, the tree carries the stored body: something outside the body moved (00633f40 at 1163)|kept, not advanced|
 |`lost`|not MATCH and the tree carries another body (see the apply report for why)|kept|
-|`retired`|released and not MATCH|record and release removed|
+|`retired`|released and not MATCH; or a hand-owned pin with a `release.tsv` row|record and release removed|
 |`uncapturable`|the body does not parse standalone (5 EH destructors with local classes)|not captured|
 |`consumed`|a member's release whose holding records were all captured|release removed|
 
