@@ -2,6 +2,8 @@
  * Defect lint over an emitted tree.
  *
  *   npx tsx packages/reconstruct/src/lint/cli.ts <tree> [options]
+ *   npx tsx packages/reconstruct/src/lint/cli.ts steering --tree <dir> | --patch <f> --addr <va>
+ *       the steering lint over hand-owned bodies (steering/cli.ts has its options)
  *
  *   --baseline <file>      accepted state (default: <tree>/../../docs/data/defect-lint-baseline.json)
  *   --update-baseline      accept the current findings
@@ -30,6 +32,7 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { steeringMain } from './steering/cli.js';
 import {
   ALL_CHECKS, COUNTED_CHECKS, GHIDRA_ARTIFACT_CHECK_ID, ZERO_TOLERANCE_CHECKS, artifactGate, goneFindings, keyFindings,
   loadBaseline, loadSnapshot, loadTree, newFindings, runChecks, saveBaseline, toBaseline,
@@ -55,6 +58,7 @@ function arg(argv: string[], flag: string): string | undefined {
 }
 
 export function main(argv = process.argv.slice(2)): number {
+  if (argv[0] === 'steering') return steeringMain(argv.slice(1));
   const tree = argv.find((a, i) => !a.startsWith('--') &&
     !['--baseline', '--check', '--snapshot', '--json', '--census', '--fail-on', '--allowlist'].includes(argv[i - 1]));
   if (!tree) {

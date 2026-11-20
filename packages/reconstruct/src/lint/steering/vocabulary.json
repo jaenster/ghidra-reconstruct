@@ -1,0 +1,44 @@
+{
+ "comment": "Names a hand-owned body may use that the tree's symbol index does not bind, and the files whose own spellings are the tree's sanctioned vocabulary. Every addition is a reviewed decision.",
+ "vocabularyHeaders": [
+  "Source/D2Headers/d2_platform.h",
+  "Redivivus/*.h",
+  "Redivivus/**/*.h"
+ ],
+ "definitionHeaders": [
+  "Source/D2Headers/d2_platform.h"
+ ],
+ "generatorMacros": [
+  "D2_ALLOC_AT", "D2_ALLOC_POOL_AT", "D2_FREE_AT", "D2_FREE_POOL_AT", "D2_NEW_AT", "D2_NEW_POOL_AT", "D2_DELETE_AT"
+ ],
+ "volatileFieldFiles": [
+  "3rdparty/Storm/**"
+ ],
+ "system": [
+  "int8_t", "uint8_t", "int16_t", "uint16_t", "int32_t", "uint32_t", "int64_t", "uint64_t",
+  "intptr_t", "uintptr_t", "size_t", "ptrdiff_t", "wchar_t", "va_list",
+  "NULL", "TRUE", "FALSE", "offsetof", "va_start", "va_end", "va_arg",
+  "exit", "abort", "memset", "memcpy", "memmove", "memcmp", "malloc", "calloc", "realloc", "free",
+  "strlen", "strcpy", "strncpy", "strncpy_s", "strcat", "strncat", "strcmp", "strncmp", "strchr", "strrchr", "strstr",
+  "_stricmp", "_strnicmp", "stricmp", "strnicmp", "sprintf", "snprintf", "_snprintf", "vsprintf", "_vsnprintf", "sscanf",
+  "atoi", "atol", "strtol", "strtoul", "toupper", "tolower", "isdigit", "isalpha", "isspace",
+  "wcslen", "wcscpy", "wcscmp", "floor", "ceil", "sqrt", "pow", "fabs", "abs", "labs", "sin", "cos", "atan2",
+  "qsort", "bsearch", "rand", "srand", "time", "_time32", "_time64", "clock",
+  "BYTE", "WORD", "DWORD", "BOOL", "UINT", "INT", "LONG", "ULONG", "HANDLE", "HWND", "HDC", "HMODULE", "HINSTANCE",
+  "LPVOID", "LPCSTR", "LPSTR", "RECT", "POINT", "SIZE", "MSG", "CONTEXT", "SYSTEMTIME", "FILETIME",
+  "LARGE_INTEGER", "CRITICAL_SECTION", "PALETTEENTRY", "OVERLAPPED", "WIN32_FIND_DATAA", "in_addr",
+  "INVALID_HANDLE_VALUE", "INFINITE", "MAX_PATH", "WAIT_OBJECT_0", "GENERIC_READ", "GENERIC_WRITE",
+  "FILE_SHARE_READ", "OPEN_EXISTING", "FILE_ATTRIBUTE_NORMAL", "FILE_BEGIN", "FILE_CURRENT", "FILE_END",
+  "PM_REMOVE", "PM_NOREMOVE", "WM_QUIT",
+  "EnterCriticalSection", "LeaveCriticalSection", "InitializeCriticalSection", "DeleteCriticalSection",
+  "GetTickCount", "Sleep", "OutputDebugStringA", "CloseHandle", "SetRect", "IsBadCodePtr", "IsBadReadPtr",
+  "IsBadWritePtr", "IsBadStringPtrA", "ReadFile", "WriteFile", "CreateFileA", "DeleteFileA", "SetFilePointer",
+  "GetFileSize", "GetLastError", "SetLastError", "ResetEvent", "SetEvent", "CreateEventA", "WaitForSingleObject",
+  "GetLocalTime", "GetSystemTime", "QueryPerformanceFrequency", "QueryPerformanceCounter", "SetPaletteEntries",
+  "PeekMessageA", "GetMessageA", "TranslateAcceleratorA", "TranslateMessage", "DispatchMessageA",
+  "wsprintfA", "lstrlenA", "lstrcpyA", "GetModuleHandleA", "GetProcAddress", "LoadLibraryA", "FreeLibrary",
+  "VirtualAlloc", "VirtualFree", "HeapAlloc", "HeapFree", "GetProcessHeap", "InterlockedIncrement",
+  "InterlockedDecrement", "InterlockedExchange", "GetCurrentThreadId", "GetCurrentProcessId", "MessageBoxA",
+  "inet_ntoa", "inet_addr", "htons", "ntohs", "htonl", "ntohl"
+ ]
+}
