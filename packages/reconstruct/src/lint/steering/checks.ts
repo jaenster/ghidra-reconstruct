@@ -41,6 +41,8 @@ export interface SteerEnv {
   storedBindings?: Set<number>;
   /** Whether the generator's own output spells a name (a generated inline helper, a data symbol). */
   generated?: (name: string) => boolean;
+  /** File-static helpers defined in the body's own file (a hand-written header inline above it). */
+  fileHelpers?: Set<string>;
   /** The tree's symbol index and the scope the body is printed in, for unbound-identifier. */
   index?: SymbolIndex;
   scope?: string[];
@@ -579,6 +581,7 @@ export const unboundIdentifierCheck: SteerCheck = {
       if (env.vocabulary.accepts(s.parts)) return;
       if (env.globals?.has(last)) return;
       if (env.generated?.(last)) return;
+      if (s.parts.length === 1 && env.fileHelpers?.has(last)) return;
       const k = seen.get(name) ?? 0;
       seen.set(name, k + 1);
       const line = body.text.slice(0, s.start).split('\n').length;
