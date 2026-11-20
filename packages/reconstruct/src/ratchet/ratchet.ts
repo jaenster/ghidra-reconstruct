@@ -177,11 +177,23 @@ function sameNames(a: string[] | undefined, b: string[]): boolean {
   return !!a && a.length === b.length && a.every((x, k) => x === b[k]);
 }
 
+/**
+ * The stored parameter names with a variadic signature's `...` last. A record captured while
+ * the body scanner left `...` out of its names has it in its types alone; without it the
+ * stored list is one shorter than its types and than the fresh names.
+ */
+export function storedParams(stored: StoredBody): string[] {
+  const types = storedSignature(stored).paramTypes;
+  const variadic = types !== undefined && types.length === stored.params.length + 1 && types[types.length - 1] === '...';
+  return variadic && stored.params[stored.params.length - 1] !== '...' ? [...stored.params, '...'] : stored.params;
+}
+
 /** Where each stored parameter is in the current signature (params.ts). */
 function paramsNow(stored: StoredBody, freshParams: string[], index: SymbolIndex): ParamMatch {
   const info = index.fnByAddr.get(stored.address);
   const storage = info?.storage && sameNames(info.params, freshParams) ? info.storage : undefined;
-  return matchParams(paramIds(stored.params, stored.paramStorage), paramIds(freshParams, storage));
+  const params = storedParams(stored);
+  return matchParams(paramIds(params, params === stored.params ? stored.paramStorage : undefined), paramIds(freshParams, storage));
 }
 
 /**

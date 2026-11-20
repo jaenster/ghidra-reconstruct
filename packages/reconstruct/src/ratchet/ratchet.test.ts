@@ -6,7 +6,7 @@ import * as path from 'node:path';
 
 import { advance, readAudit } from './advance.js';
 import { followHandFile } from './follow.js';
-import { applyRecords, capture, type ApplyRow } from './ratchet.js';
+import { applyRecords, capture, storedParams, type ApplyRow } from './ratchet.js';
 import { previousTree } from './previous.js';
 import { RatchetStore, type RatchetRecord } from './store.js';
 import { GLOBALS_INDEX_FILE, SymbolIndex, memoryTree } from './symbol-index.js';
@@ -592,5 +592,139 @@ int __fastcall Reset(Unit * pUnit) {
       const out = applyRecords(tree(header('SeqB'), unit('pUnit->dwType = 3;', ' + 0')), [record(tree(header('SeqA'), unit(store)), '00401100')]);
       assert.strictEqual(row(out.rows, '00401100').status, 'unresolved', row(out.rows, '00401100').detail);
     });
+  });
+});
+
+describe('ratchet: a variadic hand pin', () => {
+  const ERR_H = `#pragma once
+namespace Fog::Src::ErrorManager {
+void __cdecl OutputDebugStringSimple(const char * szText, ...); // 1.14d: 004081a0
+void __cdecl OutputDebugStringIfCapsLock(const char * szText, ...); // 1.14d: 00408220
+}
+`;
+  // The bodies of issues #707 and #708, as pinned.
+  const HAND_707 = `{
+    va_list __va;
+    va_start(__va, szText);
+    char szBuffer[4096];
+    szBuffer[0] = '\\0';
+    const size_t nSize = strlen(szBuffer);
+    vsnprintf(szBuffer + nSize, sizeof(szBuffer) - nSize, szText, __va);
+    szBuffer[0xfff] = '\\0';
+    OutputDebugStringA(szBuffer);
+    va_end(__va);
+}`;
+  const HAND_708 = `{
+    va_list __va;
+    va_start(__va, szText);
+    char szBuffer[4096];
+    uint16_t wKeyState = GetAsyncKeyState(0x14);
+    if (wKeyState & 1) {
+      szBuffer[0] = '\\0';
+      const size_t nSize = strlen(szBuffer);
+      vsnprintf(szBuffer + nSize, sizeof(szBuffer) - nSize, szText, __va);
+      szBuffer[0xfff] = '\\0';
+      OutputDebugStringA(szBuffer);
+    }
+    va_end(__va);
+}`;
+  const GENERATED = (extra: string) => `{
+    char szBuffer[4096];
+    va_list args;
+    va_start(args, szText);
+    szBuffer[0] = '\\0';
+    vsnprintf(szBuffer, 0x1000, szText, args)${extra};
+    OutputDebugStringA(szBuffer);
+}`;
+  const errTree = (b707: string, b708: string, param = 'szText', type = 'const char *') => SymbolIndex.build(memoryTree(new Map([
+    ['Source/Fog/Src/ErrorManager.h', ERR_H.split('const char * szText').join(`${type} ${param}`)],
+    ['Source/Fog/Src/ErrorManager.cpp', `#include "ErrorManager.h"
+namespace Fog::Src::ErrorManager {
+
+// 1.14d: 004081a0
+void __cdecl OutputDebugStringSimple(${type} ${param}, ...)
+${b707.split('szText').join(param)}
+
+// 1.14d: 00408220
+void __cdecl OutputDebugStringIfCapsLock(${type} ${param}, ...)
+${b708.split('szText').join(param)}
+
+} // namespace Fog::Src::ErrorManager
+`],
+  ])));
+  const pin = (ix: SymbolIndex, a: string): RatchetRecord => {
+    const c = capture(ix, a, 'pin', 'ev0', { hand: true });
+    assert.ok(c.record, c.error);
+    return c.record!;
+  };
+
+  it('leaves a fixed-arity record as it was', () => {
+    const old = tree(HEADER_V1, UNIT_V1, GLOBALS);
+    const rec = pin(old, '00401100');
+    assert.deepStrictEqual(rec.members[0].params, ['pUnit', 'nXp']);
+    assert.strictEqual(storedParams(rec.members[0]), rec.members[0].params);
+    const now = tree(HEADER_V1, UNIT_V1.replace('gnTotal + nXp', 'gnTotal + (nXp)'), GLOBALS);
+    const out = applyRecords(now, [rec]);
+    assert.strictEqual(row(out.rows, '00401100').status, 'pinned', row(out.rows, '00401100').detail);
+  });
+
+  it('stores `...` as a parameter name beside its type', () => {
+    const rec = pin(errTree(HAND_707, HAND_708), '004081a0');
+    assert.strictEqual(rec.owner, 'hand');
+    assert.deepStrictEqual(rec.members[0].params, ['szText', '...']);
+    assert.deepStrictEqual(rec.members[0].paramTypes, ['const char *', '...']);
+  });
+
+  it('re-spells both pins over a regenerated body', () => {
+    const recs = [pin(errTree(HAND_707, HAND_708), '004081a0'), pin(errTree(HAND_707, HAND_708), '00408220')];
+    const now = errTree(GENERATED(''), GENERATED(' + 0'));
+    const out = applyRecords(now, recs);
+    for (const a of ['004081a0', '00408220']) assert.strictEqual(row(out.rows, a).status, 'pinned', row(out.rows, a).detail);
+    assert.ok(body(now, out, '00408220').includes('GetAsyncKeyState(0x14)'));
+    assert.ok(!out.changed.get('Source/Fog/Src/ErrorManager.cpp')!.includes('#if 0'));
+  });
+
+  it('follows a renamed fixed parameter', () => {
+    const rec = pin(errTree(HAND_707, HAND_708), '004081a0');
+    const now = errTree(GENERATED(''), GENERATED(''), 'szFormat');
+    const out = applyRecords(now, [rec]);
+    assert.strictEqual(row(out.rows, '004081a0').status, 'pinned', row(out.rows, '004081a0').detail);
+    const kept = body(now, out, '004081a0');
+    assert.ok(kept.includes('va_start(__va, szFormat);') && kept.includes('szFormat, __va);'), kept);
+  });
+
+  it('keeps a record captured with `...` in its types alone', () => {
+    const rec = pin(errTree(HAND_707, HAND_708), '004081a0');
+    rec.members[0].params = ['szText'];
+    const out = applyRecords(errTree(GENERATED(''), GENERATED('')), [rec]);
+    assert.strictEqual(row(out.rows, '004081a0').status, 'pinned', row(out.rows, '004081a0').detail);
+  });
+
+  it('still reports a retyped fixed parameter', () => {
+    const rec = pin(errTree(HAND_707, HAND_708), '004081a0');
+    const out = applyRecords(errTree(GENERATED(''), GENERATED(''), 'szText', 'char *'), [rec]);
+    assert.strictEqual(row(out.rows, '004081a0').status, 'unresolved');
+    assert.match(row(out.rows, '004081a0').detail, /parameter 0 retyped: const char \* -> char \*/u);
+  });
+
+  it('reports a variadic function that lost its `...`', () => {
+    const rec = pin(errTree(HAND_707, HAND_708), '004081a0');
+    const fixed = SymbolIndex.build(memoryTree(new Map([
+      ['Source/Fog/Src/ErrorManager.h', ERR_H.split(', ...').join('')],
+      ['Source/Fog/Src/ErrorManager.cpp', `#include "ErrorManager.h"
+namespace Fog::Src::ErrorManager {
+
+// 1.14d: 004081a0
+void __cdecl OutputDebugStringSimple(const char * szText)
+{
+    OutputDebugStringA(szText);
+}
+
+} // namespace Fog::Src::ErrorManager
+`],
+    ])));
+    const out = applyRecords(fixed, [rec]);
+    assert.strictEqual(row(out.rows, '004081a0').status, 'unresolved');
+    assert.match(row(out.rows, '004081a0').detail, /arity changed: 2 -> 1/u);
   });
 });

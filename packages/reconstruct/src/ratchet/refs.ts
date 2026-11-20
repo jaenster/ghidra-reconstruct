@@ -200,6 +200,8 @@ export function scanSites(text: string): SiteScan | undefined {
   const fn = findFn(tu.declarations as AnyNode[]);
   if (!fn) return undefined;
   const params: string[] = (fn.parameters as AnyNode[]).map(p => p.name?.name ?? '');
+  // A variadic function lists `...` last, as the signature index does (scan.ts).
+  if (fn.isVariadic) params.push('...');
   const paramTypes = new Map<string, TypeRef | undefined>();
   for (const p of fn.parameters as AnyNode[]) if (p.name) paramTypes.set(p.name.name, typeRefOfNode(p.type));
   const bodyStart = (fn.body as AnyNode).location.start.offset;
