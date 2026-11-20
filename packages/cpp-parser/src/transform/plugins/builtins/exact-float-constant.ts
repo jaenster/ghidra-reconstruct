@@ -24,6 +24,12 @@
  *    decompiler folded in, and is kept as printed);
  *  - exactly one distinct constant value qualifies. Two would be a guess.
  *
+ * The x87 load constants (FLD1, FLDZ, FLDPI, FLDL2T, FLDL2E, FLDLG2, FLDLN2) read
+ * no memory, so they never appear among the referenced constants. They count as
+ * exact all the same: `DRAW_BuildHSLTransformTables` (00605f00) stores FLD1 at
+ * 00606230 and 0060673f, printed `1.0`, beside the 1.2f divisor at 006e5ee8, which
+ * rounds to one digit as 1 - without this, 1.0 became 1.2000000476837158.
+ *
  * Without a referenced float constant there is nothing to respell from, and
  * nothing changes.
  */
@@ -55,12 +61,23 @@ export function exactDecimal(v: number): string {
   return /^-?\d+$/.test(s) ? `${s}.0` : s;
 }
 
+/** The values x87 loads without a memory operand: never a rounding of anything. */
+export const X87_LOAD_CONSTANTS: readonly number[] = [
+  0, // FLDZ
+  1, // FLD1
+  Math.PI, // FLDPI
+  Math.log2(10), // FLDL2T
+  Math.LOG2E, // FLDL2E
+  Math.log10(2), // FLDLG2
+  Math.LN2, // FLDLN2
+];
+
 export function createExactFloatConstantTransformer(options?: PluginOptions): Transformer {
   const o = (options ?? {}) as ExactFloatConstantOptions;
   const constants = (o.constants ?? []).filter(c => Number.isFinite(c.value));
   if (constants.length === 0) return (n: ASTNode) => n;
   const magnitudes = constants.map(c => ({ name: c.name, value: Math.abs(c.value) }));
-  const exact = new Set(magnitudes.map(c => c.value));
+  const exact = new Set([...magnitudes.map(c => c.value), ...X87_LOAD_CONSTANTS]);
 
   function respell(lit: FloatingLiteralExpr): FloatingLiteralExpr | undefined {
     const L = Math.abs(lit.value);
