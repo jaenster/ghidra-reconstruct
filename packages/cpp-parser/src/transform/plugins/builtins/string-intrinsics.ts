@@ -347,6 +347,21 @@ function derefOf(e: Expression): Expression | null {
   return null;
 }
 
+/**
+ * `p[k]` with a constant k: the address k bytes past p, provided p steps by bytes (the
+ * address of `p + k` is k past p's). Null for anything else.
+ */
+function byteSubscript(e: Expression, env: Map<string, Addr>, addr: ReturnType<typeof makeAddress>): Addr | null {
+  const x = stripByteCast(e);
+  if (x.kind !== NodeKind.SubscriptExpr) return null;
+  const s = x as SubscriptExpr;
+  const k = literalOf(s.index);
+  if (k === null) return null;
+  const base = addr.valueWith(env, s.array);
+  const at = addr.valueWith(env, Expr.binary(s.array, '+', Expr.intLiteral(k)));
+  return base && at && constDiff(at, base) === k ? at : null;
+}
+
 interface Scan {
   /** The pointer variable the loop advances. */
   ptr: string;
@@ -400,6 +415,9 @@ function scanShape(st: Statement, addr: ReturnType<typeof makeAddress>): Scan | 
     if (tName && reads.has(tName)) tested = reads.get(tName)!;
     const tPtr = derefOf(test);
     if (!tested && tPtr) tested = addr.valueWith(env, tPtr);
+    // `t[1]`: the end scan testing through the temporary one behind P (PALETTE_LoadFromFile
+    // 006009c0, `do { t = P; P = t + 1; } while (t[1] != '\0')`).
+    if (!tested) tested = byteSubscript(test, env, addr);
     if (!tested) continue;
     const d = constDiff(tested, pStart);
     if (d !== 0n && d !== 1n) continue;
@@ -734,6 +752,29 @@ function hasCall(x: unknown): boolean {
   return false;
 }
 
+/**
+ * `builtin_strncpy(p, "lit", n);` is Ghidra's n-byte store of a constant (a global typed
+ * `char[n]` copied by dword and byte moves), not a call: pseudo-op-lower writes it as
+ * memcpy later. Its bytes are the literal's first n, the NUL being byte strlen("lit").
+ * Null for anything else, and for an n the literal cannot give (that one is reported by
+ * the lowering).
+ */
+function literalStoreCall(st: Statement): { dst: Expression; bytes: bigint[] } | null {
+  if (st.kind !== NodeKind.ExprStmt) return null;
+  const call = unwrapParens((st as ExprStmt).expression) as unknown as { kind: NodeKind; callee: Expression; arguments: Expression[] };
+  if (call.kind !== NodeKind.CallExpr || identName(call.callee) !== 'builtin_strncpy' || call.arguments.length !== 3) return null;
+  const [dst, src, count] = call.arguments.map(unwrapParens);
+  if (src.kind !== NodeKind.StringLiteral || count.kind !== NodeKind.IntegerLiteral || hasCall(dst)) return null;
+  const lit = src as unknown as { value: string; prefix?: string };
+  if (lit.prefix) return null;
+  const text = [...lit.value].map(ch => BigInt(ch.charCodeAt(0)));
+  if (text.some(b => b > 0xffn)) return null;
+  const n = (count as unknown as { value: bigint | number }).value;
+  const all = [...text, 0n];
+  if (BigInt(n) < 1n || BigInt(n) > BigInt(all.length)) return null;
+  return { dst, bytes: all.slice(0, Number(n)) };
+}
+
 type Event =
   | { kind: 'scan'; index: number; scan: Scan; start: Addr }
   | { kind: 'copy'; index: number; copy: Copy; dst: Addr; src: Addr; length: Addr; env: Map<string, Addr> }
@@ -751,6 +792,16 @@ function tryAt(list: Statement[], i: number, body: Statement[], deps: StringIntr
   const events: Event[] = [];
   for (let j = i; j < list.length && j < i + 16; j++) {
     const st = list[j];
+    // A constant stored by builtin_strncpy (`strcat(path, ".dat")` once the global holding
+    // ".dat" is typed char[5], PALETTE_LoadFromFile 006009c0): the same store event as the
+    // dword and byte stores of an untyped one.
+    const stored = literalStoreCall(st);
+    if (stored) {
+      const at = addr.value(stored.dst);
+      if (!at) break;
+      events.push({ kind: 'store', index: j, at, bytes: stored.bytes });
+      continue;
+    }
     if (!isPlainStmt(st) || hasCall(st)) break;
     const sc = scanShape(st, addr);
     if (sc) {
